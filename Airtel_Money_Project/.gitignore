@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb_checkpoints/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (uncomment if you don't want to track data)
+# *.xlsx
+# *.csv
+# *.xls
+
+# Exclude other project files (keep only Airtel Money project)
+fottball_analysis.ipynb
+international_matches.csv
+Finance_data.csv
+Original_data.csv
+
+# Plots directory (optional - uncomment if you don't want to track plots)
+# plots/
+
+# Temporary files
+*.tmp
+*.log
+
+
