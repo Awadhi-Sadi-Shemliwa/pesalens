@@ -1,0 +1,262 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Fraunces:wght@600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* PesaLens design tokens — mirrors mobile spec §4.2 */
+@layer base {
+  :root {
+    /* Dark theme (default) */
+    --background: 225 16% 5%;
+    --foreground: 0 0% 100%;
+
+    --deep: 225 16% 5%;            /* #08090C */
+    --surface-1: 225 17% 7%;       /* #0E1015 */
+    --surface-2: 224 16% 10%;      /* #13161D */
+    --surface-3: 222 17% 13%;      /* #181C25 */
+    --surface-4: 222 19% 16%;      /* #1F242E */
+    --surface-5: 222 19% 19%;      /* #262C38 */
+
+    --card: 224 16% 10%;
+    --card-foreground: 0 0% 100%;
+    --popover: 222 17% 13%;
+    --popover-foreground: 0 0% 100%;
+
+    --primary: 230 89% 63%;        /* accent #4C6EF5 */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 222 19% 16%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 222 17% 13%;
+    --muted-foreground: 220 9% 59%; /* txt-3 */
+
+    --accent: 230 89% 63%;
+    --accent-foreground: 0 0% 100%;
+
+    --inc: 152 62% 44%;            /* #2BB673 */
+    --exp: 33 91% 56%;             /* #F4A12C */
+    --dng: 358 76% 59%;            /* #E5484D */
+    --net: 234 100% 68%;           /* #5C6CFF */
+
+    --txt-1: 0 0% 100%;
+    --txt-2: 220 12% 81%;
+    --txt-3: 220 9% 59%;
+    --txt-4: 220 11% 40%;
+
+    --destructive: 358 76% 59%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 226 13% 14%;         /* #1F2128 */
+    --input: 222 19% 16%;
+    --ring: 230 89% 63%;
+
+    --radius: 1rem;
+
+    --shadow-soft: 0 2px 8px 0 hsl(0 0% 0% / 0.4);
+    --shadow-lift: 0 6px 18px 0 hsl(0 0% 0% / 0.5);
+    --gradient-accent: linear-gradient(135deg, hsl(230 89% 63%), hsl(234 100% 68%));
+    --gradient-inc: linear-gradient(135deg, hsl(152 62% 44%), hsl(160 70% 38%));
+    --gradient-surface: linear-gradient(180deg, hsl(224 16% 10%), hsl(225 17% 7%));
+
+    --tracking-ticker: 0.18em;
+
+    --sidebar-background: 225 17% 7%;
+    --sidebar-foreground: 220 12% 81%;
+    --sidebar-primary: 230 89% 63%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 222 17% 13%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 226 13% 14%;
+    --sidebar-ring: 230 89% 63%;
+  }
+
+  .light {
+    --background: 240 14% 98%;
+    --foreground: 225 22% 5%;
+    --deep: 240 14% 98%;
+    --surface-1: 0 0% 100%;
+    --surface-2: 228 18% 96%;
+    --surface-3: 225 16% 93%;
+    --surface-4: 225 16% 90%;
+    --surface-5: 225 16% 86%;
+    --card: 0 0% 100%;
+    --card-foreground: 225 22% 5%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 225 22% 5%;
+    --primary: 226 70% 54%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 228 18% 96%;
+    --secondary-foreground: 225 22% 5%;
+    --muted: 228 18% 96%;
+    --muted-foreground: 222 7% 45%;
+    --accent: 226 70% 54%;
+    --accent-foreground: 0 0% 100%;
+    --inc: 147 74% 31%;
+    --exp: 36 100% 35%;
+    --dng: 359 60% 49%;
+    --net: 232 67% 54%;
+    --txt-1: 225 22% 5%;
+    --txt-2: 222 13% 26%;
+    --txt-3: 222 7% 45%;
+    --txt-4: 218 11% 60%;
+    --destructive: 359 60% 49%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 224 17% 90%;
+    --input: 224 17% 90%;
+    --ring: 226 70% 54%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  html, body, #root { @apply bg-background text-foreground; height: 100%; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* Lock body scroll so only <main> scrolls — keeps the bottom nav
+       pinned to the viewport and the header below the status bar. */
+    overscroll-behavior-y: none;
+  }
+  /* Capacitor exposes the OS status-bar / home-indicator size via these
+     variables. We default them to 0 for desktop browsers. */
+  :root {
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    /* Chase/iOS inspired design tokens */
+    --radius-xl: 1.25rem;
+    --radius-2xl: 1.5rem;
+    --radius-3xl: 2rem;
+    --blur-header: 20px;
+    --blur-nav: 30px;
+  }
+}
+
+@layer components {
+  .font-mono-tab { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .font-serif-display { font-family: 'Fraunces', serif; }
+
+  /* Eyebrow — small uppercase label (iOS HIG style) */
+  .eyebrow {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: hsl(var(--txt-3));
+  }
+
+  /* Chase/iOS Card — larger radius, subtle border, no harsh shadow */
+  .card-soft {
+    background: hsl(var(--surface-2));
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius-2xl);
+    box-shadow: 0 1px 3px hsl(0 0% 0% / 0.08), 0 1px 2px -1px hsl(0 0% 0% / 0.08);
+  }
+  .dark .card-soft {
+    box-shadow: 0 1px 3px hsl(0 0% 0% / 0.3), 0 1px 2px -1px hsl(0 0% 0% / 0.2);
+  }
+
+  /* Inset surfaces — used for grouped settings or inner cards */
+  .surface-inset {
+    background: hsl(var(--surface-3));
+    border-radius: var(--radius-xl);
+  }
+
+  /* iOS-style hairline separator */
+  .hairline { background: hsl(var(--border)); height: 0.5px; width: 100%; }
+
+  .tabular { font-variant-numeric: tabular-nums; }
+  .scroll-hide::-webkit-scrollbar { display: none; }
+  .scroll-hide { -ms-overflow-style: none; scrollbar-width: none; }
+  .pt-safe { padding-top: var(--safe-top); }
+  .pb-safe { padding-bottom: var(--safe-bottom); }
+  .h-shell { height: 100vh; height: 100dvh; }
+
+  /* iOS/Chase-style Header */
+  .ios-header {
+    padding-top: max(12px, var(--safe-top));
+    padding-bottom: 12px;
+    background: hsl(var(--surface-1) / 0.85);
+    backdrop-filter: blur(var(--blur-header));
+    -webkit-backdrop-filter: blur(var(--blur-header));
+    border-bottom: 0.5px solid hsl(var(--border));
+  }
+
+  /* iOS/Chase-style Tab Bar */
+  .ios-tabbar {
+    padding-bottom: max(8px, var(--safe-bottom));
+    background: hsl(var(--surface-1) / 0.92);
+    backdrop-filter: blur(var(--blur-nav));
+    -webkit-backdrop-filter: blur(var(--blur-nav));
+    border-top: 0.5px solid hsl(var(--border));
+  }
+
+  /* Large title (iOS style) */
+  .ios-large-title {
+    font-size: 34px;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    color: hsl(var(--foreground));
+  }
+
+  /* Section header (iOS style) */
+  .ios-section-header {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: hsl(var(--txt-3));
+    padding: 0 20px;
+    margin-bottom: 8px;
+    margin-top: 24px;
+  }
+
+  /* iOS-style grouped card list */
+  .ios-group {
+    background: hsl(var(--surface-2));
+    border-radius: var(--radius-2xl);
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+  }
+  .ios-group-item {
+    padding: 14px 16px;
+    border-bottom: 0.5px solid hsl(var(--border));
+  }
+  .ios-group-item:last-child {
+    border-bottom: none;
+  }
+
+  /* Chase-style balance display */
+  .chase-balance {
+    font-size: 48px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Subtle press feedback (iOS feel) */
+  .ios-press {
+    transition: transform 0.15s ease, opacity 0.15s ease;
+  }
+  .ios-press:active {
+    transform: scale(0.98);
+    opacity: 0.85;
+  }
+}
+
+@keyframes ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.animate-ticker { animation: ticker 40s linear infinite; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Production network policy:
+    • All traffic must be HTTPS to api.pesalens.com / pesalens.com.
+    • No user-installed CAs are trusted (defeats casual MITM via a rogue
+      profile).
+    • Cleartext is allowed only on debug builds and only for RFC1918 LAN
+      ranges, so a developer can point at a laptop on the same Wi-Fi.
+
+  Pin pesalens.com to its public-key SHA-256. Replace the placeholder
+  `pin-set` entries with real pins before shipping:
+      openssl s_client -connect api.pesalens.com:443 -servername api.pesalens.com \
+        | openssl x509 -pubkey -noout \
+        | openssl pkey -pubin -outform DER \
+        | openssl dgst -sha256 -binary | openssl enc -base64
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">pesalens.com</domain>
+        <pin-set expiration="2027-01-01">
+            <!-- TODO: replace before launch with real pin + at least one backup pin -->
+            <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
+            <pin digest="SHA-256">BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=</pin>
+        </pin-set>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+</network-security-config>

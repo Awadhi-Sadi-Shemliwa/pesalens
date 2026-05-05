@@ -1,0 +1,7 @@
+storage/uploads/
+storage/results/
+storage/debug/
+.env
+__pycache__/
+*.pyc
+.venv/
