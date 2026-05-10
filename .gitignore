@@ -60,3 +60,18 @@ coverage/
 # --- Local samples (may contain real bank PDFs) ---
 samples pdf/
 mineru/
+
+# --- Internal docs / agent scratch (kept local, not committed) ---
+# Markdown docs are project notes, not part of the shipped app. Keep
+# only the root README so GitHub's repo page still has a description.
+*.md
+# Leading slash anchors this exception to the repo root, so subdirectory
+# READMEs (e.g. Airtel_Money_Project/README.md) stay ignored.
+!/README.md
+# Test statements + any other ad-hoc PDFs sitting in the working tree.
+*.pdf
+# Claude Code's local agent state and any "skills" scratch directories.
+.claude/
+**/.claude/
+skills/
+**/skills/
