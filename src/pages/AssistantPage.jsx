@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
 import { Badge, Eyebrow } from '../components/common';
+import { Markdown } from '../components/Markdown';
 import { fetchDashboardSummary, sendAssistantMessage, fmtTZS } from '../data/api';
 import { useT } from '../data/i18n';
 
@@ -80,14 +81,16 @@ const AssistantPage = () => {
           <div className="flex-1 overflow-auto p-3 sm:p-6 space-y-4">
             {messages.map((message, index) => (
               <div key={index} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-3 sm:px-4 py-2.5 sm:py-3 text-sm leading-relaxed whitespace-pre-wrap break-words ${message.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai'}`}>
+                <div className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-3 sm:px-4 py-2.5 sm:py-3 text-sm leading-relaxed break-words ${message.role === 'user' ? 'chat-bubble-user whitespace-pre-wrap' : 'chat-bubble-ai'}`}>
                   {message.role === 'ai' && (
                     <div className="flex items-center gap-2 mb-2">
                       <Icon name="aperture" size={12} className="text-accent" />
                       <span className="text-[11px] font-mono uppercase tracking-ticker text-accent">pesalens</span>
                     </div>
                   )}
-                  {message.text}
+                  {message.role === 'ai'
+                    ? <Markdown text={message.text} />
+                    : message.text}
                 </div>
               </div>
             ))}

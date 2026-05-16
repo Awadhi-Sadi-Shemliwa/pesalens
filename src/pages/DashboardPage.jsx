@@ -4,6 +4,7 @@ import { Icon } from '../components/Icon';
 import { KpiCard, EmptyState, Eyebrow, Sparkline, CountUp, Segmented } from '../components/common';
 import { ChartJS } from '../components/ChartJS';
 import ActionPlan from '../components/ActionPlan';
+import SignOutConfirm from '../components/SignOutConfirm';
 import { fetchDashboardSummary, uploadStatement, fmtTZS, fmtTZSFull } from '../data/api';
 import { useT, AutoT } from '../data/i18n';
 
@@ -160,6 +161,7 @@ const DashboardPage = () => {
             {t('common.loading')} {t('nav.dashboard').toLowerCase()}
           </div>
         </div>
+        <SignOutConfirm />
       </AppShell>
     );
   }
@@ -193,6 +195,7 @@ const DashboardPage = () => {
             desc={t('dash.empty.desc')}
           />
         </div>
+        <SignOutConfirm />
       </AppShell>
     );
   }
@@ -512,6 +515,7 @@ const DashboardPage = () => {
           </div>
         </div>
       </div>
+      <SignOutConfirm />
     </AppShell>
   );
 };

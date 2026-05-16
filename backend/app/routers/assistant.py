@@ -27,16 +27,24 @@ ASSISTANT_DISCLAIMER = (
 log = get_logger(__name__)
 router = APIRouter(tags=["assistant"])
 
-# Free models to try in order if the configured primary fails.
-# OpenRouter regularly retires free models (the older `minimax/...:free`
-# slug returns 404), so we keep a list of currently-shipping free
-# alternatives. The first one to respond wins.
+# Free models to try in order if the configured primary fails. OpenRouter
+# retires free model slugs aggressively (the older minimax/m2, gemma-2-9b,
+# and qwen-2.5-7b slugs all 404'd in May 2026), so this list mixes deepseek,
+# llama, qwen, mistral, and z-ai families — if any one provider is throttled
+# or pulled, another usually answers. The first one to return wins.
 FALLBACK_MODELS = [
-    "minimax/minimax-m2:free",
+    "deepseek/deepseek-chat-v3.1:free",
+    "deepseek/deepseek-r1-0528:free",
+    "tngtech/deepseek-r1t-chimera:free",
+    "z-ai/glm-4.5-air:free",
+    "moonshotai/kimi-k2:free",
+    "qwen/qwen3-235b-a22b:free",
+    "mistralai/mistral-small-3.2-24b-instruct:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "meta-llama/llama-3.2-3b-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "qwen/qwen-2.5-7b-instruct:free",
+    "google/gemini-2.0-flash-exp:free",
+    "nvidia/llama-3.1-nemotron-70b-instruct:free",
+    "openai/gpt-oss-20b:free",
 ]
 PER_MODEL_TIMEOUT = 20.0
 
@@ -82,13 +90,24 @@ SYSTEM_PROMPT = (
 )
 
 
-def _fallback_reply(message: str, context: Optional[str], stats: Optional[dict] = None) -> str:
+def _fallback_reply(
+    message: str,
+    context: Optional[str],
+    stats: Optional[dict] = None,
+    *,
+    throttled: bool = False,
+) -> str:
     """Lightweight reply when no AI provider is reachable.
 
     The previous version dumped the raw context block, which could
     surface "Period: None to None" — users read that as "No Period
     Detected". We now render a friendly summary using `stats` (period
     cadence, totals, top categories) computed from the same context.
+
+    `throttled=True` means the keys are configured but every model in the
+    chain returned 429/404 (free-tier exhausted, slug retired, etc.) — we
+    surface a "temporarily throttled" footer instead of telling the user
+    to set a key they already set.
     """
     if not context:
         return (
@@ -96,6 +115,15 @@ def _fallback_reply(message: str, context: Optional[str], stats: Optional[dict] 
             "statement PDF on the Dashboard so I can answer questions "
             "about your spending."
         )
+
+    footer = (
+        "\n\n_PesaLens AI is temporarily rate-limited by the upstream "
+        "free-tier providers. Try again in a minute — the answer above "
+        "is computed locally from your statement._"
+        if throttled else
+        "\n\n_PesaLens AI is offline — set GEMINI_API_KEY or "
+        "OPENROUTER_API_KEY in the backend .env to unlock free-form answers._"
+    )
 
     s = stats or {}
     period_label = s.get("period_label") or "Unknown period"
@@ -110,8 +138,8 @@ def _fallback_reply(message: str, context: Optional[str], stats: Optional[dict] 
             return (
                 f"Your biggest single transfer on this statement was "
                 f"TZS {big['amount']:,.0f} on {big['date']} — "
-                f"\"{big['description']}\".\n\n"
-                f"(Offline mode — connect an AI key for follow-ups.)"
+                f"\"{big['description']}\"."
+                + footer
             )
     if "fee" in msg_lower or "charge" in msg_lower:
         fees = s.get("fees_total")
@@ -121,32 +149,28 @@ def _fallback_reply(message: str, context: Optional[str], stats: Optional[dict] 
                 f"{cadence}), I count TZS {fees:,.0f} in fees and "
                 f"charges. That's roughly "
                 f"{(fees / max(s.get('debits', 1), 1) * 100):.1f}% of "
-                f"every shilling that left your account.\n\n"
-                f"(Offline mode — connect an AI key for personalised "
-                f"answers.)"
+                f"every shilling that left your account."
+                + footer
             )
     if "transport" in msg_lower or "spend" in msg_lower or "category" in msg_lower:
         cats = s.get("top_categories") or []
         if cats:
             lines = "\n".join(
-                f"• {c['name']}: TZS {c['value']:,.0f}" for c in cats[:5]
+                f"- {c['name']}: TZS {c['value']:,.0f}" for c in cats[:5]
             )
             return (
                 f"Top spending categories for {period_label}:\n\n{lines}"
-                f"\n\n(Offline mode — connect an AI key for personalised "
-                f"answers.)"
+                + footer
             )
 
     # Generic summary — always shows the period instead of "No period".
     return (
-        f"Quick summary for {period_label} (cadence: {cadence}):\n"
-        f"• Money in: TZS {s.get('credits', 0):,.0f}\n"
-        f"• Money out: TZS {s.get('debits', 0):,.0f}\n"
-        f"• Net flow: TZS {s.get('net', 0):,.0f}\n"
-        f"• Transactions: {s.get('txn_count', 0)}\n\n"
-        f"AI chat is running offline — set GEMINI_API_KEY or "
-        f"OPENROUTER_API_KEY in the backend .env to unlock free-form "
-        f"answers."
+        f"Quick summary for {period_label} (cadence: {cadence}):\n\n"
+        f"- Money in: TZS {s.get('credits', 0):,.0f}\n"
+        f"- Money out: TZS {s.get('debits', 0):,.0f}\n"
+        f"- Net flow: TZS {s.get('net', 0):,.0f}\n"
+        f"- Transactions: {s.get('txn_count', 0)}"
+        + footer
     )
 
 
@@ -309,12 +333,19 @@ def chat(
             data={"reply": _fallback_reply(payload.message, context, stats) + ASSISTANT_DISCLAIMER},
         )
 
-    # Try Gemini first, then OpenRouter with auto-fallback
-    reply = _try_gemini(system, payload)
+    # OpenRouter drives PesaLens AI chat (more reliable for free-form text);
+    # Gemini is reserved for vision/receipt OCR. Fall back to Gemini only if
+    # every OpenRouter model is exhausted, then to the offline summary.
+    reply = _try_openrouter(system, payload)
     if not reply:
-        reply = _try_openrouter(system, payload)
+        reply = _try_gemini(system, payload)
     if not reply:
-        reply = _fallback_reply(payload.message, context, stats)
+        # Both providers were configured but every attempt failed (free-tier
+        # quota / retired slugs / transient 5xx). Tell the user it's a
+        # temporary throttle, not a missing key.
+        reply = _fallback_reply(
+            payload.message, context, stats, throttled=True,
+        )
 
     return APIResponse(success=True, message="ok",
                        data={"reply": reply + ASSISTANT_DISCLAIMER})

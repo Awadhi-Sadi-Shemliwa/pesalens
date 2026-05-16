@@ -14,6 +14,12 @@ from app.rate_limit import limiter
 from app.schemas.response import APIResponse
 from app.services.pipeline import run_extraction_pipeline
 from app.utils.logger import get_logger
+from app.utils.pdf_unlock import (
+    PdfPasswordIrrecoverable,
+    PdfUnlockUnsupported,
+    is_encrypted,
+    unlock_pdf,
+)
 from app.utils.storage import (
     delete_upload,
     is_pdf,
@@ -34,7 +40,17 @@ async def upload_statement(
     user: User = Depends(require_active_plan),
     db: Session = Depends(get_db),
 ):
-    """Upload a bank statement PDF for extraction (per-authenticated-user)."""
+    """Upload a bank statement PDF for extraction (per-authenticated-user).
+
+    Password-protected PDFs (e.g. CRDB / NMB monthly statements whose
+    open-password is the last 6 digits of the account number) are
+    unlocked transparently in the background — the user never has to
+    type the password. We try a tiny common-password list first, then
+    sweep the 6-digit numeric keyspace across every CPU core. Once
+    recovered, we save the unencrypted PDF in place and feed it to the
+    extraction pipeline like any other upload. The password is never
+    persisted or logged.
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="filename missing")
 
@@ -50,6 +66,32 @@ async def upload_statement(
     if not is_pdf(content):
         # Magic-byte check — extension alone is trivial to spoof.
         raise HTTPException(status_code=400, detail="File is not a valid PDF")
+
+    if is_encrypted(content):
+        try:
+            unlock_started = time.time()
+            content = await run_in_threadpool(unlock_pdf, content)
+            log.info(
+                "Unlocked encrypted PDF from user=%s in %.2fs (%s, %d bytes)",
+                user.id, time.time() - unlock_started, file.filename, len(content),
+            )
+        except PdfPasswordIrrecoverable as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "pdf_unlock_failed",
+                    "message": str(exc),
+                },
+            ) from exc
+        except PdfUnlockUnsupported as exc:
+            log.warning("Unsupported PDF encryption for user=%s: %s", user.id, exc)
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "pdf_unlock_unsupported",
+                    "message": str(exc),
+                },
+            ) from exc
 
     log.info(
         "Received upload from user=%s: %s (%d bytes)",

@@ -15,14 +15,16 @@ const COMMON_NAV_KEYS = [
 
 const BUSINESS_NAV_KEYS = [
   ...COMMON_NAV_KEYS,
-  { key: '/markets',     icon: 'trending', t: 'nav.markets' },
-  { key: '/bookkeeping', icon: 'book',     t: 'nav.bookkeeping' },
+  { key: '/markets',        icon: 'trending', t: 'nav.markets' },
+  { key: '/bookkeeping',    icon: 'book',     t: 'nav.bookkeeping' },
+  { key: '/reconciliation', icon: 'shield',   t: 'nav.reconcile' },
 ];
 
 const INDIVIDUAL_NAV_KEYS = [
   ...COMMON_NAV_KEYS,
   { key: '/markets',           icon: 'trending', t: 'nav.markets' },
   { key: '/personal-spending', icon: 'wallet',   t: 'nav.personal' },
+  { key: '/reconciliation',    icon: 'shield',   t: 'nav.reconcile' },
 ];
 
 export const getNavItems = (userType) => (userType === 'business' ? BUSINESS_NAV_KEYS : INDIVIDUAL_NAV_KEYS);

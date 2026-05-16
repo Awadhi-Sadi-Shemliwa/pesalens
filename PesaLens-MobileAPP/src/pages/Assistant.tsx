@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Eyebrow } from "@/components/pl/primitives";
+import { Markdown } from "@/components/pl/Markdown";
 import { Send, Sparkles, FileText } from "lucide-react";
 // @ts-ignore — JS modules
 import { fetchDashboardSummary, sendAssistantMessage } from "@/data/api";
@@ -8,19 +9,6 @@ import { fetchDashboardSummary, sendAssistantMessage } from "@/data/api";
 import { useT } from "@/data/i18n";
 
 type Msg = { role: "user" | "ai"; text: string };
-
-const renderText = (text: string) => {
-  // Light markdown — bold + line breaks.
-  const lines = text.split(/\n/);
-  return lines.map((line, li) => (
-    <span key={li}>
-      {line.split("**").map((p, j) =>
-        j % 2 === 1 ? <strong key={j} className="font-mono-tab">{p}</strong> : <span key={j}>{p}</span>
-      )}
-      {li < lines.length - 1 && <br />}
-    </span>
-  ));
-};
 
 const Assistant = () => {
   const { t } = useT();
@@ -104,11 +92,11 @@ const Assistant = () => {
             <div
               className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-[13px] leading-snug ${
                 m.role === "user"
-                  ? "bg-gradient-accent text-white rounded-br-md"
+                  ? "bg-gradient-accent text-white rounded-br-md whitespace-pre-wrap"
                   : "bg-surface-3 text-txt-1 rounded-bl-md border border-border"
               }`}
             >
-              {renderText(m.text)}
+              {m.role === "ai" ? <Markdown text={m.text} /> : m.text}
             </div>
           </div>
         ))}

@@ -158,11 +158,17 @@ def consume_code(db: Session, user_id: int, purpose: str, code: str) -> bool:
 
 # --------------------------- mailer ---------------------------
 
-def send_email(to: str, subject: str, body: str) -> bool:
+def send_email(to: str, subject: str, body: str, reply_to: Optional[str] = None) -> bool:
     """Send transactional email. Falls back to logging when no provider
-    is configured — keeps dev usable without forcing Resend setup."""
+    is configured — keeps dev usable without forcing Resend setup.
+
+    `reply_to` overrides `settings.email_reply_to` for this one send. Used
+    by the manual-payment admin email so the admin can reply directly to
+    the paying user with questions before tapping the confirmation link.
+    """
     if not settings.resend_api_key:
-        log.info("[email:dev-stub] to=%s subject=%s body=%s", to, subject, body)
+        log.info("[email:dev-stub] to=%s reply_to=%s subject=%s body=%s",
+                 to, reply_to or settings.email_reply_to or "—", subject, body)
         return True
     payload = {
         "from": settings.email_from,
@@ -170,8 +176,9 @@ def send_email(to: str, subject: str, body: str) -> bool:
         "subject": subject,
         "text": body,
     }
-    if settings.email_reply_to:
-        payload["reply_to"] = settings.email_reply_to
+    effective_reply_to = reply_to or settings.email_reply_to
+    if effective_reply_to:
+        payload["reply_to"] = effective_reply_to
     try:
         resp = httpx.post(
             "https://api.resend.com/emails",

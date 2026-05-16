@@ -5,6 +5,7 @@ import { Badge, Modal, Eyebrow } from '../components/common';
 import LiveTextScanner from '../components/LiveTextScanner';
 import {
   fetchReceiptPatterns,
+  fetchReceipts,
   scanReceipt,
   fmtTZS,
   fmtTZSFull,
@@ -15,6 +16,39 @@ import {
 import { useT, AutoT } from '../data/i18n';
 
 const PERSONAL_CATEGORIES = ['Groceries', 'Transport', 'Dining', 'Utilities', 'Health', 'Housing', 'Entertainment', 'Other'];
+
+// Backend receipt categories are lowercase — map onto the Title-Case labels
+// the ledger renders so a grocery receipt files under Groceries, not "other".
+const RECEIPT_CATEGORY_MAP = {
+  groceries: 'Groceries',
+  restaurant: 'Dining',
+  utilities: 'Utilities',
+  transport: 'Transport',
+  fuel: 'Transport',
+  stock: 'Other',
+  other: 'Other',
+};
+
+// Fingerprint used to dedup legacy shadow PersonalEntry rows against the
+// receipt they were silently mirrored from (old scan flow, commit 03d0e2e).
+const entryKey = (e) =>
+  [
+    (e.date || '').slice(0, 10),
+    (e.vendor || '').toLowerCase().trim() || (e.category || '').toLowerCase().trim(),
+    Math.round(Number(e.amount) || 0),
+  ].join('|');
+
+const formatLedgerDate = (raw) => {
+  if (!raw) return '—';
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return String(raw);
+  return d.toLocaleDateString(undefined, {
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+    weekday: 'short',
+  });
+};
 
 const blankEntry = () => ({
   date: new Date().toISOString().slice(0, 10),
@@ -32,6 +66,8 @@ const PersonalSpendingPage = () => {
   const [latest, setLatest] = useState(null);
   const [history, setHistory] = useState([]);
   const [manualEntries, setManualEntries] = useState([]);
+  const [receipts, setReceipts] = useState([]);
+  const [selected, setSelected] = useState(null);
   const [draft, setDraft] = useState(blankEntry());
   const [patterns, setPatterns] = useState({ insights: [], by_category: {}, receipt_count: 0 });
   const [error, setError] = useState(null);
@@ -61,6 +97,17 @@ const PersonalSpendingPage = () => {
       // Surface only if it's not the expected "not authed yet" case.
       if (err?.status && err.status !== 401) {
         setError(err.message || 'Could not load entries.');
+      }
+    }
+  };
+
+  const refreshReceipts = async () => {
+    try {
+      const rows = await fetchReceipts();
+      setReceipts(rows || []);
+    } catch (err) {
+      if (err?.status && err.status !== 401) {
+        setError(err.message || 'Could not load receipts.');
       }
     }
   };
@@ -127,6 +174,7 @@ const PersonalSpendingPage = () => {
   useEffect(() => {
     refreshPatterns();
     refreshEntries();
+    refreshReceipts();
   }, []);
 
   const handleScan = async (file) => {
@@ -143,6 +191,7 @@ const PersonalSpendingPage = () => {
       setLatest(data);
       setHistory((prev) => [data, ...prev].slice(0, 10));
       await refreshPatterns();
+      await refreshReceipts();
     } catch (err) {
       setError(err.message || 'Receipt scan failed');
     } finally {
@@ -167,6 +216,7 @@ const PersonalSpendingPage = () => {
     setLatest(data);
     setHistory((prev) => [data, ...prev].slice(0, 10));
     await refreshPatterns();
+    await refreshReceipts();
   };
 
   const onPick = (event, closeModal = false) => {
@@ -180,13 +230,33 @@ const PersonalSpendingPage = () => {
   const totalCategoryCounts = Object.entries(patterns.by_category || {});
   const totalScanned = patterns.receipt_count || 0;
 
+  // Project receipts into the same shape as manualEntries so the ledger list
+  // and detail modal can treat them uniformly. Receipts get `source: 'receipt'`
+  // and the full payload nested under `receipt` for the line-item detail view.
+  const receiptEntries = (receipts || []).map((r) => ({
+    id: `receipt:${r.id}`,
+    date: r.date || (r.scanned_at || '').slice(0, 10),
+    vendor: r.vendor || 'Receipt',
+    category: RECEIPT_CATEGORY_MAP[(r.category || 'other').toLowerCase()] || 'Other',
+    description: (r.items || []).map((it) => it.name).filter(Boolean).join(', '),
+    amount: Number(r.total) || Number(r.amount) || 0,
+    source: 'receipt',
+    receipt: r,
+  }));
+
+  // Drop manual rows that fingerprint-match a receipt (legacy shadow entries
+  // from the old scan flow — see commit 03d0e2e).
+  const receiptKeys = new Set(receiptEntries.map(entryKey));
+  const dedupedManual = manualEntries.filter((e) => !receiptKeys.has(entryKey(e)));
+  const allEntries = [...receiptEntries, ...dedupedManual].sort((a, b) =>
+    (b.date || '').localeCompare(a.date || ''),
+  );
+
   const today = new Date().toISOString().slice(0, 10);
-  const todayExpenses =
-    history.filter((r) => r?.date === today).reduce((sum, r) => sum + (r.total || 0), 0) +
-    manualEntries.filter((e) => e.date === today).reduce((sum, e) => sum + (e.amount || 0), 0);
-  const monthlyTotal =
-    history.reduce((sum, r) => sum + (r.total || 0), 0) +
-    manualEntries.reduce((sum, e) => sum + (e.amount || 0), 0);
+  const todayExpenses = allEntries
+    .filter((e) => e.date === today)
+    .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const monthlyTotal = allEntries.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
 
   return (
     <AppShell>
@@ -318,9 +388,9 @@ const PersonalSpendingPage = () => {
               <Eyebrow num="03">{t('pp.manual.eyebrow')}</Eyebrow>
               <h3 className="mt-2 text-base font-semibold tracking-tight">{t('pp.manual.title')}</h3>
             </div>
-            <span className="text-xs text-txt-3 font-mono uppercase tracking-ticker">{manualEntries.length}</span>
+            <span className="text-xs text-txt-3 font-mono uppercase tracking-ticker">{allEntries.length}</span>
           </div>
-          {manualEntries.length === 0 ? (
+          {allEntries.length === 0 ? (
             <div className="p-8 text-center text-sm text-txt-3">
               {t('pp.entriesEmpty')} <span className="text-accent font-medium">{t('bk.addEntry')}</span>.
             </div>
@@ -328,24 +398,43 @@ const PersonalSpendingPage = () => {
             <>
               {/* MOBILE — card stack */}
               <div className="md:hidden divide-y divide-bdr/40">
-                {manualEntries.map((entry) => (
-                  <div key={entry.id} className="px-4 py-3.5">
-                    <div className="flex items-start justify-between gap-3 mb-1.5">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-txt-1 leading-snug truncate">{entry.vendor}</p>
-                        <p className="text-[11px] text-txt-3 font-mono mt-0.5 tabular">{entry.date}</p>
+                {allEntries.map((entry) => {
+                  const isReceipt = entry.source === 'receipt';
+                  return (
+                    <div
+                      key={entry.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelected(entry)}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(entry); } }}
+                      className="px-4 py-3.5 cursor-pointer hover:bg-surface-4/30 transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-1.5">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-txt-1 leading-snug truncate">{entry.vendor}</p>
+                          <p className="text-[11px] text-txt-3 font-mono mt-0.5 tabular">{entry.date}</p>
+                        </div>
+                        <div className="text-sm font-semibold text-exp tabular flex-shrink-0">−{fmtTZSFull(entry.amount)}</div>
                       </div>
-                      <div className="text-sm font-semibold text-exp tabular flex-shrink-0">−{fmtTZSFull(entry.amount)}</div>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <Badge color="muted">{entry.category}</Badge>
+                          {isReceipt && <Badge color="accent">Receipt</Badge>}
+                        </div>
+                        {!isReceipt && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); removeManualEntry(entry.id); }}
+                            className="text-xs text-txt-3 hover:text-exp p-1"
+                            aria-label="Delete entry"
+                          >
+                            <Icon name="x" size={14} />
+                          </button>
+                        )}
+                      </div>
+                      {entry.description && <p className="text-xs text-txt-2 mt-1 line-clamp-2">{entry.description}</p>}
                     </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <Badge color="muted">{entry.category}</Badge>
-                      <button onClick={() => removeManualEntry(entry.id)} className="text-xs text-txt-3 hover:text-exp p-1">
-                        <Icon name="x" size={14} />
-                      </button>
-                    </div>
-                    {entry.description && <p className="text-xs text-txt-2 mt-1 line-clamp-2">{entry.description}</p>}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
               {/* DESKTOP — table */}
               <div className="hidden md:block overflow-x-auto">
@@ -361,20 +450,38 @@ const PersonalSpendingPage = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {manualEntries.map((entry) => (
-                      <tr key={entry.id} className="border-b border-bdr/30 hover:bg-surface-4/30 transition-colors">
-                        <td className="px-4 py-3 text-txt-3 whitespace-nowrap font-mono text-xs tabular">{entry.date}</td>
-                        <td className="px-4 py-3 font-medium text-txt-1 max-w-[16ch] truncate">{entry.vendor}</td>
-                        <td className="px-4 py-3"><Badge color="muted">{entry.category}</Badge></td>
-                        <td className="hidden lg:table-cell px-4 py-3 text-txt-2">{entry.description || '—'}</td>
-                        <td className="px-4 py-3 text-right font-semibold text-exp tabular whitespace-nowrap">−{fmtTZSFull(entry.amount)}</td>
-                        <td className="px-4 py-3 text-right">
-                          <button onClick={() => removeManualEntry(entry.id)} className="text-xs text-txt-3 hover:text-exp">
-                            <Icon name="x" size={14} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {allEntries.map((entry) => {
+                      const isReceipt = entry.source === 'receipt';
+                      return (
+                        <tr
+                          key={entry.id}
+                          onClick={() => setSelected(entry)}
+                          className="border-b border-bdr/30 hover:bg-surface-4/30 transition-colors cursor-pointer"
+                        >
+                          <td className="px-4 py-3 text-txt-3 whitespace-nowrap font-mono text-xs tabular">{entry.date}</td>
+                          <td className="px-4 py-3 font-medium text-txt-1 max-w-[16ch] truncate">{entry.vendor}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <Badge color="muted">{entry.category}</Badge>
+                              {isReceipt && <Badge color="accent">Receipt</Badge>}
+                            </div>
+                          </td>
+                          <td className="hidden lg:table-cell px-4 py-3 text-txt-2">{entry.description || '—'}</td>
+                          <td className="px-4 py-3 text-right font-semibold text-exp tabular whitespace-nowrap">−{fmtTZSFull(entry.amount)}</td>
+                          <td className="px-4 py-3 text-right">
+                            {!isReceipt && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); removeManualEntry(entry.id); }}
+                                className="text-xs text-txt-3 hover:text-exp"
+                                aria-label="Delete entry"
+                              >
+                                <Icon name="x" size={14} />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -521,8 +628,93 @@ const PersonalSpendingPage = () => {
           onTextResult={handleTextResult}
           busy={scanning}
         />
+
+        <EntryDetailModal entry={selected} onClose={() => setSelected(null)} />
       </div>
     </AppShell>
+  );
+};
+
+const EntryDetailModal = ({ entry, onClose }) => {
+  if (!entry) return null;
+  const isReceipt = entry.source === 'receipt';
+  const items = isReceipt && Array.isArray(entry.receipt?.items) ? entry.receipt.items : [];
+  const amount = Number(entry.amount) || 0;
+  const subtotal = Number(entry.receipt?.subtotal) || 0;
+  const tax = Number(entry.receipt?.tax) || 0;
+  return (
+    <Modal
+      open={!!entry}
+      onClose={onClose}
+      eyebrow={isReceipt ? 'Receipt detail' : 'Entry detail'}
+      title={entry.vendor || entry.category || '—'}
+    >
+      <div className="space-y-5">
+        <div className="bg-surface-4/40 border border-bdr/40 rounded-xl p-4 space-y-2">
+          <div className="text-[11px] font-mono uppercase tracking-ticker text-txt-3">
+            {formatLedgerDate(entry.date)}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Badge color="expense">Expense</Badge>
+            {entry.category && <Badge color="muted">{entry.category}</Badge>}
+            {isReceipt && <Badge color="accent">Receipt</Badge>}
+          </div>
+          {entry.description && !isReceipt && (
+            <p className="text-sm text-txt-2 mt-1 leading-snug">{entry.description}</p>
+          )}
+          <div className="flex items-center justify-between pt-2 border-t border-bdr/30 mt-2">
+            <span className="text-sm text-txt-3">Amount</span>
+            <span className="text-base font-bold text-exp tabular">−{fmtTZSFull(amount)}</span>
+          </div>
+        </div>
+
+        {isReceipt && (subtotal > 0 || tax > 0) && (
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="bg-surface-4/30 rounded-lg p-3">
+              <div className="text-[11px] font-mono uppercase tracking-ticker text-txt-3 mb-1">Subtotal</div>
+              <div className="font-semibold tabular">{fmtTZSFull(subtotal)}</div>
+            </div>
+            <div className="bg-surface-4/30 rounded-lg p-3">
+              <div className="text-[11px] font-mono uppercase tracking-ticker text-txt-3 mb-1">Tax</div>
+              <div className="font-semibold tabular">{fmtTZSFull(tax)}</div>
+            </div>
+          </div>
+        )}
+
+        {isReceipt && (
+          <div>
+            <div className="text-[11px] font-mono uppercase tracking-ticker text-txt-3 mb-2">Line items</div>
+            {items.length === 0 ? (
+              <p className="text-xs text-txt-3 italic">No line items captured.</p>
+            ) : (
+              <div className="border border-bdr/40 rounded-lg divide-y divide-bdr/30 max-h-72 overflow-auto">
+                {items.map((it, i) => {
+                  const qty = Number(it.quantity) || 1;
+                  const unit = (it.unit || '').trim();
+                  const name = it.name || 'Item';
+                  // OCR returns either `line_total` or a single `price` per row;
+                  // both already cover the row total — don't multiply.
+                  const price = Number(it.line_total) || Number(it.price) || 0;
+                  return (
+                    <div key={i} className="px-3 py-2.5 flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-txt-1 break-words">{name}</div>
+                        <div className="text-[11px] text-txt-3 font-mono tabular mt-0.5">
+                          {qty}{unit ? ` ${unit}` : '×'}
+                        </div>
+                      </div>
+                      {price > 0 && (
+                        <span className="text-xs font-mono tabular shrink-0">{fmtTZSFull(price)}</span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 };
 

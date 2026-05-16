@@ -27,6 +27,7 @@ from app.rate_limit import limiter
 from app.schemas.response import APIResponse
 from app.services.tax_codes import annotate as annotate_tax, compliance_summary
 from app.utils.logger import get_logger
+from app.utils.sanitize import sanitize_user_text
 from app.utils.time import utcnow
 
 log = get_logger(__name__)
@@ -52,14 +53,55 @@ def _detect_image_mime(blob: bytes) -> str | None:
     return None
 
 
-# Built-in fallbacks. These are intentionally short — OpenRouter retires free
-# tiers often. The real source of truth is the OPENROUTER_VISION_MODELS env var
-# (comma-separated). The configured OPENROUTER_MODEL is always tried first.
+# Receipt photos straight off a phone carry GPS coordinates, device serial,
+# and capture timestamps in EXIF. None of that is needed for OCR, and we
+# don't want to send it to the vision LLM or persist it on disk. Re-encode
+# the image through Pillow without metadata; for formats Pillow can't round-
+# trip cleanly (e.g. HEIC without pillow-heif) we fall through and return
+# the original bytes so the existing pipeline still runs.
+_PIL_FORMAT_BY_MIME = {
+    "image/jpeg": "JPEG",
+    "image/png": "PNG",
+    "image/webp": "WEBP",
+    "image/gif": "GIF",
+}
+
+
+def _strip_image_metadata(blob: bytes, mime: str | None) -> bytes:
+    fmt = _PIL_FORMAT_BY_MIME.get(mime or "")
+    if not fmt:
+        return blob  # HEIC and friends — Pillow can't always re-emit, leave alone.
+    try:
+        from io import BytesIO
+        from PIL import Image
+        img = Image.open(BytesIO(blob))
+        # Preserve mode for PNG transparency etc; JPEG can't store RGBA.
+        if fmt == "JPEG" and img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        buf = BytesIO()
+        save_kwargs: dict = {"format": fmt}
+        if fmt == "JPEG":
+            save_kwargs["quality"] = 90
+            save_kwargs["optimize"] = True
+        img.save(buf, **save_kwargs)
+        return buf.getvalue()
+    except Exception as exc:
+        log.warning("EXIF strip failed (%s) — using original bytes", exc.__class__.__name__)
+        return blob
+
+
+# Built-in fallbacks. OpenRouter retires free vision tiers often (the
+# previous Qwen2.5-VL / Llama-4-Scout / Gemini-2.0-flash-exp slots all
+# returned 404 by mid-2026 after the vendors pulled their free endpoints).
+# The real source of truth is the OPENROUTER_VISION_MODELS env var
+# (comma-separated) — set that to whatever's currently live on OpenRouter
+# for your account. The defaults below are checked against the OpenRouter
+# /models registry; if every one of them is gone too, the call falls
+# through to a useful error instead of an opaque 404.
 DEFAULT_VISION_MODELS = [
-    "qwen/qwen2.5-vl-72b-instruct:free",
-    "qwen/qwen2.5-vl-32b-instruct:free",
-    "meta-llama/llama-4-scout:free",
-    "google/gemini-2.0-flash-exp:free",
+    "google/gemma-4-31b-it:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 ]
 
 
@@ -195,18 +237,58 @@ def _extract_json_object(text: str) -> str | None:
     return text[start : end + 1]
 
 
-# Tried in order. 2.5-flash is plenty for receipts; 2.0-flash is the next
-# fallback; 1.5-flash sits on a separate quota pool so it's the last resort
-# when the 2.x daily free quota is exhausted.
+# Tried in order. 2.5-flash is plenty for receipts; 2.0-flash is the
+# fallback when 2.5 is rate-limited. gemini-1.5-flash was retired by
+# Google in 2025 (404 on v1beta), so it's no longer in the chain.
 GEMINI_VISION_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "gemini-1.5-flash",
 ]
 
-# One short retry on transient 429s — Gemini's free-tier per-minute window
-# clears quickly, so a brief wait often unblocks the request.
-_RETRY_DELAY_SEC = 1.5
+# Per-minute Gemini free-tier windows are 60s wide, not "a couple of
+# seconds". The previous 1.5s retry slammed straight back into the same
+# minute window and burned the only retry we had. 12s gives the window a
+# chance to actually clear before we waste the second attempt.
+_RETRY_DELAY_SEC = 12.0
+
+
+# Structured-output schema for Gemini vision calls. Passed verbatim as
+# `generationConfig.responseSchema` so the model is contractually bound
+# to a complete, parseable receipt object instead of free-form JSON that
+# could truncate mid-string under output-token pressure (the actual
+# cause of the recurring "Bad JSON (after scrape)" warnings, not a
+# rate-limit). Keep `required` minimal so a "this is not a receipt"
+# image still validates and the is_receipt=false branch in
+# scan_receipt can route the friendly explanation.
+RECEIPT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_receipt": {"type": "boolean"},
+        "image_description": {"type": "string"},
+        "vendor": {"type": "string"},
+        "date": {"type": "string"},
+        "currency": {"type": "string"},
+        "subtotal": {"type": "number"},
+        "tax": {"type": "number"},
+        "total": {"type": "number"},
+        "category": {"type": "string"},
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "quantity": {"type": "number"},
+                    "unit": {"type": "string"},
+                    "unit_price": {"type": "number"},
+                    "line_total": {"type": "number"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    "required": ["is_receipt"],
+}
 
 
 def _classify_http_error(status_code: int, body: str) -> str:
@@ -244,8 +326,16 @@ def _call_gemini_vision(image_bytes: bytes, mime: str) -> tuple[dict | None, lis
         }],
         "generationConfig": {
             "responseMimeType": "application/json",
+            # Structured-output: forces the model into schema-guided
+            # decoding so it cannot emit a half-finished string. Pairs
+            # with the maxOutputTokens raise below — together they
+            # eliminate the mid-string truncation that was being
+            # mis-reported as a rate-limit cascade.
+            "responseSchema": RECEIPT_RESPONSE_SCHEMA,
             "temperature": 0.1,
-            "maxOutputTokens": 1200,
+            # 8192 leaves headroom for 100+ item supermarket receipts;
+            # well under Gemini 2.5 Flash's 65,536-output ceiling.
+            "maxOutputTokens": 8192,
         },
     }
 
@@ -296,6 +386,18 @@ def _call_gemini_vision(image_bytes: bytes, mime: str) -> tuple[dict | None, lis
             log.warning("Gemini %s returned no candidates: %s",
                         model_id, str(data)[:200])
             errors.append(f"gemini/{model_id}: no_candidates")
+            continue
+
+        # With responseSchema enforced, a MAX_TOKENS finish is the real
+        # signal — schema-guided decoding can't legally emit a partial
+        # object, so cutoff means we need more output budget rather
+        # than a JSON repair pass. Surface it distinctly so the cascade
+        # diagnostic is honest.
+        finish_reason = candidates[0].get("finishReason")
+        if finish_reason == "MAX_TOKENS":
+            log.warning("Gemini %s hit MAX_TOKENS — bump maxOutputTokens",
+                        model_id)
+            errors.append(f"gemini/{model_id}: max_tokens")
             continue
 
         parts = (candidates[0].get("content") or {}).get("parts") or []
@@ -622,6 +724,11 @@ async def scan_receipt(
         )
     mime = sniffed
 
+    # Strip EXIF (GPS coords, device fingerprint, timestamps) before the
+    # image touches disk or the vision LLM. Best-effort: a malformed image
+    # falls through unchanged so the existing 400 path still surfaces it.
+    image_bytes = _strip_image_metadata(image_bytes, mime)
+
     if not (settings.gemini_api_key or settings.openrouter_api_key):
         return APIResponse(
             success=True, message="ok",
@@ -640,6 +747,11 @@ async def scan_receipt(
     parsed, gem_errors = _call_gemini_vision(image_bytes, mime)
     or_errors: list[str] = []
     if not parsed:
+        # Cool-down before bouncing to OpenRouter. The free vision tier
+        # there is a shared upstream pool that 429s under sub-second
+        # cascades from the same server IP; a small wait (quarter of
+        # the per-minute Gemini window) lets the bursts smooth out.
+        time.sleep(_RETRY_DELAY_SEC / 4)
         parsed, or_errors = _call_openrouter(image_bytes, mime)
 
     if not parsed:
@@ -697,6 +809,11 @@ async def parse_receipt_text(
 
     if not text:
         raise HTTPException(status_code=400, detail="text missing")
+
+    # Body text is concatenated into the LLM prompt below — neutralise the
+    # standard "ignore prior instructions" / "show me your prompt" patterns
+    # before send. Mirrors the assistant chat hardening at assistant.py:297.
+    text = sanitize_user_text(text)
 
     if not settings.openrouter_api_key:
         return APIResponse(

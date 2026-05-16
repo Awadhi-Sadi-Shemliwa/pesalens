@@ -1247,7 +1247,9 @@ trProviders.push({
   },
 });
 
-const TR_CACHE_KEY = 'pesalens-tr-cache-v2';
+// v3: invalidates cached entries that may have stored the bad `/Tatu`
+// rendering of `/mo` from the previous translator pipeline.
+const TR_CACHE_KEY = 'pesalens-tr-cache-v3';
 
 const loadTrCache = () => {
   if (typeof localStorage === 'undefined') return { en: {}, sw: {} };
@@ -1299,6 +1301,20 @@ const runProviderChain = async (text, lang) => {
   return null;
 };
 
+// Public translation engines mistranslate compact period suffixes — e.g.
+// `/mo` (short for "/month") gets read as "Mon" (Monday) and rendered as
+// `/Tatu` or `Jumatatu` in Swahili. Patch those quirks in-place so the
+// rendered string keeps the original compact "<value>/<period>" shape.
+const fixLocaleQuirks = (out, lang) => {
+  if (!out || lang !== 'sw') return out;
+  return out
+    .replace(/\s*\/\s*J\.?\s*Tatu\b/gi, '/mwezi')
+    .replace(/\bJumatatu\b/gi, 'mwezi')
+    .replace(/\s*\/\s*mo\b/gi, '/mwezi');
+};
+
+const PERMONTH_SENTINEL = '__PESALENSPERMONTH__';
+
 export const autoTranslate = async (text, lang = current) => {
   if (!text || lang === 'en') return text;
   if (isUntranslatable(text)) return text;
@@ -1307,15 +1323,21 @@ export const autoTranslate = async (text, lang = current) => {
   const key = `${lang}::${text}`;
   if (trPending.has(key)) return trPending.get(key);
 
+  // Hide "/mo" behind a sentinel so translators don't mis-read it as a
+  // weekday abbreviation. We restore "/mwezi" on the way out, ALWAYS — even
+  // if the provider chain returned nothing usable, so a literal "/mo" never
+  // survives into Swahili output.
+  const probe = text.replace(/\/mo\b/gi, PERMONTH_SENTINEL);
+
   const promise = (async () => {
     try {
-      const out = await runProviderChain(text, lang);
-      if (out) {
-        bucket[text] = out;
-        persistTrCache();
-        return out;
-      }
-      return text;
+      let out = await runProviderChain(probe, lang);
+      if (!out) out = probe;  // translator passed through — keep going
+      out = out.replace(new RegExp(PERMONTH_SENTINEL, 'g'), '/mwezi');
+      out = fixLocaleQuirks(out, lang);
+      bucket[text] = out;
+      persistTrCache();
+      return out;
     } finally {
       trPending.delete(key);
     }

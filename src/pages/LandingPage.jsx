@@ -3,7 +3,8 @@ import { Link } from '../components/Router';
 import { PublicNav } from '../components/navigation';
 import { Icon } from '../components/Icon';
 import { Eyebrow, FadeIn, Sparkline, Mark } from '../components/common';
-import { useT } from '../data/i18n';
+import DownloadAPK from '../components/DownloadAPK';
+import { useT, AutoT } from '../data/i18n';
 import { fetchPublicTicker } from '../data/api';
 
 /* Deterministic mini-series so charts don't jitter on every render */
@@ -112,6 +113,10 @@ const LandingPage = () => {
                 >
                   {t('nav.signin')}
                 </Link>
+                {/* APK download — surfaces only when /downloads/pesalens.apk
+                    is staged by the prebuild script. Hidden silently in
+                    Vite dev so the empty 404 doesn't blink onto the page. */}
+                <DownloadAPK variant="ghost" />
               </div>
 
               <div
@@ -452,8 +457,8 @@ const LandingPage = () => {
                     ].map((m, i) => (
                       <div key={m.l}>
                         <div className="flex justify-between items-baseline mb-1.5 text-sm">
-                          <span className="text-txt-2">{m.l}</span>
-                          <span className="font-semibold tabular">{m.v}</span>
+                          <span className="text-txt-2"><AutoT>{m.l}</AutoT></span>
+                          <span className="font-semibold tabular"><AutoT>{m.v}</AutoT></span>
                         </div>
                         <div className="h-1 bg-surface-4 rounded-full overflow-hidden">
                           <div

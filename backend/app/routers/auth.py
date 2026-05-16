@@ -5,11 +5,16 @@ JWT revocation (logout), email verification, password reset, account
 export + deletion (PDPA / GDPR-style), audit logging.
 """
 
+import hashlib
 import re
+import secrets
+from datetime import timedelta
 from typing import Literal, Optional
+from urllib.parse import quote
 
 import jwt
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
@@ -112,17 +117,22 @@ REFRESH_COOKIE = "pesalens_refresh"
 
 
 def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
-    """Set the refresh token as httpOnly + SameSite=Strict cookie.
+    """Set the refresh token as a session-scoped httpOnly + SameSite=Strict cookie.
 
     JS can't read it (mitigates XSS exfil) and the browser only sends it
     on same-site requests (mitigates CSRF). The browser still attaches
     it to fetch() calls from our SPA so /auth/refresh can rotate.
+
+    No `max_age` / `expires` — the cookie is a session cookie, dropped by
+    the browser when the user closes the tab/window. This pairs with the
+    `pagehide` beacon in src/data/authStore.js::subscribeUnload so closing
+    the tab tears the session down even if the beacon is dropped by the OS.
+    The JWT itself still carries `jwt_refresh_ttl_days` as a hard ceiling
+    so a stolen cookie can't be replayed past its embedded `exp`.
     """
-    max_age = settings.jwt_refresh_ttl_days * 24 * 60 * 60
     response.set_cookie(
         key=REFRESH_COOKIE,
         value=refresh_token,
-        max_age=max_age,
         httponly=True,
         secure=settings.cookie_secure,
         samesite="strict",
@@ -466,6 +476,34 @@ def reset_password(payload: ResetPasswordRequest, request: Request, db: Session 
     return APIResponse(success=True, message="Password updated. Please sign in again.")
 
 
+def _hash_revoke_token(raw: str) -> str:
+    """sha-256 hex of the raw token. We never store the raw value so the
+    DB can't issue revocations on its own — the user has to present the
+    raw token from the email link."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _revoke_link(request: Request, raw_token: str) -> str:
+    """Build the revoke link from the request that triggered the change.
+
+    Whatever host the phone reached `/auth/change-password` on is the same
+    host the user can reach from their phone — so the email link works
+    on a LAN dev backend without needing a hard-coded PUBLIC_API_URL.
+    Honours common reverse-proxy headers so the public hostname surfaces
+    correctly when behind nginx / a load balancer in production.
+    """
+    fwd_proto = request.headers.get("x-forwarded-proto")
+    fwd_host = request.headers.get("x-forwarded-host")
+    scheme = (fwd_proto or request.url.scheme or "http").split(",")[0].strip()
+    host = (fwd_host or request.headers.get("host") or request.url.netloc).split(",")[0].strip()
+    base = f"{scheme}://{host}".rstrip("/")
+    # `request.url.path` is /api/auth/change-password — strip the trailing
+    # segment so we land on /api/auth and rebuild from there. This keeps
+    # the API prefix correct whether main.py mounts at /api or "".
+    path = request.url.path.rsplit("/", 1)[0]  # /api/auth
+    return f"{base}{path}/revoke-password-change?token={quote(raw_token)}"
+
+
 @router.post("/change-password", response_model=APIResponse)
 @limiter.limit("10/hour")
 def change_password(
@@ -477,12 +515,122 @@ def change_password(
     if not verify_password(payload.current_password, user.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     _validate_password(payload.new_password)
+
+    # Stash the previous hash so the user can revert via "It's not me".
+    previous_hash = user.password_hash
+    raw_token = secrets.token_urlsafe(32)
+    revoke_until = utcnow() + timedelta(minutes=settings.password_change_revoke_ttl_min)
+
     user.password_hash = hash_password(payload.new_password)
     user.sessions_invalid_before = utcnow()
+    user.pwd_change_prev_hash = previous_hash
+    user.pwd_change_revoke_token = _hash_revoke_token(raw_token)
+    user.pwd_change_revoke_until = revoke_until
+    user.pwd_change_at = utcnow()
     db.commit()
-    audit(db, "password_changed", user_id=user.id,
-          ip=request.client.host if request.client else "")
+
+    ip = request.client.host if request.client else ""
+    ua = request.headers.get("user-agent", "")[:255]
+    audit(db, "password_changed", user_id=user.id, ip=ip)
+
+    # Email the user a one-shot revocation link. Stub provider in dev
+    # logs the body — the link is still functional in both modes.
+    link = _revoke_link(request, raw_token)
+    hours = max(1, settings.password_change_revoke_ttl_min // 60)
+    body = (
+        f"Hi{(' ' + user.full_name) if user.full_name else ''},\n\n"
+        f"Your PesaLens password was just changed.\n\n"
+        f"Device IP: {ip or 'unknown'}\n"
+        f"Browser:   {ua or 'unknown'}\n\n"
+        f"If this was you, no action is needed.\n\n"
+        f"If this was NOT you, tap the link below within {hours} hour(s) to revoke "
+        f"the new password and restore your previous one. We will also nuke any "
+        f"active sessions on the new password.\n\n"
+        f"  {link}\n\n"
+        f"After {hours} hour(s) this link expires for safety and the change becomes permanent.\n\n"
+        f"— PesaLens Security"
+    )
+    send_email(user.email, "Your PesaLens password was changed", body)
+
     return APIResponse(success=True, message="Password changed. Please sign in again.")
+
+
+@router.get("/revoke-password-change", response_class=HTMLResponse)
+@limiter.limit("20/hour")
+def revoke_password_change(token: str, request: Request, db: Session = Depends(get_db)):
+    """Public endpoint hit from the change-confirmation email.
+
+    Looks up the user by the hashed token, restores the previous password
+    hash, kills active sessions, clears the revocation slot, and returns
+    a small HTML page confirming the revert. We never reveal whether the
+    token matched a real account — invalid/expired tokens get the same
+    "this link is invalid or expired" page so attackers can't probe.
+    """
+    page_ok = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>Password change revoked</title>"
+        "<style>body{background:#0c0d12;color:#eee;font-family:-apple-system,Inter,sans-serif;"
+        "display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}"
+        ".card{max-width:420px;padding:32px;border:1px solid #252636;border-radius:16px;"
+        "background:#13161d}h1{margin:0 0 8px;font-size:20px}p{color:#9496a8;line-height:1.55;"
+        "font-size:14px}.ok{color:#10b981}</style></head><body>"
+        "<div class='card'><h1 class='ok'>It's reverted ✓</h1>"
+        "<p>The password change has been revoked. Your previous password is active again "
+        "and every session opened with the new one has been signed out.</p>"
+        "<p style='margin-top:18px;font-size:12px;color:#5e6078'>You can close this window.</p>"
+        "</div></body></html>"
+    )
+    page_bad = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>Link expired</title>"
+        "<style>body{background:#0c0d12;color:#eee;font-family:-apple-system,Inter,sans-serif;"
+        "display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}"
+        ".card{max-width:420px;padding:32px;border:1px solid #252636;border-radius:16px;"
+        "background:#13161d}h1{margin:0 0 8px;font-size:20px}p{color:#9496a8;line-height:1.55;"
+        "font-size:14px}.warn{color:#f59e0b}</style></head><body>"
+        "<div class='card'><h1 class='warn'>Link is invalid or expired</h1>"
+        "<p>This revocation link can't be used. Either it's already been redeemed, the "
+        "24-hour window has passed, or the token doesn't match an account.</p>"
+        "<p>If you still suspect unauthorised access, request a password reset from the "
+        "sign-in screen and contact support.</p></div></body></html>"
+    )
+
+    raw = (token or "").strip()
+    if not raw:
+        return HTMLResponse(page_bad, status_code=400)
+
+    digest = _hash_revoke_token(raw)
+    user = db.query(User).filter(User.pwd_change_revoke_token == digest).first()
+    if not user or not user.pwd_change_revoke_until or not user.pwd_change_prev_hash:
+        return HTMLResponse(page_bad, status_code=400)
+    if user.pwd_change_revoke_until < utcnow():
+        # Window passed — purge the slot so it can never be reused.
+        user.pwd_change_prev_hash = None
+        user.pwd_change_revoke_token = None
+        user.pwd_change_revoke_until = None
+        db.commit()
+        return HTMLResponse(page_bad, status_code=400)
+
+    # Restore the previous hash, nuke live sessions on the new password,
+    # and clear the slot so the link can't be reused.
+    user.password_hash = user.pwd_change_prev_hash
+    user.sessions_invalid_before = utcnow()
+    user.pwd_change_prev_hash = None
+    user.pwd_change_revoke_token = None
+    user.pwd_change_revoke_until = None
+    db.commit()
+
+    ip = request.client.host if request.client else ""
+    audit(db, "password_change_revoked", user_id=user.id, ip=ip)
+    send_email(
+        user.email,
+        "PesaLens password change reverted",
+        "Heads up — the recent password change on your account was reverted via the "
+        "'It's not me' link. Your previous password is now active. We recommend you "
+        "sign in, change the password yourself to a new strong value, and review "
+        "Settings → Profile for anything else suspicious.",
+    )
+    return HTMLResponse(page_ok)
 
 
 # --------------------------- account export / delete ---------------------------

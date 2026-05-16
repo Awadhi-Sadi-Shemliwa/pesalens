@@ -2,9 +2,23 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#08090C" />
     <title>PesaLens — Financial Intelligence for Tanzania</title>
+    <meta name="description" content="Read your bank statement like an analyst. Tanzania-first personal finance." />
+
+    <!-- PWA wiring — Chrome only fires `beforeinstallprompt` when the
+         manifest, a registered service worker, and a 192/512 icon set
+         are all present. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="PesaLens" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

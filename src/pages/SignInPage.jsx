@@ -29,7 +29,9 @@ const SignInPage = () => {
       const data = await signIn({ email: email.trim(), password: pass });
       setSession(data);
       if (data?.user?.account_type) setUserType(data.user.account_type);
-      navigate('/dashboard');
+      // Replace history so Back from /dashboard never lands the user
+      // on a stale /signin form with their email already filled in.
+      navigate('/dashboard', { replace: true });
     } catch (err) {
       setError(err?.message || 'Sign-in failed.');
     } finally {

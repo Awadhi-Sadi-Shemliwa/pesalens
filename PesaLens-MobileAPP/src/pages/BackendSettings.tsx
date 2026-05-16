@@ -5,16 +5,13 @@ import { CardSoft, Eyebrow, Section } from "@/components/pl/primitives";
 // @ts-ignore — JS module
 import { getApiUrl, setApiUrl } from "@/data/api";
 
-// Dev-only screen: lets QA point the build at an arbitrary backend.
-// Shipping it in release builds would let any phone redirect their
-// session to a hostile API, so the page is gated behind a build-time
-// flag. Set VITE_ENABLE_BACKEND_SETTINGS=1 in `.env.local` for
-// development; leave it unset for store / signed APK builds.
-const DEV_MODE_ENABLED =
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (import.meta as any).env?.VITE_ENABLE_BACKEND_SETTINGS === "1" ||
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (import.meta as any).env?.MODE === "development";
+// Backend connection screen. Reachable from the SignIn page's
+// "Backend unreachable? Configure server" link and from More → Backend
+// so a self-hosted APK can be re-pointed at a working server without
+// rebuilding. Previously this component also gated itself on
+// VITE_ENABLE_BACKEND_SETTINGS / MODE === "development" and silently
+// navigated to "/" in release builds; that redundant gate was the
+// cause of the "configure server link returns me to landing" bug.
 
 type Probe = { state: "idle" | "checking" | "ok" | "fail"; detail?: string };
 
@@ -30,14 +27,8 @@ const BackendSettings = () => {
   const [probe, setProbe] = useState<Probe>({ state: "idle" });
 
   useEffect(() => {
-    if (!DEV_MODE_ENABLED) {
-      navigate("/", { replace: true });
-      return;
-    }
     setValue(getApiUrl() || "");
-  }, [navigate]);
-
-  if (!DEV_MODE_ENABLED) return null;
+  }, []);
 
   const test = async (url: string) => {
     const trimmed = url.trim().replace(/\/+$/, "");

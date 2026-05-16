@@ -6,6 +6,7 @@ import {
   cancelSubscription,
   fetchBillingStatus,
   fetchMe,
+  requestPaymentConfirmation,
   startCheckout,
 } from '../data/api';
 import { useAuth } from '../data/authStore';
@@ -153,26 +154,62 @@ const PlanCard = ({ plan, busy, onChoose, recommended }) => {
   );
 };
 
-const ManualPayCard = ({ details, onClose }) => (
-  <div className="card-soft p-4 sm:p-6 border border-accent/30 bg-accent/5">
-    <div className="flex items-start justify-between gap-3 mb-3">
-      <div className="min-w-0">
-        <Eyebrow>Pending payment · #{details.payment_id}</Eyebrow>
-        <h3 className="mt-2 text-base font-semibold tracking-tight break-words">
-          {fmtMoney(details.amount, details.currency)} · {details.plan === 'pro_yearly' ? 'Annual' : 'Monthly'}
-        </h3>
+const ManualPayCard = ({ details, onClose }) => {
+  const [confirming, setConfirming] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [confirmError, setConfirmError] = useState('');
+
+  const onConfirm = async () => {
+    setConfirming(true);
+    setConfirmError('');
+    try {
+      await requestPaymentConfirmation(details.payment_id);
+      setConfirmed(true);
+    } catch (err) {
+      setConfirmError(err.message || "Couldn't request confirmation — please try again.");
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  return (
+    <div className="card-soft p-4 sm:p-6 border border-accent/30 bg-accent/5">
+      <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <Eyebrow>Pending payment · #{details.payment_id}</Eyebrow>
+          <h3 className="mt-2 text-base font-semibold tracking-tight break-words">
+            {fmtMoney(details.amount, details.currency)} · {details.plan === 'pro_yearly' ? 'Annual' : 'Monthly'}
+          </h3>
+        </div>
+        <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-surface-4 text-txt-2 flex-shrink-0">
+          <Icon name="x" size={16} />
+        </button>
       </div>
-      <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-surface-4 text-txt-2 flex-shrink-0">
-        <Icon name="x" size={16} />
-      </button>
+      <p className="text-xs sm:text-sm text-txt-2 leading-relaxed break-words">{details.instructions}</p>
+      <div className="mt-4">
+        <button
+          onClick={onConfirm}
+          disabled={confirming || confirmed}
+          className="w-full sm:w-auto px-4 py-2.5 rounded-lg bg-accent text-white text-sm font-semibold hover:bg-accent/90 transition disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {confirmed
+            ? 'Confirmation requested — check your email'
+            : confirming
+              ? 'Requesting confirmation…'
+              : 'I have paid'}
+        </button>
+        {confirmed && (
+          <p className="mt-2 text-xs text-txt-2 leading-relaxed">
+            Thanks — we'll email you the moment your payment is verified. You can close this page; the upgrade screen will clear automatically once Pro is active.
+          </p>
+        )}
+        {confirmError && (
+          <p className="mt-2 text-xs text-dng leading-relaxed">{confirmError}</p>
+        )}
+      </div>
     </div>
-    <p className="text-xs sm:text-sm text-txt-2 leading-relaxed break-words">{details.instructions}</p>
-    <p className="mt-3 text-[11px] text-txt-3">
-      Need help? Email <span className="text-accent">support@pesalens.com</span> with your payment reference and we'll
-      switch your account on within an hour during business hours.
-    </p>
-  </div>
-);
+  );
+};
 
 const UpgradePage = () => {
   const { user } = useAuth();

@@ -15,7 +15,15 @@ import {
   updateUser,
 } from './authStore';
 
-const RAW_URL = (import.meta.env && import.meta.env.VITE_API_URL) || 'http://localhost:8000/api';
+// Default to a same-origin `/api` so:
+//   • Laptop dev (https://localhost:5173)  → Vite proxies /api/* to the
+//     local FastAPI backend on http://localhost:8000 (see vite.config.js).
+//   • Phone hitting the dev server through a Cloudflare Tunnel → the
+//     same /api/* path is proxied through Vite to the laptop backend,
+//     so the phone never has to know the backend exists separately.
+//   • Production deploy → VITE_API_URL is set to the public API origin
+//     (e.g. https://api.pesalens.com/api) and overrides this default.
+const RAW_URL = (import.meta.env && import.meta.env.VITE_API_URL) || '/api';
 export const API_URL = RAW_URL.replace(/\/+$/, '');
 
 const AUTH_PATHS = new Set(['/auth/signin', '/auth/signup', '/auth/refresh']);
@@ -244,6 +252,11 @@ export const scanReceipt = (file) => {
   return requestData('/receipts/scan', { method: 'POST', body: formData });
 };
 
+export const fetchReceipts = async () => {
+  const data = await requestData('/receipts');
+  return data?.receipts || [];
+};
+
 export const fetchReceiptPatterns = () => requestData('/receipts/patterns');
 
 export const parseReceiptText = (text, { save = false } = {}) =>
@@ -289,6 +302,19 @@ export const fetchBusinessSummary = (month) => {
   return requestData(`/business/reports/summary${qs}`);
 };
 
+// ---------- reconciliation ----------
+//
+// Cross-source view: pairs every statement debit with the receipts and
+// manual entries that plausibly explain it for [start_date, end_date].
+// Backend caps the range at 365 days. Returns the deterministic result
+// even when LLM is unavailable; the UI hides the insight slot when
+// `llm_status !== 'ok'`.
+export const fetchReconciliation = (start_date, end_date, scope = 'personal') =>
+  requestData('/reconcile', {
+    method: 'POST',
+    body: JSON.stringify({ start_date, end_date, scope }),
+  });
+
 // Streams a PDF and triggers the browser download. Returns nothing —
 // the caller just awaits to know when the download is in flight.
 export const downloadBusinessReport = async (month) => {
@@ -322,6 +348,12 @@ export const startCheckout = (plan) =>
 
 export const cancelSubscription = () =>
   requestData('/billing/cancel', { method: 'POST' });
+
+export const requestPaymentConfirmation = (payment_id) =>
+  requestData('/billing/manual/request-confirmation', {
+    method: 'POST',
+    body: JSON.stringify({ payment_id }),
+  });
 
 // ---------- markets ----------
 

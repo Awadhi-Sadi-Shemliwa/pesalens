@@ -81,6 +81,18 @@ class User(Base):
     # full-logout). Cheap global revocation without scanning every jti.
     sessions_invalid_before = Column(DateTime, nullable=True)
 
+    # Password-change "It's not me" revocation slot. Populated by
+    # /auth/change-password and consumed by /auth/revoke-password-change.
+    # Storing the SHA-256 of the raw token (never the token itself) so a
+    # leaked DB dump can't be used to revoke real changes. The previous
+    # password hash is stashed for the duration of the revocation window
+    # (default 24h, see settings.password_change_revoke_ttl_min) and
+    # purged when the window expires or the link is consumed.
+    pwd_change_prev_hash = Column(String(255), nullable=True)
+    pwd_change_revoke_token = Column(String(64), nullable=True, index=True)
+    pwd_change_revoke_until = Column(DateTime, nullable=True)
+    pwd_change_at = Column(DateTime, nullable=True)
+
     uploads = relationship("Upload", back_populates="user", cascade="all, delete-orphan")
     entries = relationship("PersonalEntry", back_populates="user", cascade="all, delete-orphan")
     business_entries = relationship("BusinessEntry", back_populates="user", cascade="all, delete-orphan")
@@ -108,6 +120,15 @@ class Payment(Base):
     period_start = Column(DateTime, nullable=True)
     period_end = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    # Manual-confirmation magic-link slot. Populated when the user clicks
+    # "I have paid" on /upgrade — the SHA-256 of the token is sent to the
+    # admin's inbox, and the admin's tap on that link activates Pro.
+    # Cleared (set back to NULL) the moment the link is consumed so it
+    # can't be reused. Unused for stripe/IAP payments.
+    confirm_token_hash = Column(String(64), nullable=True, index=True)
+    confirm_token_expires_at = Column(DateTime, nullable=True)
+    confirm_requested_at = Column(DateTime, nullable=True)
 
     user = relationship("User", back_populates="payments")
 
@@ -236,29 +257,44 @@ class BusinessEntry(Base):
 def init_db() -> None:
     """Create tables and apply lightweight column migrations.
 
-    SQLAlchemy's create_all() does not add columns to tables that already
-    exist, so we patch in any missing user-subscription columns by hand.
-    Production-grade migrations belong in Alembic, but for an MVP this is
-    safer than asking operators to drop and recreate the SQLite file.
+    On Postgres (production), `Base.metadata.create_all` is sufficient — a
+    fresh deploy gets every column from the SQLAlchemy models, and schema
+    changes after launch go through Alembic. The in-boot ALTER block below
+    is SQLite-only because Postgres + multiple workers race on concurrent
+    DDL, and a Render redeploy spins several workers simultaneously.
     """
     Base.metadata.create_all(bind=engine)
 
+    if not engine.url.drivername.startswith("sqlite"):
+        # Non-SQLite path: rely on create_all for the initial schema and
+        # Alembic for any future column additions. Skip the legacy backfill.
+        return
+
     inspector = inspect(engine)
-    if "users" in inspector.get_table_names():
-        existing = {col["name"] for col in inspector.get_columns("users")}
-        # name -> SQL definition (kept minimal, SQLite-friendly).
-        new_cols: dict[str, str] = {
-            "plan":                     "VARCHAR(20) NOT NULL DEFAULT 'trial'",
-            "trial_started_at":         "DATETIME",
-            "pro_until":                "DATETIME",
-            "last_payment_id":          "VARCHAR(120)",
-            "last_payment_at":          "DATETIME",
-            "email_verified_at":        "DATETIME",
-            "sessions_invalid_before":  "DATETIME",
-        }
-        with engine.begin() as conn:
-            for name, ddl in new_cols.items():
-                if name in existing:
+    tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        if "users" in tables:
+            existing_users = {col["name"] for col in inspector.get_columns("users")}
+            # name -> SQL definition (kept minimal, SQLite-friendly).
+            user_cols: dict[str, str] = {
+                "plan":                     "VARCHAR(20) NOT NULL DEFAULT 'trial'",
+                "trial_started_at":         "DATETIME",
+                "pro_until":                "DATETIME",
+                "last_payment_id":          "VARCHAR(120)",
+                "last_payment_at":          "DATETIME",
+                "email_verified_at":        "DATETIME",
+                "sessions_invalid_before":  "DATETIME",
+                # Password-change revocation slot — populated when the user
+                # changes their password, drained when the "It's not me"
+                # link is hit OR when settings.password_change_revoke_ttl_min
+                # expires.
+                "pwd_change_prev_hash":     "VARCHAR(255)",
+                "pwd_change_revoke_token":  "VARCHAR(64)",
+                "pwd_change_revoke_until":  "DATETIME",
+                "pwd_change_at":            "DATETIME",
+            }
+            for name, ddl in user_cols.items():
+                if name in existing_users:
                     continue
                 conn.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
             # Backfill trial_started_at for any pre-existing users so they
@@ -270,6 +306,18 @@ def init_db() -> None:
             conn.execute(text(
                 "DELETE FROM revoked_tokens WHERE expires_at < CURRENT_TIMESTAMP"
             ))
+
+        if "payments" in tables:
+            existing_payments = {col["name"] for col in inspector.get_columns("payments")}
+            payment_cols: dict[str, str] = {
+                "confirm_token_hash":       "VARCHAR(64)",
+                "confirm_token_expires_at": "DATETIME",
+                "confirm_requested_at":     "DATETIME",
+            }
+            for name, ddl in payment_cols.items():
+                if name in existing_payments:
+                    continue
+                conn.execute(text(f"ALTER TABLE payments ADD COLUMN {name} {ddl}"))
 
 
 def get_db() -> Iterator[Session]:

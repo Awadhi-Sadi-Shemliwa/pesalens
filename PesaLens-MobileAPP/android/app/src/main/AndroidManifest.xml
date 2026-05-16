@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application
         android:allowBackup="false"
@@ -11,7 +12,8 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:theme="@style/AppTheme">
+        android:theme="@style/AppTheme"
+        tools:replace="android:usesCleartextTraffic">
 
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation|density"
@@ -37,6 +39,16 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- Sentinel service: receives onTaskRemoved when the user swipes
+             PesaLens from recents and wipes the persisted refresh token
+             before the process dies. stopWithTask="false" is required so
+             the framework delivers onTaskRemoved instead of killing the
+             service alongside the task. See PesaLensCleanupService.java. -->
+        <service
+            android:name=".PesaLensCleanupService"
+            android:exported="false"
+            android:stopWithTask="false" />
     </application>
 
     <!-- Permissions -->

@@ -136,6 +136,50 @@ export const bootSession = async (refreshFn) => {
   return _bootInFlight;
 };
 
+// Tab/window-close auto sign-out. Registers a `pagehide` listener that
+// fires a one-shot beacon to /auth/logout so the backend can revoke the
+// refresh token immediately, then clears the in-memory access token.
+//
+// `pagehide` (rather than `beforeunload`) is the right primitive on
+// iOS Safari and inside Capacitor/PWA WebViews — `beforeunload` doesn't
+// fire reliably there. We skip the beacon when `event.persisted === true`
+// (the page is being moved into the bfcache, not actually closed) so we
+// don't kill the session on a back-forward navigation that would have
+// kept the user signed in.
+//
+// The refresh cookie is also issued without `Max-Age` (see backend
+// `_set_refresh_cookie`), making it a session cookie. So even if the
+// beacon is dropped by the OS, closing the browser tears the session
+// down on the server's next refresh attempt.
+let _unloadSubscribed = false;
+export const subscribeUnload = (apiBaseUrl) => {
+  if (_unloadSubscribed) return;
+  if (typeof window === 'undefined') return;
+  _unloadSubscribed = true;
+
+  const handler = (event) => {
+    if (event && event.persisted) return;          // bfcache stash, not a close
+    if (!_accessToken && !_refreshTokenMem) return; // already signed out
+    try {
+      // sendBeacon ignores its body but still fires a POST with the
+      // session cookie attached. The backend's /auth/logout reads the
+      // refresh token from the cookie (web) or body (mobile) and
+      // revokes the JTI before the request connection is torn down.
+      const url = `${apiBaseUrl.replace(/\/+$/, '')}/auth/logout`;
+      const blob = new Blob([JSON.stringify({})], { type: 'application/json' });
+      navigator.sendBeacon?.(url, blob);
+    } catch {
+      /* nothing useful we can do mid-unload */
+    }
+    // Wipe synchronously so a same-tab back-navigation can't read
+    // the token from memory after the unload listener fires.
+    _accessToken = null;
+    _refreshTokenMem = null;
+  };
+
+  window.addEventListener('pagehide', handler);
+};
+
 export const useAuth = () => {
   const [state, setState] = useState(() => ({
     user: getCurrentUser(),

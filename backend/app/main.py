@@ -4,22 +4,24 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import init_db
+from app.db import get_db, init_db
 from app.middleware import (
     BodySizeLimitMiddleware,
     CSRFOriginMiddleware,
     SecurityHeadersMiddleware,
 )
 from app.rate_limit import limiter
-from app.routers import assistant, auth, billing, business, dashboard, markets, personal, receipts, upload
+from app.routers import assistant, auth, billing, business, dashboard, markets, personal, receipts, reconcile, upload
 from app.services.market_scheduler import shutdown_scheduler, start_scheduler
 from app.utils.logger import get_logger
 from app.utils.storage import ensure_dirs
@@ -27,8 +29,30 @@ from app.utils.storage import ensure_dirs
 log = get_logger(__name__)
 
 
+def _verify_production_config() -> None:
+    """Refuse to boot a misconfigured production deployment.
+
+    `Settings.production_misconfig` returns the list of required envs that
+    are still at dev defaults. In production we raise a `RuntimeError` with
+    every problem listed, so the operator fixes them all in one pass rather
+    than discovering them one at a time on hot deploys. In development the
+    same problems are printed as warnings — local testing keeps working.
+    """
+    problems = settings.production_misconfig
+    if not problems:
+        return
+    if settings.is_production:
+        joined = "\n  - " + "\n  - ".join(problems)
+        raise RuntimeError(
+            "Refusing to boot — production config is incomplete:" + joined
+        )
+    for p in problems:
+        log.warning("Dev-default in use (would block prod boot): %s", p)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _verify_production_config()
     ensure_dirs()
     init_db()
     try:
@@ -107,8 +131,27 @@ app.include_router(personal.router, prefix="/api")
 app.include_router(business.router, prefix="/api")
 app.include_router(markets.router, prefix="/api")
 app.include_router(billing.router, prefix="/api")
+app.include_router(reconcile.router, prefix="/api")
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "pesalens-backend"}
+
+
+@app.get("/health/ready")
+def health_ready(db: Session = Depends(get_db)):
+    """Readiness probe — confirms the DB is reachable.
+
+    Used by Render's health check so a deploy doesn't get marked live
+    until the Postgres connection actually works.
+    """
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        log.exception("Readiness probe failed")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "errors": ["db_unreachable"]},
+        )
+    return {"status": "ready"}

@@ -40,7 +40,10 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cookie_domain: str = ""
 
-    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    allowed_origins: str = (
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "https://localhost:5173,https://127.0.0.1:5173"
+    )
 
     # --- Database ---
     database_url: str = ""
@@ -67,6 +70,12 @@ class Settings(BaseSettings):
     enable_llm_repair: bool = False
     delete_pdf_after_extraction: bool = True
 
+    # Maximum wall-clock seconds the PDF-unlock brute-forcer is allowed to
+    # spin per request. The 6-digit numeric keyspace covers Tanzanian bank
+    # statements at ~3 600 attempts/sec/core × 11 workers ≈ full sweep in
+    # ~25s; 30s gives headroom without letting an attacker soak CPU.
+    pdf_unlock_max_seconds: int = 30
+
     # Per-user receipt-image storage cap (MB) and image retention (days).
     # JSON metadata is kept indefinitely so analytics still works after
     # the original image is purged.
@@ -79,6 +88,10 @@ class Settings(BaseSettings):
     email_reply_to: str = ""
     email_verify_ttl_min: int = 15
     password_reset_ttl_min: int = 15
+    # Window during which a "It's not me" link revokes a password change.
+    # 24h gives the user a full day to spot the email and react before the
+    # previous hash is purged.
+    password_change_revoke_ttl_min: int = 24 * 60
 
     # --- Trial / billing ---
     trial_days: int = 14
@@ -136,6 +149,36 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.lower() == "production"
+
+    @property
+    def production_misconfig(self) -> list[str]:
+        """List of production-required settings that are still at dev defaults.
+
+        Used by the boot-time fail-fast in `app/main.py` so we never ship a
+        prod deployment that silently falls back to the per-process JWT
+        secret, the dev SQLite DB, or the localhost-only CORS allowlist.
+        Returns an empty list when the environment is configured correctly.
+        """
+        import os
+        problems: list[str] = []
+        if not os.getenv("JWT_SECRET"):
+            problems.append(
+                "JWT_SECRET is not set (defaults to a per-process random — "
+                "tokens invalidate on every restart)"
+            )
+        if not self.cookie_secure:
+            problems.append(
+                "COOKIE_SECURE is false (refresh cookie will travel over plaintext)"
+            )
+        if any(o.startswith(("http://localhost", "http://127.")) for o in self.cors_origins):
+            problems.append(
+                "ALLOWED_ORIGINS still contains localhost / 127.0.0.1 entries"
+            )
+        if not self.database_url:
+            problems.append(
+                "DATABASE_URL is empty (would fall back to local SQLite)"
+            )
+        return problems
 
     @property
     def database_dsn(self) -> str:

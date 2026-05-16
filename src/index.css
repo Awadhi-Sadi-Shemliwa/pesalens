@@ -271,6 +271,49 @@ body::before {
   -webkit-backdrop-filter: blur(18px) saturate(1.4);
 }
 
+/* Heavier glassmorphism for nav and floating panels */
+.glass-pane {
+  background: rgb(var(--c-s1) / 0.55);
+  backdrop-filter: blur(28px) saturate(1.6);
+  -webkit-backdrop-filter: blur(28px) saturate(1.6);
+  border: 1px solid rgb(var(--c-bdr) / 0.7);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 24px 48px -24px rgba(0, 0, 0, 0.55);
+}
+
+/* Bento card — luxe rounded panel for grid layouts */
+.bento {
+  position: relative;
+  background:
+    radial-gradient(80% 60% at 0% 0%, rgb(var(--c-accent) / 0.05) 0%, transparent 60%),
+    rgb(var(--c-s2));
+  border: 1px solid rgb(var(--c-bdr));
+  border-radius: 22px;
+  overflow: hidden;
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1),
+              border-color 0.25s ease,
+              box-shadow 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.bento::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 60% at 100% 0%, rgb(var(--c-net) / 0.04) 0%, transparent 60%);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.bento:hover { border-color: rgb(var(--c-bdr-h)); transform: translateY(-2px); box-shadow: var(--card-shadow-hover); }
+.bento:hover::after { opacity: 1; }
+
+/* GPU-accelerated will-change for chart hover containers */
+.chart-frame {
+  will-change: transform;
+  transform: translateZ(0);
+}
+
 .surface-hero {
   background: var(--hero-bg);
   border: 1px solid var(--hero-border);

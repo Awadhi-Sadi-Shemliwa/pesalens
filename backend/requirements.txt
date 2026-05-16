@@ -1,6 +1,10 @@
 fastapi==0.115.0
 uvicorn==0.30.6
 pdfplumber==0.11.4
+# Pure-Python PDF reader/writer used to detect & remove the password
+# on encrypted statements before extraction. AES-256 support requires
+# the `cryptography` package below.
+pypdf>=4.3.0
 # PyMuPDF removed — needs Visual Studio build tools on Windows
 # Using pdfplumber as primary PDF extractor instead
 pydantic[email]>=2.11
@@ -19,6 +23,10 @@ rapidocr-onnxruntime>=1.2.3
 
 # --- Auth + DB + rate limit ---
 SQLAlchemy>=2.0.30
+# Postgres driver for production (Render). The DATABASE_URL uses the
+# `postgresql+psycopg://` scheme, which SQLAlchemy resolves via psycopg3.
+# Local dev still falls back to SQLite when DATABASE_URL is unset.
+psycopg[binary]>=3.2
 bcrypt>=4.1.2
 PyJWT>=2.9.0
 slowapi>=0.1.9

@@ -4,15 +4,31 @@
     • All traffic must be HTTPS to api.pesalens.com / pesalens.com.
     • No user-installed CAs are trusted (defeats casual MITM via a rogue
       profile).
-    • Cleartext is allowed only on debug builds and only for RFC1918 LAN
-      ranges, so a developer can point at a laptop on the same Wi-Fi.
+    • Cleartext is allowed only on debug builds, via the debug-overrides
+      block, so a developer can point at a laptop on the same Wi-Fi.
 
-  Pin pesalens.com to its public-key SHA-256. Replace the placeholder
-  `pin-set` entries with real pins before shipping:
-      openssl s_client -connect api.pesalens.com:443 -servername api.pesalens.com \
+  Certificate pinning is INTENTIONALLY DEFERRED for the initial launch.
+  A pin is a SHA-256 hash of the production server's public key — that
+  key does not exist until the API is actually deployed at
+  api.pesalens.com and Let's Encrypt issues a real cert. HTTPS-only is
+  still enforced by `cleartextTrafficPermitted="false"`, and the system
+  CA store still validates the chain — that's the same starting posture
+  every Play Store app ships with.
+
+  After Render is live with HTTPS, re-add a `<pin-set>` block inside
+  `<domain-config>` with TWO real pins (primary + backup) so cert
+  rotations don't break the app:
+
+      openssl s_client -connect api.pesalens.com:443 \
+        -servername api.pesalens.com </dev/null 2>/dev/null \
         | openssl x509 -pubkey -noout \
         | openssl pkey -pubin -outform DER \
         | openssl dgst -sha256 -binary | openssl enc -base64
+
+  Run once for the live cert, once for the Let's Encrypt intermediate
+  (R3 or E1), pick an `expiration` ~12 months out, and ship an APK
+  update. Re-enable the pin-placeholder check in
+  scripts/release-guard.mjs at the same time.
 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
@@ -23,17 +39,19 @@
 
     <domain-config cleartextTrafficPermitted="false">
         <domain includeSubdomains="true">pesalens.com</domain>
-        <pin-set expiration="2027-01-01">
-            <!-- TODO: replace before launch with real pin + at least one backup pin -->
-            <pin digest="SHA-256">AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=</pin>
-            <pin digest="SHA-256">BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=</pin>
-        </pin-set>
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </domain-config>
 
-    <debug-overrides>
+    <!-- Debuggable APKs (assembleDebug) get a relaxed policy so a tester
+         can point the build at a LAN dev backend like
+         http://192.168.x.x:8000/api. `cleartextTrafficPermitted="true"`
+         here only applies when android:debuggable=true, so release APKs
+         keep the strict HTTPS-only base-config above. Without this,
+         Android refuses the HTTP request before it ever leaves the
+         WebView and the UI shows "Failed to fetch". -->
+    <debug-overrides cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
             <certificates src="user" />

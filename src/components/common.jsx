@@ -75,18 +75,23 @@ export const FadeIn = ({ children, delay = 0, y = 18, className = '' }) => {
 export const Mark = ({ size = 32, withWord = true, className = '' }) => (
   <span className={`inline-flex items-center gap-2.5 ${className}`}>
     <span
-      className="relative inline-flex items-center justify-center"
-      style={{ width: size, height: size }}
+      className="relative inline-flex items-center justify-center overflow-hidden rounded-[10px]"
+      style={{
+        width: size,
+        height: size,
+        background: 'linear-gradient(140deg, rgb(var(--c-s4)) 0%, rgb(var(--c-s1)) 100%)',
+        border: '1px solid rgba(76,110,245,0.35)',
+        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 6px 18px -6px rgba(76,110,245,0.45)',
+      }}
     >
-      <span
-        className="absolute inset-0 rounded-[10px]"
-        style={{
-          background: 'linear-gradient(140deg, rgb(var(--c-s4)) 0%, rgb(var(--c-s1)) 100%)',
-          border: '1px solid rgba(76,110,245,0.35)',
-          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 6px 18px -6px rgba(76,110,245,0.45)',
-        }}
+      <img
+        src="/logo.svg"
+        alt="PesaLens"
+        width={size}
+        height={size}
+        className="block w-full h-full object-contain p-[2px]"
+        draggable={false}
       />
-      <Icon name="aperture" size={size * 0.62} className="relative text-accent" />
     </span>
     {withWord && (
       <span className="text-[17px] font-semibold tracking-tight text-txt-1">

@@ -3,7 +3,15 @@ import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, Crown, Sparkles, Upload as UploadIcon, ShieldCheck, Bot, TrendingUp, Receipt } from "lucide-react";
 import { Badge, CardSoft, Eyebrow, Section } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
-import { cancelSubscription, fetchBillingStatus, fetchMe, startCheckout } from "@/data/api";
+import { cancelSubscription, fetchBillingStatus, fetchMe, requestPaymentConfirmation, startCheckout } from "@/data/api";
+
+type ManualPending = {
+  payment_id: number;
+  amount: number;
+  currency: string;
+  plan: string;
+  instructions: string;
+};
 
 type Plan = "monthly" | "yearly";
 
@@ -32,7 +40,9 @@ const Upgrade = () => {
   const [plan, setPlan] = useState<Plan>("yearly");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [manualReference, setManualReference] = useState<string | null>(null);
+  const [manualPending, setManualPending] = useState<ManualPending | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
 
   const statusQuery = useQuery({ queryKey: ["billing-status"], queryFn: fetchBillingStatus });
   const subscription = statusQuery.data as any;
@@ -47,23 +57,40 @@ const Upgrade = () => {
   }, []);
 
   const handleCheckout = async () => {
+    // Map the picker's "monthly" / "yearly" onto the backend plan ids.
+    const planId = plan === "yearly" ? "pro_yearly" : "pro_monthly";
     setBusy(true);
     setError(null);
-    setManualReference(null);
+    setManualPending(null);
+    setConfirmed(false);
     try {
-      const data = await startCheckout(plan);
-      if ((data as any)?.url) {
-        window.location.assign((data as any).url);
+      const data = await startCheckout(planId);
+      if ((data as any)?.checkout_url) {
+        window.location.assign((data as any).checkout_url);
         return;
       }
-      if ((data as any)?.reference) {
-        setManualReference((data as any).reference);
+      if ((data as any)?.provider === "manual" && (data as any)?.payment_id) {
+        setManualPending(data as ManualPending);
       }
       statusQuery.refetch();
     } catch (err: any) {
       setError(err?.message || "Checkout failed.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleConfirmPaid = async () => {
+    if (!manualPending) return;
+    setConfirming(true);
+    setError(null);
+    try {
+      await requestPaymentConfirmation(manualPending.payment_id);
+      setConfirmed(true);
+    } catch (err: any) {
+      setError(err?.message || "Couldn't request confirmation — please try again.");
+    } finally {
+      setConfirming(false);
     }
   };
 
@@ -171,15 +198,31 @@ const Upgrade = () => {
             {busy ? "Starting checkout…" : "Continue to checkout"}
           </button>
 
-          {manualReference && (
-            <CardSoft className="!p-3 mt-2">
-              <Eyebrow>MANUAL PAYMENT</Eyebrow>
-              <p className="text-[12px] text-txt-2 mt-1">
-                Reference: <span className="font-mono-tab font-bold">{manualReference}</span>
+          {manualPending && (
+            <CardSoft className="!p-3 mt-2 border-accent/30 bg-accent/5">
+              <Eyebrow>PENDING PAYMENT · #{manualPending.payment_id}</Eyebrow>
+              <p className="text-[14px] font-semibold mt-1">
+                {fmtMoney(manualPending.amount, manualPending.currency)} · {manualPending.plan === "pro_yearly" ? "Annual" : "Monthly"}
               </p>
-              <p className="text-[11px] text-txt-3 mt-1">
-                Send the amount via M-Pesa / Airtel / Tigo with this reference. Your account is upgraded once the operator confirms the payment.
+              <p className="text-[11px] text-txt-3 mt-1 leading-relaxed">
+                {manualPending.instructions}
               </p>
+              <button
+                onClick={handleConfirmPaid}
+                disabled={confirming || confirmed}
+                className="mt-3 w-full bg-accent text-white py-2.5 rounded-lg text-[13px] font-semibold disabled:opacity-60"
+              >
+                {confirmed
+                  ? "Confirmation requested — check your email"
+                  : confirming
+                    ? "Requesting confirmation…"
+                    : "I have paid"}
+              </button>
+              {confirmed && (
+                <p className="text-[11px] text-txt-2 mt-2 leading-relaxed">
+                  Thanks — we'll email you the moment your payment is verified. The upgrade screen clears automatically once Pro is active.
+                </p>
+              )}
             </CardSoft>
           )}
 

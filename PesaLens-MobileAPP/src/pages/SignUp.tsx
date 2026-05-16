@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Eyebrow } from "@/components/pl/primitives";
-import { Wallet, Briefcase, MailCheck } from "lucide-react";
+import { ArrowLeft, Wallet, Briefcase, MailCheck } from "lucide-react";
 // @ts-ignore — JS modules
 import { signUp } from "@/data/api";
 // @ts-ignore — JS modules
@@ -59,12 +59,21 @@ const SignUp = () => {
           paddingBottom: "max(2.5rem, var(--safe-bottom))",
         }}
       >
+        <Link
+          to="/"
+          aria-label="Back to home"
+          className="self-start -ml-1 mb-4 inline-flex items-center gap-1 text-[12px] font-medium text-txt-3 hover:text-txt-1 px-2 py-1.5 rounded-md ios-press"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          Home
+        </Link>
+
         <div className="flex items-center gap-2.5 mb-10">
-          <div className="w-9 h-9 rounded-lg bg-gradient-accent flex items-center justify-center font-mono-tab text-[15px] font-bold text-white">
-            P
+          <div className="w-9 h-9 rounded-lg overflow-hidden bg-surface-2 border border-border/60 flex items-center justify-center">
+            <img src="/logo.svg" alt="PesaLens" width={36} height={36} className="w-full h-full object-contain p-[2px]" />
           </div>
           <div>
-            <div className="text-[16px] font-bold leading-tight">PesaLens</div>
+            <div className="text-[16px] font-bold leading-tight" data-no-translate>PesaLens</div>
             <div className="text-[10px] font-mono-tab text-txt-3 tracking-ticker uppercase">Tanzania · TZS</div>
           </div>
         </div>
@@ -166,7 +175,16 @@ const SignUp = () => {
                   className="mt-0.5"
                 />
                 <span>
-                  I agree to the Terms of Service and acknowledge that PesaLens is not financial advice.
+                  I have read and agree to the{" "}
+                  <Link to="/terms" className="text-accent font-semibold underline-offset-2 hover:underline">
+                    Terms of Service
+                  </Link>{" "}
+                  and{" "}
+                  <Link to="/privacy" className="text-accent font-semibold underline-offset-2 hover:underline">
+                    Privacy Policy
+                  </Link>
+                  , and acknowledge that PesaLens is informational only and not financial,
+                  investment, tax, or legal advice.
                 </span>
               </label>
 

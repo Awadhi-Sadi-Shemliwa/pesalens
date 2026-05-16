@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   LayoutDashboard,
   ListTree,
@@ -9,6 +10,8 @@ import {
   Bell,
 } from "lucide-react";
 import { TickerStrip } from "./TickerStrip";
+import { NotificationsSheet } from "./NotificationsSheet";
+import { setNotificationsUser, useNotifications } from "@/data/notifications";
 import { cn } from "@/lib/utils";
 // @ts-ignore — JS module
 import { useAuth } from "@/data/authStore";
@@ -43,6 +46,21 @@ export const MobileShell = () => {
   const { user } = useAuth();
   const [theme] = useTheme();
   const { t } = useT();
+  const reduce = useReducedMotion();
+  const [notifOpen, setNotifOpen] = useState(false);
+  const { unread, markAllRead } = useNotifications();
+
+  // Bind the notifications store to the signed-in user so events stay
+  // namespaced. Resets to "anon" on sign-out.
+  useEffect(() => {
+    setNotificationsUser(user?.id ?? user?.email ?? null);
+  }, [user?.id, user?.email]);
+
+  const openNotifications = () => {
+    setNotifOpen(true);
+    // Reset the unread pill as soon as the panel is on screen.
+    requestAnimationFrame(() => markAllRead());
+  };
 
   // Tabs and page titles. Strings stay in English here — the
   // GlobalAutoTranslate provider in App.tsx swaps them to Swahili at
@@ -88,8 +106,8 @@ export const MobileShell = () => {
         {/* iOS/Chase-style Header with blur */}
         <header className="ios-header px-5 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-9 h-9 rounded-xl bg-gradient-accent flex items-center justify-center font-mono-tab text-[14px] font-bold text-white shadow-sm shrink-0">
-              P
+            <div className="w-9 h-9 rounded-xl overflow-hidden bg-surface-2 border border-border/60 shadow-sm shrink-0 flex items-center justify-center">
+              <img src="/logo.svg" alt="PesaLens" width={36} height={36} className="w-full h-full object-contain p-[2px]" />
             </div>
             <div className="min-w-0">
               <h1 className="text-[20px] font-bold leading-tight truncate">{title}</h1>
@@ -114,17 +132,28 @@ export const MobileShell = () => {
               </span>
             )}
             <button
-              className="w-10 h-10 rounded-full bg-surface-2/80 border border-border/50 flex items-center justify-center text-txt-2 hover:text-txt-1 transition-colors ios-press"
-              aria-label="Notifications"
+              onClick={openNotifications}
+              className="relative w-10 h-10 rounded-full bg-surface-2/80 border border-border/50 flex items-center justify-center text-txt-2 hover:text-txt-1 transition-colors ios-press"
+              aria-label={`Notifications${unread ? ` (${unread} unread)` : ""}`}
             >
               <Bell className="w-4.5 h-4.5" />
+              {unread > 0 && (
+                <span
+                  className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-dng text-white text-[10px] font-bold flex items-center justify-center border-2 border-surface-1"
+                  data-no-translate
+                >
+                  {unread > 9 ? "9+" : unread}
+                </span>
+              )}
             </button>
             <NavLink
               to="/profile"
               className="w-10 h-10 rounded-full bg-gradient-to-br from-accent to-net text-white flex items-center justify-center text-[13px] font-bold shadow-sm ios-press"
               aria-label="Profile"
             >
-              {initials}
+              {/* data-no-translate keeps initials like "AS" from being
+                  munged into Swahili words by the auto-translator. */}
+              <span data-no-translate>{initials}</span>
             </NavLink>
           </div>
         </header>
@@ -138,13 +167,24 @@ export const MobileShell = () => {
 
         <TickerStrip />
 
-        {/* Only this region scrolls — header and bottom nav stay pinned. */}
-        <main className="flex-1 overflow-y-auto overscroll-contain scroll-hide">
-          <Outlet />
+        {/* Only this region scrolls — header and bottom nav stay pinned.
+            AnimatePresence cross-fades route transitions for a native feel. */}
+        <main className="flex-1 overflow-y-auto overscroll-contain scroll-hide scroll-smooth-y">
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={loc.pathname}
+              initial={reduce ? false : { opacity: 0, y: 6 }}
+              animate={reduce ? undefined : { opacity: 1, y: 0 }}
+              exit={reduce ? undefined : { opacity: 0, y: -4 }}
+              transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <Outlet />
+            </motion.div>
+          </AnimatePresence>
         </main>
 
-        {/* iOS/Chase-style Tab Bar with heavy blur */}
-        <nav className="ios-tabbar px-1 pt-2 pb-1 flex items-stretch justify-around shrink-0">
+        {/* iOS/Chase-style Tab Bar with heavy blur — spring-tap interaction */}
+        <nav className="ios-tabbar glass-pane px-1 pt-2 pb-1 flex items-stretch justify-around shrink-0">
           {tabs.map((t) => {
             const Icon = t.icon;
             return (
@@ -154,26 +194,32 @@ export const MobileShell = () => {
                 end={t.end}
                 className={({ isActive }) =>
                   cn(
-                    "flex flex-col items-center gap-1 flex-1 py-1.5 rounded-xl transition-all duration-200",
-                    isActive
-                      ? "text-accent"
-                      : "text-txt-3 hover:text-txt-2"
+                    "relative flex flex-col items-center gap-1 flex-1 py-1.5 rounded-xl",
+                    isActive ? "text-accent" : "text-txt-3 hover:text-txt-2"
                   )
                 }
               >
                 {({ isActive }) => (
                   <>
-                    <div className={cn(
-                      "p-1 rounded-lg transition-all duration-200",
-                      isActive && "bg-accent/10"
-                    )}>
+                    {isActive && !reduce && (
+                      <motion.span
+                        layoutId="tab-pill"
+                        className="absolute inset-x-3 top-1 bottom-1 rounded-xl bg-accent/12"
+                        transition={{ type: "spring", stiffness: 380, damping: 32 }}
+                      />
+                    )}
+                    <motion.div
+                      className="relative p-1 rounded-lg"
+                      whileTap={reduce ? undefined : { scale: 0.86 }}
+                      transition={{ type: "spring", stiffness: 420, damping: 22 }}
+                    >
                       <Icon
                         className={cn("w-5 h-5 transition-transform duration-200", isActive && "scale-105")}
                         strokeWidth={isActive ? 2.2 : 1.8}
                       />
-                    </div>
+                    </motion.div>
                     <span className={cn(
-                      "text-[10px] font-semibold tracking-wide transition-all duration-200",
+                      "relative text-[10px] font-semibold tracking-wide transition-all duration-200",
                       isActive ? "opacity-100" : "opacity-70"
                     )}>
                       {t.label}
@@ -184,6 +230,8 @@ export const MobileShell = () => {
             );
           })}
         </nav>
+
+        <NotificationsSheet open={notifOpen} onClose={() => setNotifOpen(false)} />
       </div>
     </div>
   );

@@ -91,9 +91,12 @@ const navigate = (path) => {
   }
 };
 
-const refreshAccessToken = async () => {
+// Exported so the auth-store boot path can drive a silent /auth/refresh
+// on cold launch. `getRefreshToken()` is async (Capacitor Preferences) so
+// we await it instead of reading sync the way earlier builds did.
+export const refreshAccessToken = async () => {
   if (refreshInFlight) return refreshInFlight;
-  const refresh = getRefreshToken();
+  const refresh = await getRefreshToken();
   if (!refresh) return null;
   refreshInFlight = (async () => {
     try {
@@ -132,9 +135,18 @@ const handleResponse = async (res) => {
     /* ignore */
   }
   if (!res.ok || data?.success === false) {
-    const error = data?.errors?.[0] || data?.message || data?.detail || 'Request failed';
+    // FastAPI's structured detail ({code, message}) — used by the upload
+    // PDF-unlock flow and other error codes that the UI branches on.
+    const detailObj = data?.detail && typeof data.detail === 'object' ? data.detail : null;
+    const error =
+      data?.errors?.[0] ||
+      data?.message ||
+      detailObj?.message ||
+      (typeof data?.detail === 'string' ? data.detail : null) ||
+      'Request failed';
     const err = new Error(typeof error === 'string' ? error : 'Request failed');
     err.status = res.status;
+    err.code = detailObj?.code || data?.errors?.[0] || null;
     err.payload = data;
     throw err;
   }
@@ -215,7 +227,7 @@ export const fetchMe = async () => {
 // before clearing the local session. Errors are swallowed — we always
 // want the local session cleared, even if the server is unreachable.
 export const signOut = async () => {
-  const refresh = getRefreshToken();
+  const refresh = await getRefreshToken();
   try {
     await request('/auth/logout', {
       method: 'POST',
@@ -276,6 +288,9 @@ export const fetchAnalysis = (jobId) =>
 
 export const fetchUploads = () => requestData('/uploads');
 
+// Encrypted PDFs are unlocked transparently by the backend (no password
+// field — the server brute-forces the 6-digit numeric keyspace used by
+// Tanzanian bank statements). Adds ~5–30s to the request when triggered.
 export const uploadStatement = (file) => {
   const formData = new FormData();
   formData.append('file', file);
@@ -350,6 +365,18 @@ export const fetchBusinessSummary = (month) => {
   return requestData(`/business/reports/summary${qs}`);
 };
 
+// ---------- reconciliation ----------
+
+// Cross-source view: pairs every statement debit with the receipts and
+// manual entries that plausibly explain it for [start_date, end_date].
+// Backend caps the range at 365 days; LLM coaching is best-effort and
+// the deterministic shape always ships even when llm_status !== 'ok'.
+export const fetchReconciliation = (start_date, end_date, scope = 'personal') =>
+  requestData('/reconcile', {
+    method: 'POST',
+    body: JSON.stringify({ start_date, end_date, scope }),
+  });
+
 // Streams the PDF and triggers a download in the WebView/browser.
 export const downloadBusinessReport = async (month) => {
   const base = getApiUrl();
@@ -398,6 +425,12 @@ export const startCheckout = (plan) =>
 
 export const cancelSubscription = () =>
   requestData('/billing/cancel', { method: 'POST' });
+
+export const requestPaymentConfirmation = (payment_id) =>
+  requestData('/billing/manual/request-confirmation', {
+    method: 'POST',
+    body: JSON.stringify({ payment_id }),
+  });
 
 // Mobile-only: server-side verification of Apple/Google IAP receipts.
 export const verifyMobileReceipt = (payload) =>

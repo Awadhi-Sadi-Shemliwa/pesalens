@@ -14,6 +14,9 @@ import {
   Upload as UploadIcon,
   Server,
   BookOpen,
+  Scale,
+  ScrollText,
+  ShieldCheck,
 } from "lucide-react";
 // @ts-ignore — JS modules
 import { useAuth, clearSession } from "@/data/authStore";
@@ -39,6 +42,13 @@ const More = () => {
       title: "Upload statement",
       sub: "Add a bank or mobile-money PDF",
       onClick: () => navigate("/upload"),
+    },
+    {
+      icon: Scale,
+      title: "Reconcile money",
+      sub: "Match withdrawals to receipts & entries",
+      tone: "accent" as const,
+      onClick: () => navigate("/reconciliation"),
     },
     isBusiness
       ? {
@@ -104,6 +114,11 @@ const More = () => {
       sub: theme === "light" ? "Light" : "Dark",
       onClick: () => toggleTheme(),
     },
+    // Backend override is always available so a stuck APK can be
+    // re-pointed at a working server without rebuilding. The route is
+    // also registered in every build (see App.tsx) — previously this
+    // menu entry was gated on VITE_PESALENS_BUILD which kept hiding the
+    // page on production rebuilds.
     {
       icon: Server,
       title: "Backend",
@@ -122,9 +137,25 @@ const More = () => {
     },
   ];
 
+  const legalItems = [
+    {
+      icon: ScrollText,
+      title: "Terms of Service",
+      sub: "Rules, plan terms, liability — read before relying on figures",
+      onClick: () => navigate("/terms"),
+    },
+    {
+      icon: ShieldCheck,
+      title: "Privacy Policy",
+      sub: "What we collect, how it's used, your rights & data export",
+      onClick: () => navigate("/privacy"),
+    },
+  ];
+
   const groups = [
     { label: "Workspace", items: workspaceItems },
     { label: "Account", items: accountItems },
+    { label: "Legal", items: legalItems },
   ];
 
   return (
@@ -174,7 +205,7 @@ const More = () => {
 
       <div className="text-center pt-4">
         <Eyebrow>PESALENS · v1.0.0</Eyebrow>
-        <p className="text-[10px] text-txt-4 mt-1 font-mono-tab">Made in Tanzania · Dar · Mwanza · Arusha</p>
+        <p className="text-[10px] text-txt-4 mt-1 font-mono-tab">Built in Tanzania</p>
       </div>
     </div>
   );
