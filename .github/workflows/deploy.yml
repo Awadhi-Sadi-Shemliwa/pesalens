@@ -1,0 +1,100 @@
+name: deploy
+
+# Deploys the backend to the Contabo VPS.
+#
+# Triggers:
+#   - Manual: GitHub UI → Actions → deploy → Run workflow.
+#   - Tag push matching v*.*.*: zero-touch release on every version bump.
+#
+# Requires repo secrets:
+#   CONTABO_HOST     — VPS hostname or IP.
+#   CONTABO_USER     — sudo user on the VPS (NOT root).
+#   CONTABO_SSH_KEY  — private SSH key, paired with a public key in
+#                      $CONTABO_USER's ~/.ssh/authorized_keys on the VPS.
+#   CONTABO_APP_DIR  — optional; defaults to /opt/pesalens.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy (defaults to the branch this was run from)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  # Never run two deploys to the same host in parallel.
+  group: deploy-contabo
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy backend to Contabo
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://api.pesalens.com
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Resolve deploy ref
+        id: ref
+        run: |
+          echo "ref=${{ inputs.ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.CONTABO_SSH_KEY }}
+          HOST: ${{ secrets.CONTABO_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Pull, build, and roll out
+        env:
+          HOST: ${{ secrets.CONTABO_HOST }}
+          USER: ${{ secrets.CONTABO_USER }}
+          APP_DIR: ${{ secrets.CONTABO_APP_DIR || '/opt/pesalens' }}
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          ssh -o BatchMode=yes "$USER@$HOST" bash -se <<EOF
+            set -euo pipefail
+            cd "$APP_DIR"
+            echo "==> Fetching $REF"
+            git fetch --all --tags --prune
+            git checkout --force "$REF"
+            git reset --hard "$REF"
+            echo "==> Building + rolling out"
+            docker compose --env-file .env pull || true
+            docker compose --env-file .env up -d --build --remove-orphans
+            echo "==> Pruning old images"
+            docker image prune -f
+          EOF
+
+      - name: Wait for /health/ready
+        env:
+          HOST: ${{ secrets.CONTABO_HOST }}
+        run: |
+          # Health-check the *public* URL — proves Caddy + backend +
+          # Postgres all came back up, not just the container.
+          URL="https://api.pesalens.com/health/ready"
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if curl --fail --silent --show-error "$URL" >/dev/null; then
+              echo "deploy healthy after ${i}0s"
+              exit 0
+            fi
+            echo "waiting for backend to become ready (attempt $i)..."
+            sleep 10
+          done
+          echo "::error::backend did not become healthy within 2 minutes"
+          exit 1

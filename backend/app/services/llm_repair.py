@@ -50,7 +50,8 @@ def repair_transactions(
         import google.generativeai as genai
 
         genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        # gemini-2.0-flash free-tier quota was reset to 0 in June 2026.
+        model = genai.GenerativeModel("gemini-2.5-flash")
 
         # Build index for neighbor lookup
         txn_by_idx = {t.row_index: t for t in transactions}

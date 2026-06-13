@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.db import User
 from app.deps import get_current_user, require_active_plan
+from app.routers.assistant import FALLBACK_MODELS
 from app.schemas.response import APIResponse
 from app.services.market_scheduler import (
     load_cache,
@@ -298,7 +299,10 @@ def _try_gemini(system: str, request: MarketInsightRequest) -> Optional[str]:
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        # gemini-2.0-flash was capped at free_tier_requests=0 by Google in
+        # June 2026 — every call dies with quota_exceeded. gemini-2.5-flash
+        # still has the standard free-tier window.
+        model = genai.GenerativeModel("gemini-2.5-flash")
         history = [
             {"role": "user" if m.role == "user" else "model", "parts": [m.text]}
             for m in request.history[-6:]
@@ -313,6 +317,13 @@ def _try_gemini(system: str, request: MarketInsightRequest) -> Optional[str]:
 
 
 def _try_openrouter(system: str, request: MarketInsightRequest) -> Optional[str]:
+    """Walk the same free-model fallback chain as the assistant router.
+
+    `settings.openrouter_model` is intentionally blank in production .env
+    (free slugs rotate too fast to pin one), so without this chain every
+    call dies with `{"error":"No models provided","code":400}` and the
+    Markets UI shows the "AI advisor is offline" banner.
+    """
     if not settings.openrouter_api_key:
         return None
     messages = [{"role": "system", "content": system}]
@@ -323,31 +334,52 @@ def _try_openrouter(system: str, request: MarketInsightRequest) -> Optional[str]
         })
     messages.append({"role": "user", "content": request.message})
 
-    try:
-        resp = httpx.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {settings.openrouter_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": settings.openrouter_model,
-                "messages": messages,
-                "max_tokens": 600,
-                "temperature": 0.5,
-            },
-            timeout=15.0,
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-        reply = (
-            data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
-        ).strip()
-        return reply or None
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Market OpenRouter failed: %s", exc)
-        return None
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for m in [settings.openrouter_model, *FALLBACK_MODELS]:
+        if m and m not in seen:
+            seen.add(m)
+            ordered.append(m)
+
+    for model_id in ordered:
+        try:
+            resp = httpx.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://pesalens.app",
+                    "X-Title": "PesaLens",
+                },
+                json={
+                    "model": model_id,
+                    "messages": messages,
+                    "max_tokens": 600,
+                    "temperature": 0.5,
+                },
+                timeout=20.0,
+            )
+            # 429 = throttled, 400/404 = retired slug or bad payload —
+            # either way, skip to the next free model instead of giving up.
+            if resp.status_code in (400, 404, 429):
+                log.warning(
+                    "Market OpenRouter %s rejected (%s), trying next",
+                    model_id, resp.status_code,
+                )
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            reply = (
+                data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                or ""
+            ).strip()
+            if reply:
+                log.info("Market OpenRouter reply from %s", model_id)
+                return reply
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Market OpenRouter %s failed: %s", model_id, exc)
+            continue
+    return None
 
 
 def _offline_market_reply(message: str, context: str) -> str:

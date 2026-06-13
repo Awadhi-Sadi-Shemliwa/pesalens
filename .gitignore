@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 *.key
 *.pem
 *.p12
@@ -63,11 +64,13 @@ mineru/
 
 # --- Internal docs / agent scratch (kept local, not committed) ---
 # Markdown docs are project notes, not part of the shipped app. Keep
-# only the root README so GitHub's repo page still has a description.
+# only the root README + deploy/operator docs so anyone cloning the
+# repo can stand up a production environment.
 *.md
 # Leading slash anchors this exception to the repo root, so subdirectory
 # READMEs (e.g. Airtel_Money_Project/README.md) stay ignored.
 !/README.md
+!/deploy/README.md
 # Test statements + any other ad-hoc PDFs sitting in the working tree.
 *.pdf
 # Claude Code's local agent state and any "skills" scratch directories.

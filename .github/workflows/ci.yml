@@ -5,8 +5,13 @@ on:
     branches: [master, main]
   pull_request:
 
+# Cancel superseded runs on a branch — saves CI minutes on rapid pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  backend:
+  backend-boot:
     name: backend / import-smoke
     runs-on: ubuntu-latest
     defaults:
@@ -24,6 +29,69 @@ jobs:
       - name: Boot-smoke (imports + production-config check on dev defaults)
         run: python -c "from app.main import app; print('boot ok ->', app.title)"
 
+  backend-lint:
+    name: backend / ruff
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: pip install "ruff>=0.6"
+      # Non-blocking until we set a baseline — surfaces issues without
+      # blocking PRs. Flip to `ruff check .` once the codebase is clean.
+      - name: ruff check (advisory)
+        run: ruff check . || echo "::warning::ruff found issues (advisory)"
+
+  backend-test:
+    name: backend / pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          pip install "pytest>=8" "pytest-asyncio>=0.23"
+      - name: Run pytest
+        # tests/ may not exist yet; --co lists tests; -q runs them quietly.
+        # Exit 0 cleanly when there are no tests to collect (exit code 5).
+        run: |
+          if [ -d tests ]; then
+            pytest -q
+          else
+            echo "no backend/tests/ directory yet — skipping"
+          fi
+
+  backend-audit:
+    name: backend / pip-audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: pip install "pip-audit>=2.7"
+      # Advisory: warn on CVEs without failing the build. Flip to a hard
+      # fail once known issues are triaged.
+      - name: pip-audit (advisory)
+        run: pip-audit -r requirements.txt --strict || echo "::warning::pip-audit found vulnerabilities (advisory)"
+
   web:
     name: web / vite build
     runs-on: ubuntu-latest
@@ -38,6 +106,22 @@ jobs:
       - run: npm run build
         env:
           VITE_API_URL: /api
+
+  web-audit:
+    name: web / npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # `npm audit --audit-level=high` exits non-zero on high/critical;
+      # advisory for now so a single transitive vuln doesn't block a
+      # docs PR. Tighten to a hard fail before launch.
+      - name: npm audit (advisory)
+        run: npm audit --audit-level=high || echo "::warning::npm audit found high/critical vulns (advisory)"
 
   mobile:
     name: mobile / vite build
@@ -54,3 +138,86 @@ jobs:
           cache-dependency-path: PesaLens-MobileAPP/package-lock.json
       - run: npm ci
       - run: npm run build
+
+  mobile-lint:
+    name: mobile / eslint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: PesaLens-MobileAPP
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: PesaLens-MobileAPP/package-lock.json
+      - run: npm ci
+      - name: eslint (advisory)
+        run: npm run lint || echo "::warning::eslint found issues (advisory)"
+
+  mobile-test:
+    name: mobile / vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: PesaLens-MobileAPP
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: PesaLens-MobileAPP/package-lock.json
+      - run: npm ci
+      - name: vitest
+        # `vitest run` exits 0 when there are no test files.
+        run: npm test --silent
+
+  mobile-audit:
+    name: mobile / npm audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: PesaLens-MobileAPP
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: PesaLens-MobileAPP/package-lock.json
+      - name: npm audit (advisory)
+        run: npm audit --audit-level=high || echo "::warning::npm audit found high/critical vulns (advisory)"
+
+  docker-build:
+    name: backend / docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build backend image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          load: true
+          tags: pesalens/backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Boot the image and hit /health
+        run: |
+          docker run -d --name pl-backend -p 8000:8000 \
+            -e ENVIRONMENT=development \
+            pesalens/backend:ci
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://127.0.0.1:8000/health; then
+              echo "healthy"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::backend container never became healthy"
+          docker logs pl-backend
+          exit 1

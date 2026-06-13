@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # --- LLM providers ---
     gemini_api_key: str = ""
     openrouter_api_key: str = ""
-    openrouter_model: str = "minimax/minimax-m2.5:free"
+    openrouter_model: str = "qwen/qwen3-next-80b-a3b-instruct:free"
     openrouter_vision_models: str = ""
     openrouter_text_model: str = ""
 

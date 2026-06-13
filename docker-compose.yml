@@ -1,0 +1,86 @@
+# Production compose stack for PesaLens on a Contabo VPS.
+#
+# Services:
+#   postgres  — durable DB, named volume, not exposed to the host.
+#   backend   — FastAPI app, talks to postgres on the internal network.
+#   caddy     — reverse proxy + automatic Let's Encrypt TLS.
+#
+# Bring up:  docker compose --env-file .env up -d
+# Tail logs: docker compose logs -f backend
+#
+# All secrets come from the .env at the repo root on the VPS — never
+# committed. See deploy/README.md for the bootstrap sequence.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pesalens}
+      POSTGRES_USER: ${POSTGRES_USER:-pesalens}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pesalens} -d ${POSTGRES_DB:-pesalens}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - internal
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: pesalens/backend:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Override DATABASE_URL inside the compose network — point at the
+      # `postgres` service hostname regardless of what's in .env so the
+      # same .env works for both compose deploys and bare-metal runs.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pesalens}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pesalens}
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # Persist uploaded statements, OCR debug dumps, receipt images
+      # across container rebuilds. Override STORAGE_HOST_PATH in .env
+      # for non-default deployments; the Contabo box uses /opt/pesalens/storage.
+      - ${STORAGE_HOST_PATH:-/opt/pesalens/storage}:/app/storage
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - internal
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    driver: bridge

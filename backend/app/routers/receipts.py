@@ -95,13 +95,12 @@ def _strip_image_metadata(blob: bytes, mime: str | None) -> bytes:
 # returned 404 by mid-2026 after the vendors pulled their free endpoints).
 # The real source of truth is the OPENROUTER_VISION_MODELS env var
 # (comma-separated) — set that to whatever's currently live on OpenRouter
-# for your account. The defaults below are checked against the OpenRouter
-# /models registry; if every one of them is gone too, the call falls
-# through to a useful error instead of an opaque 404.
+# for your account. Gemma-4 was dropped from this list after field reports
+# of weak OCR; Nemotron Nano 12B 2 VL is NVIDIA's small dedicated
+# vision-language model and handles receipt OCR more reliably on the
+# shared free pool.
 DEFAULT_VISION_MODELS = [
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "nvidia/nemotron-nano-12b-2-vl:free",
 ]
 
 
@@ -130,14 +129,19 @@ def _text_model() -> str:
 
 
 PROMPT = (
-    "You are a vision system that decides whether an image is a shop / fuel "
+    "You are a vision system that decides whether an image is a financial "
     "receipt and, if so, extracts its data. Return STRICT JSON only — no "
     "markdown fences, no commentary.\n\n"
     "First decide:\n"
     "  is_receipt = true  → the image clearly shows a printed receipt, "
-    "till slip, invoice, or hand-written sales note with line items or a total.\n"
+    "till slip, invoice, hand-written sales note, BANK PAYMENT SLIP (NBC / "
+    "CRDB / NMB / Stanbic GePG slip, deposit receipt), MOBILE-MONEY "
+    "CONFIRMATION (M-Pesa, Tigo Pesa, Airtel Money, HaloPesa, Mixx by Yas), "
+    "or TRA / EFD tax receipt — i.e. anything documenting a money "
+    "transaction with an amount.\n"
     "  is_receipt = false → anything else (people, scenery, screenshots of "
-    "apps, ID cards, blank pages, illegible blur, random objects, etc.).\n\n"
+    "apps that are NOT payment confirmations, ID cards, blank pages, "
+    "illegible blur, random objects, etc.).\n\n"
     "If is_receipt is false, return EXACTLY this shape:\n"
     "{\n"
     '  "is_receipt": false,\n'
@@ -146,16 +150,26 @@ PROMPT = (
     "If is_receipt is true, return EXACTLY this shape:\n"
     "{\n"
     '  "is_receipt": true,\n'
-    '  "vendor": "store name or null",\n'
+    '  "vendor": "merchant / bank / operator name (NOT the full slip text)",\n'
     '  "date": "YYYY-MM-DD or null",\n'
-    '  "items": [{"name": "item", "quantity": 1, "unit": "kg/litres/pcs/null", "price": 0}],\n'
+    '  "items": [{"name": "item or description", "quantity": 1, "unit": "kg/litres/pcs/null", "price": 0}],\n'
     '  "subtotal": 0,\n'
     '  "tax": 0,\n'
     '  "total": 0,\n'
     '  "currency": "TZS",\n'
-    '  "category": "fuel|groceries|restaurant|utilities|stock|transport|other"\n'
+    '  "category": "fuel|groceries|restaurant|utilities|stock|transport|tax|bank_transfer|mobile_money|other"\n'
     "}\n"
-    "Use 0 instead of null for numbers when unknown."
+    "CRITICAL RULES:\n"
+    "- `total` MUST be the headline transaction amount as a plain number "
+    "(no commas, no currency symbol). For a bank slip labelled "
+    "'AMOUNT TZS 101,250.00', total = 101250. For an M-Pesa confirmation "
+    "'Umelipa TZS 5,000', total = 5000.\n"
+    "- NEVER dump the full OCR text into `vendor` — extract only the "
+    "merchant / bank / operator NAME (e.g. 'NBC', 'Vodacom M-Pesa', "
+    "'Shoprite Mlimani City').\n"
+    "- For bank slips and mobile-money confirmations with no line items, "
+    "return `items: []` and put the amount in `total`.\n"
+    "- Use 0 instead of null for numbers when unknown."
 )
 
 
@@ -333,9 +347,12 @@ def _call_gemini_vision(image_bytes: bytes, mime: str) -> tuple[dict | None, lis
             # mis-reported as a rate-limit cascade.
             "responseSchema": RECEIPT_RESPONSE_SCHEMA,
             "temperature": 0.1,
-            # 8192 leaves headroom for 100+ item supermarket receipts;
-            # well under Gemini 2.5 Flash's 65,536-output ceiling.
-            "maxOutputTokens": 8192,
+            # Schema-guided JSON burns tokens on keys + structure as well
+            # as values, so 8192 was marginal — long supermarket receipts
+            # hit MAX_TOKENS and the cascade fell through to the generic
+            # catch-all. 32768 covers ~300 items while staying well under
+            # Gemini 2.5 Flash's 65,536-output ceiling.
+            "maxOutputTokens": 32768,
         },
     }
 
@@ -657,6 +674,18 @@ def _build_failure_message(errors: list[str]) -> str:
             "backend .env to enable real OCR."
         )
 
+    # Most actionable failure: the primary vision model overflowed its
+    # output window on a long receipt. The fallbacks are usually all
+    # rate-limited at the same time, which is why this case otherwise
+    # falls through to the generic catch-all.
+    if any(t == "max_tokens" for t in tags):
+        return (
+            "This receipt has more line items than the vision model could "
+            "extract in one pass. Crop the photo to the totals + the lines "
+            "you care about, or scan it in two halves and add them as "
+            "separate entries."
+        )
+
     if all(t == "rate_limited" for t in tags):
         which = "Gemini and OpenRouter" if has_gemini and has_openrouter else (
             "Gemini" if has_gemini else "OpenRouter"
@@ -784,6 +813,27 @@ async def scan_receipt(
     parsed.setdefault("category", "other")
     parsed.setdefault("currency", "TZS")
     parsed["is_receipt"] = True
+
+    # The schema only marks `is_receipt` as required, so the model is free
+    # to omit `total`. On bank-payment slips it usually does — and dumps
+    # the whole OCR text into `vendor`. Backfill: items-sum first, then a
+    # currency-anchored regex over the textual fields. The mobile UI reads
+    # `data.total`, so populating this field is what makes the spend show
+    # up as more than TZS 0.
+    try:
+        current_total = float(parsed.get("total") or 0)
+    except (TypeError, ValueError):
+        current_total = 0.0
+    if current_total <= 0:
+        inferred = _receipt_amount(parsed)
+        if inferred <= 0:
+            inferred = _extract_amount_from_text(
+                str(parsed.get("vendor") or ""),
+                str(parsed.get("image_description") or ""),
+            )
+        if inferred > 0:
+            parsed["total"] = inferred
+
     receipt_id = _save_receipt(parsed, image_bytes, file.filename, user_id=user.id)
     return APIResponse(
         success=True, message="ok",
@@ -858,6 +908,24 @@ async def parse_receipt_text(
     parsed.setdefault("currency", "TZS")
     parsed["is_receipt"] = True
 
+    # Same total-backfill as the image scan path. The text-parse flow runs
+    # on already-OCR'd strings, so the regex scrape has even better signal
+    # than on vision-model output.
+    try:
+        current_total = float(parsed.get("total") or 0)
+    except (TypeError, ValueError):
+        current_total = 0.0
+    if current_total <= 0:
+        inferred = _receipt_amount(parsed)
+        if inferred <= 0:
+            inferred = _extract_amount_from_text(
+                str(parsed.get("vendor") or ""),
+                str(parsed.get("image_description") or ""),
+                text,
+            )
+        if inferred > 0:
+            parsed["total"] = inferred
+
     if save:
         receipt_id = _save_receipt(
             parsed, b"", f"text-{uuid.uuid4().hex[:8]}.txt", user_id=user.id
@@ -882,6 +950,50 @@ def _load_receipts(user_id: int) -> list[dict]:
     return receipts
 
 
+# Tanzanian receipts use a handful of total-line formats:
+#   "AMOUNT TZS 101,250.00"   (bank slips)
+#   "Umelipa TZS 5,000"        (M-Pesa / Tigo Pesa confirmations)
+#   "Total: Tsh 12,500/="      (till receipts)
+#   "JUMLA 7,500"              (Swahili-labelled till receipts)
+# Anchor on a currency / total word so we don't grab reference IDs or
+# phone numbers that happen to be 5+ digits. Capture group 1 is the
+# numeric portion (still comma-formatted; strip before float-cast).
+_AMOUNT_RE = re.compile(
+    r"(?:TZS|TSh|Tsh|Jumla|JUMLA|Total|TOTAL|Amount|AMOUNT|Paid|PAID|Umelipa|UMELIPA)"
+    r"[\s:\-]+"
+    r"(?:TZS|TSh|Tsh|Sh)?"
+    r"\s*"
+    r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{1,2})?"   # comma-grouped
+    r"|[0-9]+\.[0-9]{2}"                              # plain decimal
+    r"|[0-9]{4,})",                                   # 4+ digit integer
+    re.IGNORECASE,
+)
+
+
+def _extract_amount_from_text(*chunks: str) -> float:
+    """Scrape a TZS amount out of free-form OCR text.
+
+    Last-resort fallback for when the vision model flagged the image as a
+    receipt but left `total` at 0 — common on bank payment slips and
+    mobile-money confirmations where the layout isn't a classic till
+    receipt and the model stuffs the whole text into `vendor`.
+    """
+    best = 0.0
+    for chunk in chunks:
+        if not chunk:
+            continue
+        for m in _AMOUNT_RE.finditer(chunk):
+            try:
+                v = float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            # Cap at 100M TZS to filter out reference IDs that snuck past
+            # the anchor word (e.g. "Total reference 9984112047436").
+            if 100 <= v <= 100_000_000 and v > best:
+                best = v
+    return best
+
+
 def _receipt_amount(r: dict) -> float:
     """Best-effort amount for a receipt: total, else subtotal, else summed items."""
     for key in ("total", "amount", "subtotal"):
@@ -895,7 +1007,17 @@ def _receipt_amount(r: dict) -> float:
     items_sum = 0.0
     for item in r.get("items") or []:
         try:
-            items_sum += float(item.get("price") or 0) * float(item.get("quantity") or 1)
+            # Schema-guided Gemini returns `line_total` (already row-total).
+            # Prompt-only path (OpenRouter free models, OCR-text fallback)
+            # returns `price` which still needs * quantity. Try the
+            # row-total field first to avoid double-multiplying.
+            line_total = float(item.get("line_total") or 0)
+            if line_total > 0:
+                items_sum += line_total
+                continue
+            unit_price = float(item.get("unit_price") or item.get("price") or 0)
+            qty = float(item.get("quantity") or 1)
+            items_sum += unit_price * qty
         except (TypeError, ValueError):
             continue
     return items_sum

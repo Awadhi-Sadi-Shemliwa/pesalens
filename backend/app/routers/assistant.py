@@ -28,23 +28,21 @@ log = get_logger(__name__)
 router = APIRouter(tags=["assistant"])
 
 # Free models to try in order if the configured primary fails. OpenRouter
-# retires free model slugs aggressively (the older minimax/m2, gemma-2-9b,
-# and qwen-2.5-7b slugs all 404'd in May 2026), so this list mixes deepseek,
-# llama, qwen, mistral, and z-ai families — if any one provider is throttled
-# or pulled, another usually answers. The first one to return wins.
+# retires free slugs aggressively — the May-2026 sweep took out minimax/m2,
+# gemma-2-9b, and qwen-2.5-7b; the June-2026 sweep pushed the deepseek,
+# z-ai, moonshot, qwen3-235b, mistral-small, and gemma-3 free tiers behind
+# paid endpoints, and dropped tngtech/chimera and nvidia/llama-3.1-nemotron
+# entirely. The list below is the subset still answering as of 2026-06.
+# OpenAI gpt-oss and nemotron-nano are the most reliable; the Llamas and
+# qwen3-coder are listed but throttled today (429) — kept so they recover
+# automatically when their per-minute window clears.
 FALLBACK_MODELS = [
-    "deepseek/deepseek-chat-v3.1:free",
-    "deepseek/deepseek-r1-0528:free",
-    "tngtech/deepseek-r1t-chimera:free",
-    "z-ai/glm-4.5-air:free",
-    "moonshotai/kimi-k2:free",
-    "qwen/qwen3-235b-a22b:free",
-    "mistralai/mistral-small-3.2-24b-instruct:free",
+    "openai/gpt-oss-120b:free",
+    "openai/gpt-oss-20b:free",
+    "nvidia/nemotron-nano-9b-v2:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "meta-llama/llama-3.2-3b-instruct:free",
-    "google/gemini-2.0-flash-exp:free",
-    "nvidia/llama-3.1-nemotron-70b-instruct:free",
-    "openai/gpt-oss-20b:free",
+    "qwen/qwen3-coder:free",
 ]
 PER_MODEL_TIMEOUT = 20.0
 
@@ -219,7 +217,10 @@ def _try_gemini(system: str, request: ChatRequest) -> Optional[str]:
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        # gemini-2.0-flash was capped at free_tier_requests=0 by Google in
+        # June 2026 (every call returns 429 quota-exceeded). gemini-2.5-flash
+        # still ships with the standard free-tier window, so use it instead.
+        model = genai.GenerativeModel("gemini-2.5-flash")
         history = [
             {"role": "user" if m.role == "user" else "model", "parts": [m.text]}
             for m in request.history[-8:]

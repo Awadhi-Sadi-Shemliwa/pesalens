@@ -607,7 +607,8 @@ def _try_gemini(payload: str) -> Optional[str]:
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        # gemini-2.0-flash free-tier quota was reset to 0 in June 2026.
+        model = genai.GenerativeModel("gemini-2.5-flash")
         response = model.generate_content(f"{_LLM_SYSTEM}\n\nDATA:\n{payload}")
         return (getattr(response, "text", "") or "").strip() or None
     except Exception as exc:
@@ -619,12 +620,10 @@ def _try_openrouter(payload: str) -> Optional[str]:
     if not settings.openrouter_api_key:
         return None
     import httpx
-    models = [
-        settings.openrouter_model,
-        "minimax/minimax-m2:free",
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "google/gemma-2-9b-it:free",
-    ]
+    # The old chain (minimax-m2, gemma-2-9b) was retired by OpenRouter in
+    # 2026. Use the same currently-live slugs the assistant router uses.
+    from app.routers.assistant import FALLBACK_MODELS
+    models = [settings.openrouter_model, *FALLBACK_MODELS]
     seen: set[str] = set()
     for m in models:
         if not m or m in seen:

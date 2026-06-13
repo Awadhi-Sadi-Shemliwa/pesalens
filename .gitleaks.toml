@@ -1,0 +1,28 @@
+# gitleaks config — extends the default ruleset and whitelists files
+# that are intentionally allowed to contain key-shaped strings (example
+# env files, mentor doc fragments referenced in commit messages, etc).
+#
+# Run locally with:  gitleaks detect --config .gitleaks.toml --verbose
+#
+# Adding a new exception? Prefer a path allowlist over a regex
+# allowlist — paths are explicit, regexes drift.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for PesaLens repo"
+paths = [
+    # Example env files only ship placeholder/blank secret slots.
+    '''(^|/)\.env\.example$''',
+    '''(^|/)\.env\.production\.example$''',
+    # Mobile prod env is committed but contains no secrets (only
+    # VITE_* values that get inlined into the public APK bundle).
+    '''PesaLens-MobileAPP/\.env\.production$''',
+    # Lockfiles routinely contain integrity hashes that look like
+    # secrets to the entropy detector.
+    '''(^|/)package-lock\.json$''',
+]
+# Add regexes here if a specific safe string (e.g. an example
+# documentation key prefix) ever trips a false positive.
+regexes = []
