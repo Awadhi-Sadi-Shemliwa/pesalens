@@ -46,11 +46,22 @@ jobs:
       # "Resource not accessible by integration" even after the scan
       # itself succeeds. https://github.com/github/codeql-action/issues/1860
       actions: read
+    env:
+      # Disable the experimental "improved incremental analysis"
+      # (overlay) pass. When it crashes, the SARIF upload step rejects
+      # the file with "Code Scanning could not process the submitted
+      # SARIF file ... improved incremental analysis but it did not
+      # complete successfully." See codeql-action#2929.
+      CODEQL_ACTION_FEATURE_OVERLAY_ANALYSIS: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
         with:
           languages: python
+          # Default DB path lives under the small system disk; move it
+          # to runner.temp to give the indexer more headroom on
+          # larger repos.
+          db-location: ${{ runner.temp }}/codeql_databases
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:python"
@@ -66,11 +77,14 @@ jobs:
       # "Resource not accessible by integration" even after the scan
       # itself succeeds. https://github.com/github/codeql-action/issues/1860
       actions: read
+    env:
+      CODEQL_ACTION_FEATURE_OVERLAY_ANALYSIS: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
+          db-location: ${{ runner.temp }}/codeql_databases
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript"
