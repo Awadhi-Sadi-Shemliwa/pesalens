@@ -41,6 +41,11 @@ jobs:
     permissions:
       security-events: write
       contents: read
+      # CodeQL's telemetry / status step calls the workflow-runs API.
+      # Without `actions: read` the analyze step fails with
+      # "Resource not accessible by integration" even after the scan
+      # itself succeeds. https://github.com/github/codeql-action/issues/1860
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
@@ -56,6 +61,11 @@ jobs:
     permissions:
       security-events: write
       contents: read
+      # CodeQL's telemetry / status step calls the workflow-runs API.
+      # Without `actions: read` the analyze step fails with
+      # "Resource not accessible by integration" even after the scan
+      # itself succeeds. https://github.com/github/codeql-action/issues/1860
+      actions: read
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3

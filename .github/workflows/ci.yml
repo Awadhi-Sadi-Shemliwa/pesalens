@@ -171,8 +171,10 @@ jobs:
           cache-dependency-path: PesaLens-MobileAPP/package-lock.json
       - run: npm ci
       - name: vitest
-        # `vitest run` exits 0 when there are no test files.
-        run: npm test --silent
+        # `vitest run` exits 1 when there are no test files; pass
+        # --passWithNoTests so the step succeeds on a green-field tree
+        # and only fails on real test regressions.
+        run: npm test --silent -- --passWithNoTests
 
   mobile-audit:
     name: mobile / npm audit
@@ -207,9 +209,16 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Boot the image and hit /health
+        # WEB_CONCURRENCY=1 here is important: with no DATABASE_URL set,
+        # the container falls back to SQLite under /app/storage. Two
+        # gunicorn workers racing to run init_db() + PRAGMA WAL on a
+        # brand-new SQLite file deadlock — second worker dies with
+        # "database is locked" and gunicorn marks the master failed.
+        # Production uses Postgres which doesn't have this race.
         run: |
           docker run -d --name pl-backend -p 8000:8000 \
             -e ENVIRONMENT=development \
+            -e WEB_CONCURRENCY=1 \
             pesalens/backend:ci
           for i in 1 2 3 4 5 6 7 8 9 10; do
             if curl -fsS http://127.0.0.1:8000/health; then
