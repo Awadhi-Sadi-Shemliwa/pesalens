@@ -91,16 +91,16 @@ def _strip_image_metadata(blob: bytes, mime: str | None) -> bytes:
 
 
 # Built-in fallbacks. OpenRouter retires free vision tiers often (the
-# previous Qwen2.5-VL / Llama-4-Scout / Gemini-2.0-flash-exp slots all
-# returned 404 by mid-2026 after the vendors pulled their free endpoints).
-# The real source of truth is the OPENROUTER_VISION_MODELS env var
-# (comma-separated) — set that to whatever's currently live on OpenRouter
-# for your account. Gemma-4 was dropped from this list after field reports
-# of weak OCR; Nemotron Nano 12B 2 VL is NVIDIA's small dedicated
-# vision-language model and handles receipt OCR more reliably on the
-# shared free pool.
+# previous Qwen2.5-VL / Llama-4-Scout / Gemini-2.0-flash-exp / Nemotron
+# Nano 12B 2 VL slots all returned 400/404 after the vendors pulled their
+# free endpoints — the last one died in June 2026 with "not a valid model
+# ID"). The real source of truth is the OPENROUTER_VISION_MODELS env var
+# (comma-separated) — set that to whatever a live `/v1/models` query shows
+# for your account. Gemma-4 stays off this list (field reports of weak
+# OCR); Nemotron-3 Nano Omni is NVIDIA's current multimodal model and was
+# the strongest free vision option live on OpenRouter as of 2026-06.
 DEFAULT_VISION_MODELS = [
-    "nvidia/nemotron-nano-12b-2-vl:free",
+    "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 ]
 
 
@@ -260,12 +260,14 @@ def _extract_json_object(text: str) -> str | None:
     return text[start : end + 1]
 
 
-# Tried in order. 2.5-flash is plenty for receipts; 2.0-flash is the
-# fallback when 2.5 is rate-limited. gemini-1.5-flash was retired by
-# Google in 2025 (404 on v1beta), so it's no longer in the chain.
+# Tried in order. 2.5-flash is plenty for receipts; 2.5-flash-lite is the
+# fallback when 2.5-flash is rate-limited. gemini-2.0-flash was removed —
+# Google zeroed its free tier in June 2026, so every call returned 429
+# "exceeded your quota" and it only burned a 12s retry before falling
+# through. gemini-1.5-flash was retired in 2025 (404 on v1beta).
 GEMINI_VISION_MODELS = [
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
 ]
 
 # Per-minute Gemini free-tier windows are 60s wide, not "a couple of
@@ -398,7 +400,7 @@ def _call_gemini_vision(image_bytes: bytes, mime: str) -> tuple[dict | None, lis
         resp = None
         for attempt in range(2):
             try:
-                resp = httpx.post(url, json=body, headers=headers, timeout=60.0)
+                resp = httpx.post(url, json=body, headers=headers, timeout=90.0)
             except Exception as exc:
                 log.warning("Gemini %s transport error: %s", model_id, exc)
                 errors.append(f"gemini/{model_id}: transport_error")
