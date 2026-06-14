@@ -152,7 +152,7 @@ PROMPT = (
     '  "is_receipt": true,\n'
     '  "vendor": "merchant / bank / operator name (NOT the full slip text)",\n'
     '  "date": "YYYY-MM-DD or null",\n'
-    '  "items": [{"name": "item or description", "quantity": 1, "unit": "kg/litres/pcs/null", "price": 0}],\n'
+    '  "items": [{"name": "item or description", "quantity": 1, "unit": "kg/litres/pcs/null", "unit_price": 0, "line_total": 0}],\n'
     '  "subtotal": 0,\n'
     '  "tax": 0,\n'
     '  "total": 0,\n'
@@ -160,10 +160,19 @@ PROMPT = (
     '  "category": "fuel|groceries|restaurant|utilities|stock|transport|tax|bank_transfer|mobile_money|other"\n'
     "}\n"
     "CRITICAL RULES:\n"
+    "- ALWAYS extract EVERY visible line item into `items` (with its "
+    "`unit_price` and `line_total`) AND the grand total into `total`. "
+    "A receipt that shows printed amounts MUST come back with `total` > 0 "
+    "and its line items — NEVER return just the vendor.\n"
     "- `total` MUST be the headline transaction amount as a plain number "
     "(no commas, no currency symbol). For a bank slip labelled "
     "'AMOUNT TZS 101,250.00', total = 101250. For an M-Pesa confirmation "
-    "'Umelipa TZS 5,000', total = 5000.\n"
+    "'Umelipa TZS 5,000', total = 5000. For a till receipt with a "
+    "'Receipt Total $204.75' line, total = 204.75.\n"
+    "- Receipts may be in TZS, USD, KES, or other currencies. Read the "
+    "printed currency symbol/code and set `currency` accordingly "
+    "(e.g. '$' -> USD, 'TSh' -> TZS). Still extract all amounts as plain "
+    "numbers.\n"
     "- NEVER dump the full OCR text into `vendor` — extract only the "
     "merchant / bank / operator NAME (e.g. 'NBC', 'Vodacom M-Pesa', "
     "'Shoprite Mlimani City').\n"
@@ -301,7 +310,24 @@ RECEIPT_RESPONSE_SCHEMA = {
             },
         },
     },
-    "required": ["is_receipt"],
+    # Gemini structured output honours `propertyOrdering` — decoding the
+    # line items BEFORE the grand total measurably improves the arithmetic
+    # and stops the model short-circuiting to a vendor-only object.
+    "propertyOrdering": [
+        "is_receipt", "image_description", "vendor", "date", "items",
+        "subtotal", "tax", "total", "currency", "category",
+    ],
+    # Expanding `required` beyond `is_receipt` is the real fix: with only
+    # is_receipt required, schema-guided decoding treated {is_receipt,
+    # vendor} as a *complete* answer, so 2.5-flash legally dropped the
+    # amount and every line item (the "receipt scanned but recorded as 0"
+    # bug). Forcing the money fields makes the model emit them on every
+    # receipt. On a non-receipt image the model fills 0 / "" here, which
+    # the is_receipt=false branch in scan_receipt ignores.
+    "required": [
+        "is_receipt", "vendor", "items",
+        "subtotal", "tax", "total", "currency", "category",
+    ],
 }
 
 
