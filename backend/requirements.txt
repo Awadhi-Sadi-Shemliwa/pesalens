@@ -13,6 +13,11 @@ pandas==2.2.3
 python-multipart==0.0.12
 python-dotenv==1.0.1
 openai>=1.50.0
+# Google Gemini SDK — used by the markets + assistant chat `_try_gemini`
+# fallback. Receipt OCR talks to the Gemini REST API directly (httpx) and
+# does NOT need this, but without it the chat paths have no fallback when
+# the OpenRouter free tier is exhausted.
+google-generativeai>=0.8,<0.9
 opencv-python-headless==4.10.0.84
 Pillow==10.4.0
 # OCR stack — lightweight MinerU alternative (PP-OCR models via ONNX, ~50MB)
