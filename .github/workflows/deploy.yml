@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      url: https://api.pesalens.com
+      url: https://pesalens.com
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,9 +85,9 @@ jobs:
         env:
           HOST: ${{ secrets.CONTABO_HOST }}
         run: |
-          # Health-check the *public* URL — proves Caddy + backend +
+          # Health-check the *public* URL — proves host NGINX + backend +
           # Postgres all came back up, not just the container.
-          URL="https://api.pesalens.com/health/ready"
+          URL="https://pesalens.com/health/ready"
           for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             if curl --fail --silent --show-error "$URL" >/dev/null; then
               echo "deploy healthy after ${i}0s"
