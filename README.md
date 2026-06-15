@@ -53,7 +53,7 @@ shipping. The short version:
    will refuse to build if cert pins or env vars are still at dev defaults.
 4. Replace the SHA-256 SPKI placeholders in
    `PesaLens-MobileAPP/android/app/src/main/res/xml/network_security_config.xml`
-   with real pins for `api.pesalens.com` before assembling a signed APK.
+   with real pins for `pesalens.com` before assembling a signed APK.
 
 ## License
 

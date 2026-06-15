@@ -1,26 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Production network policy:
-    • All traffic must be HTTPS to api.pesalens.com / pesalens.com.
+    • All traffic must be HTTPS to pesalens.com (and subdomains).
     • No user-installed CAs are trusted (defeats casual MITM via a rogue
       profile).
     • Cleartext is allowed only on debug builds, via the debug-overrides
       block, so a developer can point at a laptop on the same Wi-Fi.
 
   Certificate pinning is INTENTIONALLY DEFERRED for the initial launch.
-  A pin is a SHA-256 hash of the production server's public key — that
-  key does not exist until the API is actually deployed at
-  api.pesalens.com and Let's Encrypt issues a real cert. HTTPS-only is
-  still enforced by `cleartextTrafficPermitted="false"`, and the system
+  A pin is a SHA-256 hash of the production server's public key. HTTPS-only
+  is still enforced by `cleartextTrafficPermitted="false"`, and the system
   CA store still validates the chain — that's the same starting posture
   every Play Store app ships with.
 
-  After Render is live with HTTPS, re-add a `<pin-set>` block inside
-  `<domain-config>` with TWO real pins (primary + backup) so cert
-  rotations don't break the app:
+  Now that the API is live with HTTPS at pesalens.com, you can re-add a
+  `<pin-set>` block inside `<domain-config>` with TWO real pins (primary +
+  backup) so cert rotations don't break the app:
 
-      openssl s_client -connect api.pesalens.com:443 \
-        -servername api.pesalens.com </dev/null 2>/dev/null \
+      openssl s_client -connect pesalens.com:443 \
+        -servername pesalens.com </dev/null 2>/dev/null \
         | openssl x509 -pubkey -noout \
         | openssl pkey -pubin -outform DER \
         | openssl dgst -sha256 -binary | openssl enc -base64

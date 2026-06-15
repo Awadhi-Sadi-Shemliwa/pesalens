@@ -80,12 +80,6 @@ export const PublicNav = () => {
               {item.label}
             </Link>
           ))}
-          <a
-            href="#features"
-            className="px-3 py-2 text-sm text-txt-2 hover:text-txt-1 transition rounded-lg hover:bg-surface-3/60"
-          >
-            {t('nav.features')}
-          </a>
         </div>
         <div className="flex items-center gap-1.5">
           <div className="hidden md:flex items-center">

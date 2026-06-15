@@ -32,7 +32,7 @@ const apiUrl = process.env.VITE_API_URL || "";
 if (!apiUrl) {
   errors.push(
     "VITE_API_URL is empty. Set it to the public backend URL (e.g. " +
-      "https://api.pesalens.com/api) before building the release APK, " +
+      "https://pesalens.com/api) before building the release APK, " +
       "either in .env.production or as an env var passed to npm run release."
   );
 } else if (/^https?:\/\/(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(apiUrl)) {

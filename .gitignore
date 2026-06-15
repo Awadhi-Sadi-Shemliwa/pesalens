@@ -3,6 +3,10 @@
 .env.*
 !.env.example
 !.env.production.example
+# Mobile release Vite env — committed on purpose. Holds ONLY the public
+# API URL + build flag (no secrets; everything VITE_-prefixed is inlined
+# into the APK bundle anyway).
+!PesaLens-MobileAPP/.env.production
 *.key
 *.pem
 *.p12
