@@ -2,8 +2,13 @@
 #
 # Services:
 #   postgres  — durable DB, named volume, not exposed to the host.
-#   backend   — FastAPI app, talks to postgres on the internal network.
-#   caddy     — reverse proxy + automatic Let's Encrypt TLS.
+#   backend   — FastAPI app, talks to postgres on the internal network,
+#               published on the host loopback (127.0.0.1:8000) so the
+#               host's NGINX can reverse-proxy to it.
+#
+# TLS + the reverse proxy + serving the SPA are handled by NGINX running
+# on the HOST (apt install nginx + certbot), NOT in this stack — see
+# deploy/nginx/pesalens.conf and deploy/README.md.
 #
 # Bring up:  docker compose --env-file .env up -d
 # Tail logs: docker compose logs -f backend
@@ -43,6 +48,11 @@ services:
       # same .env works for both compose deploys and bare-metal runs.
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pesalens}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pesalens}
       ENVIRONMENT: production
+    ports:
+      # Loopback only — the backend is NEVER reachable from the public
+      # internet directly. The host's NGINX (deploy/nginx/pesalens.conf)
+      # proxies /api and /health to this port.
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,26 +70,8 @@ services:
     networks:
       - internal
 
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
-    depends_on:
-      - backend
-    networks:
-      - internal
-
 volumes:
   pgdata:
-  caddy_data:
-  caddy_config:
 
 networks:
   internal:
