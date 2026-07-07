@@ -354,12 +354,71 @@ def _detect_issues(result: dict) -> list[dict]:
     return issues
 
 
+def _resolve_opening_balance(
+    transactions: list[dict], metadata: dict | None
+) -> Optional[float]:
+    """Opening balance from metadata, else back-derived from the first row.
+
+    The statement header/footer scrape (pipeline._extract_header_balances)
+    and the validator both try to establish this earlier; this is the final
+    fallback used at analytics time: opening = row1.balance - row1.credit +
+    row1.debit. Shared by every caller so the derivation never drifts.
+    """
+    metadata = metadata or {}
+    opening = metadata.get("opening_balance")
+    if opening is not None:
+        return float(opening)
+    if transactions:
+        first = transactions[0]
+        if first.get("balance") is not None:
+            debit = first.get("debit") or 0
+            credit = first.get("credit") or 0
+            return round(float(first["balance"]) - float(credit) + float(debit), 2)
+    return None
+
+
+def _period_balances(result: dict) -> dict:
+    """Opening + period-end (closing) balance for the statement.
+
+    closing precedence:
+      1. metadata.closing_balance (scraped from header/footer)
+      2. the LAST transaction's running balance
+      3. opening + credits - debits (computed)
+    so the user always sees the exact account balance at the period end.
+    """
+    metadata = result.get("metadata") or {}
+    transactions = result.get("transactions") or []
+    credits, debits = _sum_amounts(transactions)
+
+    opening = _resolve_opening_balance(transactions, metadata)
+
+    closing = metadata.get("closing_balance")
+    closing_source = "statement"
+    if closing is None:
+        last_with_balance = next(
+            (t for t in reversed(transactions) if t.get("balance") is not None),
+            None,
+        )
+        if last_with_balance is not None:
+            closing = float(last_with_balance["balance"])
+            closing_source = "last_row"
+        elif opening is not None:
+            closing = round(opening + credits - debits, 2)
+            closing_source = "computed"
+
+    return {
+        "opening_balance": round(opening, 2) if opening is not None else None,
+        "closing_balance": round(float(closing), 2) if closing is not None else None,
+        "closing_source": closing_source if closing is not None else None,
+    }
+
+
 def _balance_comparison(result: dict) -> dict:
     metadata = result.get("metadata") or {}
     transactions = result.get("transactions") or []
     credits, debits = _sum_amounts(transactions)
 
-    opening = metadata.get("opening_balance")
+    opening = _resolve_opening_balance(transactions, metadata)
     closing = metadata.get("closing_balance")
 
     if closing is None:
@@ -402,28 +461,37 @@ def _balance_comparison(result: dict) -> dict:
     }
 
 
-def _transaction_costs(result: dict) -> dict:
-    """Estimate hidden bank fees from balance mismatches after debits.
+_BALANCE_GAP_TOLERANCE = 1.0  # TZS; mirrors validator.BALANCE_TOLERANCE
 
-    Many banks deduct fees, VAT, and excise duty silently — the running
-    balance drops by more than the listed debit. We sum every such
-    positive gap (expected_balance - actual_balance, after a debit) so
-    the user can see what their bank is quietly charging them.
+
+def _charges_and_interest(result: dict) -> dict:
+    """Identify bank charges AND interest from running-balance gaps.
+
+    For each row: expected = prev_balance - debit + credit; diff = expected - balance.
+      * diff > tol  → balance dropped MORE than listed ⇒ a silent bank
+        charge / VAT / excise (guarded by debit > 0, i.e. attributed to a
+        real outgoing transaction).
+      * diff < -tol → balance rose MORE than listed ⇒ interest credited /
+        an amount the bank added that wasn't itemised (guarded by debit == 0
+        so we don't mistake an under-listed debit for interest).
+
+    Caveat: validator.py repairs rows where BOTH debit & credit were missing
+    by setting them to the full balance delta, which zeroes the gap for
+    *standalone* fee/interest rows. Those are invisible here; charges/interest
+    on rows that already carry a listed debit/credit are still detected.
+
+    Returns a superset of the legacy `transaction_costs` shape
+    (`estimated_total`, `fee_occurrences`, `insight`) so existing consumers
+    (Dashboard fees card, InvestmentSimulator) keep working unchanged.
     """
     transactions = result.get("transactions") or []
     metadata = result.get("metadata") or {}
-    opening = metadata.get("opening_balance")
+    prev_balance = _resolve_opening_balance(transactions, metadata)
 
-    if opening is None and transactions:
-        first = transactions[0]
-        if first.get("balance") is not None:
-            debit = first.get("debit") or 0
-            credit = first.get("credit") or 0
-            opening = first["balance"] - credit + debit
-
-    total_hidden_fees = 0.0
-    fee_count = 0
-    prev_balance = opening
+    total_charges = 0.0
+    total_interest = 0.0
+    charges: list[dict] = []
+    interest: list[dict] = []
 
     for t in transactions:
         balance = t.get("balance")
@@ -432,25 +500,115 @@ def _transaction_costs(result: dict) -> dict:
         if balance is not None and prev_balance is not None:
             expected = prev_balance - debit + credit
             diff = expected - balance
-            if diff > 1.0 and debit > 0:
-                total_hidden_fees += diff
-                fee_count += 1
+            if diff > _BALANCE_GAP_TOLERANCE and debit > 0:
+                amount = round(diff, 2)
+                total_charges += amount
+                charges.append({
+                    "date": t.get("txn_date"),
+                    "description": (t.get("description") or "").strip()[:100],
+                    "amount": amount,
+                })
+            elif diff < -_BALANCE_GAP_TOLERANCE and debit == 0:
+                amount = round(-diff, 2)
+                total_interest += amount
+                interest.append({
+                    "date": t.get("txn_date"),
+                    "description": (t.get("description") or "").strip()[:100],
+                    "amount": amount,
+                })
         if balance is not None:
             prev_balance = balance
 
-    if fee_count > 0:
-        insight = (
-            f"Estimated TZS {total_hidden_fees:,.0f} in hidden transaction costs "
-            f"across {fee_count} transaction(s). These are typically bank fees, "
-            "VAT, and excise duty deducted silently."
+    charge_count = len(charges)
+    interest_count = len(interest)
+
+    parts: list[str] = []
+    if charge_count > 0:
+        parts.append(
+            f"TZS {total_charges:,.0f} in bank charges across "
+            f"{charge_count} transaction(s) — typically fees, VAT, and excise "
+            "duty deducted silently."
         )
-    else:
-        insight = "No hidden transaction costs detected in this statement."
+    if interest_count > 0:
+        parts.append(
+            f"TZS {total_interest:,.0f} in interest / uncredited amounts across "
+            f"{interest_count} transaction(s)."
+        )
+    insight = " ".join(parts) if parts else (
+        "No bank charges or interest detected in this statement."
+    )
 
     return {
-        "estimated_total": round(total_hidden_fees, 2),
-        "fee_occurrences": fee_count,
+        # legacy keys (backward-compatible)
+        "estimated_total": round(total_charges, 2),
+        "fee_occurrences": charge_count,
         "insight": insight,
+        # new charge/interest breakdown
+        "total_charges": round(total_charges, 2),
+        "charge_occurrences": charge_count,
+        "total_interest": round(total_interest, 2),
+        "interest_occurrences": interest_count,
+        "charges": charges,
+        "interest": interest,
+    }
+
+
+def charges_and_interest_in_range(
+    user_id: Optional[int], start: date, end: date
+) -> dict:
+    """Aggregate bank charges + interest across a user's statements, keeping
+    only itemised rows whose transaction date falls in [start, end].
+
+    The running-balance gap method is per-statement — chaining balances across
+    different statements/accounts would be wrong — so we run
+    `_charges_and_interest` on each saved result (correct balance chain) and
+    then filter its itemised rows by date. Rows are de-duplicated by
+    (date, description, amount) so two uploads overlapping the same period do
+    not double-count. Used by the Reconciliation page.
+    """
+    def _in_range(item: dict) -> bool:
+        raw = item.get("date")
+        if not raw:
+            return True  # keep undated items rather than silently drop them
+        try:
+            d = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return True
+        return start <= d <= end
+
+    seen: set[tuple] = set()
+    charges: list[dict] = []
+    interest: list[dict] = []
+    total_charges = 0.0
+    total_interest = 0.0
+
+    for result in load_all_results(user_id):
+        ci = _charges_and_interest(result)
+        for kind, bucket in (("c", ci["charges"]), ("i", ci["interest"])):
+            for item in bucket:
+                if not _in_range(item):
+                    continue
+                key = (kind, item.get("date"), item.get("description"), item.get("amount"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if kind == "c":
+                    charges.append(item)
+                    total_charges += item["amount"]
+                else:
+                    interest.append(item)
+                    total_interest += item["amount"]
+
+    charges.sort(key=lambda x: str(x.get("date") or ""))
+    interest.sort(key=lambda x: str(x.get("date") or ""))
+
+    return {
+        "total_charges": round(total_charges, 2),
+        "charge_occurrences": len(charges),
+        "total_interest": round(total_interest, 2),
+        "interest_occurrences": len(interest),
+        "charges": charges,
+        "interest": interest,
     }
 
 
@@ -458,16 +616,22 @@ def _kpis(results: list[dict]) -> dict:
     """Compute KPI block. Trend KPIs are only filled once we have >= 3 uploads."""
     if not results:
         empty = {k: None for k in
-                 ("money_in", "money_out", "net_flow", "savings_rate",
-                  "savings", "expense_growth", "income_growth")}
+                 ("money_in", "money_out", "net_flow", "opening_balance",
+                  "closing_balance", "savings_rate", "savings",
+                  "expense_growth", "income_growth")}
         return empty
 
     latest = results[-1]
     latest_credits, latest_debits = _sum_amounts(latest.get("transactions") or [])
+    balances = _period_balances(latest)
     base = {
         "money_in": round(latest_credits, 2),
         "money_out": round(latest_debits, 2),
         "net_flow": round(latest_credits - latest_debits, 2),
+        # Account balance at the start / end of the statement period. net_flow
+        # stays as pure credits - debits; these give the exact standing balance.
+        "opening_balance": balances["opening_balance"],
+        "closing_balance": balances["closing_balance"],
         "savings_rate": None,
         "savings": None,
         "expense_growth": None,
@@ -553,7 +717,7 @@ def build_dashboard_summary(user_id: Optional[int] = None) -> dict:
         },
         "kpis": _kpis(results),
         "balance_comparison": _balance_comparison(latest),
-        "transaction_costs": _transaction_costs(latest),
+        "transaction_costs": _charges_and_interest(latest),
         "issues": promoted,
         "categories": _category_breakdown(transactions),
         "monthly_data": monthly,  # kept for backwards compatibility
@@ -593,6 +757,7 @@ def build_analysis_payload(job_id: str, user_id: Optional[int] = None) -> Option
                          key=lambda t: t.get("credit") or 0, default=None)
     days = {str(t.get("txn_date")) for t in transactions if t.get("txn_date")}
     avg_daily_spend = round(debits / len(days), 2) if days else 0.0
+    balances = _period_balances(data)
 
     return {
         "job_id": job_id,
@@ -603,10 +768,12 @@ def build_analysis_payload(job_id: str, user_id: Optional[int] = None) -> Option
             "largest_expense": float(largest_expense.get("debit") or 0) if largest_expense else 0,
             "largest_income": float(largest_income.get("credit") or 0) if largest_income else 0,
             "avg_daily_spend": avg_daily_spend,
+            "opening_balance": balances["opening_balance"],
+            "closing_balance": balances["closing_balance"],
         },
         "categories": _category_breakdown(transactions),
         "balance_comparison": _balance_comparison(data),
-        "transaction_costs": _transaction_costs(data),
+        "transaction_costs": _charges_and_interest(data),
         "time_series": {
             "daily": _daily_series(transactions),
             "weekly": _weekly_series(transactions),

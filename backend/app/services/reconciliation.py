@@ -36,6 +36,7 @@ from app.config import settings
 from app.db import BusinessEntry, PersonalEntry, Upload
 from app.routers.receipts import _load_receipts, _receipt_amount
 from app.schemas.reconciliation import (
+    ChargesSummary,
     HistoricalPatterns,
     MonthlyBlindSpot,
     ReconciliationCandidate,
@@ -46,7 +47,11 @@ from app.schemas.reconciliation import (
     RecurringWithdrawal,
     TopVendor,
 )
-from app.services.analytics import categorize, load_all_results
+from app.services.analytics import (
+    categorize,
+    charges_and_interest_in_range,
+    load_all_results,
+)
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -755,6 +760,10 @@ def build_reconciliation(
     if (end - start).days >= 30:
         patterns = historical_patterns(txns, receipts, entries, groups)
 
+    # Bank charges & interest — computed per-statement (correct balance chain)
+    # then filtered to this date range. Independent of the debit↔receipt match.
+    charges_summary = ChargesSummary(**charges_and_interest_in_range(user_id, start, end))
+
     overall, insights, llm_status = llm_narrative(groups, kpis)
     if insights:
         for i, g in enumerate(groups):
@@ -767,6 +776,7 @@ def build_reconciliation(
         kpis=kpis,
         groups=groups,
         patterns=patterns,
+        charges_summary=charges_summary,
         overall_summary=overall,
         llm_status=llm_status,
         notes=notes,

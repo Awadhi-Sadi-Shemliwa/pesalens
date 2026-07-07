@@ -86,6 +86,27 @@ class HistoricalPatterns(BaseModel):
     blind_spot_by_month: list[MonthlyBlindSpot] = Field(default_factory=list)
 
 
+class ChargeItem(BaseModel):
+    """A single detected bank charge or interest row."""
+
+    date: Optional[str] = None
+    description: str = ""
+    amount: float
+
+
+class ChargesSummary(BaseModel):
+    """Bank charges + interest identified from running-balance gaps, restricted
+    to the reconciliation date range. Charges = balance dropped more than the
+    listed debit (fees/VAT/excise); interest = balance rose more than listed."""
+
+    total_charges: float = 0.0
+    charge_occurrences: int = 0
+    total_interest: float = 0.0
+    interest_occurrences: int = 0
+    charges: list[ChargeItem] = Field(default_factory=list)
+    interest: list[ChargeItem] = Field(default_factory=list)
+
+
 class ReconciliationRange(BaseModel):
     start: str
     end: str
@@ -97,6 +118,7 @@ class ReconciliationResponse(BaseModel):
     kpis: ReconciliationKpis
     groups: list[ReconciliationGroup] = Field(default_factory=list)
     patterns: Optional[HistoricalPatterns] = None
+    charges_summary: Optional[ChargesSummary] = None
     overall_summary: Optional[str] = None
     llm_status: Literal["ok", "unavailable", "skipped"] = "skipped"
     notes: list[str] = Field(default_factory=list)
