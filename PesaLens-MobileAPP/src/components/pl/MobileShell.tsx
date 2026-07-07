@@ -78,6 +78,7 @@ export const MobileShell = () => {
     "/analysis": "Analysis",
     "/assistant": "AI Assistant",
     "/markets": "Markets",
+    "/simulator": "Simulator",
     "/upload": "Upload",
     "/bookkeeping": "Bookkeeping",
     "/business-ledger": "Business Ledger",

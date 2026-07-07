@@ -133,19 +133,16 @@ const Profile = () => {
 
   return (
     <div className="px-4 py-4 space-y-5">
-      <div>
-        <Eyebrow>{t("nav.profile")}</Eyebrow>
-        <h1 className="text-[22px] font-bold tracking-tight mt-1">{t("nav.profile")} &amp; {t("nav.settings")}</h1>
-      </div>
-
-      <CardSoft>
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 rounded-full bg-gradient-to-br from-accent to-net text-white flex items-center justify-center font-bold">
-            <UserIcon className="w-5 h-5" />
+      {/* Premium gradient profile hero */}
+      <div className="rounded-2xl border border-accent/25 bg-gradient-to-br from-accent/20 via-net/10 to-transparent p-5 relative overflow-hidden">
+        <span aria-hidden className="absolute -right-8 -top-8 w-28 h-28 rounded-full bg-accent/15 blur-2xl pointer-events-none" />
+        <div className="relative flex items-center gap-3">
+          <div className="w-14 h-14 rounded-full bg-gradient-to-br from-accent to-net text-white flex items-center justify-center font-bold shadow-sm shrink-0">
+            <UserIcon className="w-6 h-6" />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="text-[14px] font-semibold truncate">{user?.full_name || "—"}</div>
-            <div className="text-[12px] text-txt-3 truncate flex items-center gap-1">
+            <div className="text-[16px] font-bold truncate">{user?.full_name || "—"}</div>
+            <div className="text-[12px] text-txt-2 truncate flex items-center gap-1">
               <Mail className="w-3.5 h-3.5" /> {user?.email || "—"}
             </div>
           </div>
@@ -153,7 +150,7 @@ const Profile = () => {
             {planLabel}
           </Badge>
         </div>
-        <div className="mt-3 flex items-center gap-2 text-[11px]">
+        <div className="relative mt-3 flex items-center gap-2 text-[11px]">
           {user?.email_verified ? (
             <span className="inline-flex items-center gap-1 text-inc bg-inc/10 border border-inc/30 rounded-md px-2 py-1 font-mono-tab uppercase tracking-ticker">
               <ShieldCheck className="w-3 h-3" /> Verified
@@ -164,7 +161,7 @@ const Profile = () => {
             </span>
           )}
         </div>
-      </CardSoft>
+      </div>
 
       {!user?.email_verified && (
         <Section eyebrow="Security" title="Verify your email">

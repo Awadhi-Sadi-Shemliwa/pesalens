@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   ArrowDownRight,
   Camera,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Lightbulb,
@@ -61,12 +60,24 @@ type Patterns = {
   blind_spot_by_month: { month: string; total_money_out: number; total_explained: number; blind_spot_ratio: number }[];
 };
 
+type ChargeItem = { date?: string | null; description: string; amount: number };
+
+type ChargesSummary = {
+  total_charges: number;
+  charge_occurrences: number;
+  total_interest: number;
+  interest_occurrences: number;
+  charges: ChargeItem[];
+  interest: ChargeItem[];
+};
+
 type ReconcileData = {
   range: { start: string; end: string };
   scope: Scope;
   kpis: Kpis;
   groups: Group[];
   patterns?: Patterns | null;
+  charges_summary?: ChargesSummary | null;
   overall_summary?: string | null;
   llm_status: "ok" | "unavailable" | "skipped";
   notes: string[];
@@ -75,9 +86,9 @@ type ReconcileData = {
 type Preset = "this" | "last" | "3mo";
 
 const STATUS_LABEL: Record<Group["status"], { label: string; tone: "inc" | "exp" | "dng" }> = {
-  fully_explained: { label: "Explained", tone: "inc" },
-  partial:         { label: "Partial",   tone: "exp" },
-  blind_spot:      { label: "Blind",     tone: "dng" },
+  fully_explained: { label: "Matched", tone: "inc" },
+  partial:         { label: "Partial", tone: "exp" },
+  blind_spot:      { label: "Missing", tone: "dng" },
 };
 
 const KIND_LABEL: Record<Group["kind"], string> = {
@@ -128,6 +139,20 @@ const Reconciliation = () => {
   const llmOk = data?.llm_status === "ok";
   const blindPct = kpis ? Math.round((kpis.blind_spot_ratio || 0) * 100) : 0;
 
+  // Flatten candidates into one ledger view + split into receipt/entry halves
+  // so the two balance panels read like a bank-reconciliation equation.
+  const candidates = useMemo(
+    () => groups.flatMap((g) => (g.candidates || []).map((c) => ({ ...c })))
+      .sort((a, b) => (b.date || "").localeCompare(a.date || "")),
+    [groups],
+  );
+  const receiptTotal = candidates.filter((c) => c.source === "receipt").reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const entryTotal = candidates.filter((c) => c.source !== "receipt").reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const recorded = receiptTotal + entryTotal;
+  const moneyOut = kpis?.total_money_out || 0;
+  const explained = kpis?.total_explained || 0;
+  const blindSpot = Math.max(0, moneyOut - explained);
+
   return (
     <div className="px-4 py-4 space-y-5">
       <div>
@@ -175,15 +200,53 @@ const Reconciliation = () => {
         </div>
       )}
 
-      {/* KPI tiles ---------------------------------------------------- */}
+      {/* Balance equations — Ledger vs Statement --------------------- */}
       {kpis && (
-        <div className="grid grid-cols-2 gap-3">
-          <KpiTile label="Money out" value={fmtTZSFull(kpis.total_money_out)} icon={ArrowDownRight} />
-          <KpiTile label="Explained" value={fmtTZSFull(kpis.total_explained)} icon={CheckCircle2} tone="inc" />
-          <KpiTile label="Blind spot" value={`${blindPct}%`} icon={AlertTriangle} tone={blindPct >= 50 ? "dng" : "exp"} />
-          <KpiTile label="Tracked" value={String(kpis.group_count)} icon={Wallet} />
+        <div className="space-y-3">
+          <BalanceEquation
+            title="Ledger balance"
+            sideLabel="Your records"
+            icon={Wallet}
+            figures={[
+              { label: "Receipts", value: receiptTotal },
+              { op: "+" },
+              { label: "Entries", value: entryTotal },
+              { op: "=" },
+              { label: "Recorded", value: recorded, tone: "accent" },
+            ]}
+          />
+          <BalanceEquation
+            title="Statement balance"
+            sideLabel="From your bank"
+            icon={ArrowDownRight}
+            figures={[
+              { label: "Money out", value: moneyOut },
+              { op: "−" },
+              { label: "Explained", value: explained, tone: "inc" },
+              { op: "i" },
+              { label: "Blind spot", value: blindSpot, tone: blindPct >= 50 ? "dng" : "exp" },
+            ]}
+          />
+
+          {/* Coverage meter */}
+          <div className="card-soft !p-3.5">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-[10px] text-txt-3 font-mono-tab uppercase tracking-ticker">Coverage · {kpis.group_count} events</span>
+              <span className="text-[11px] font-semibold">
+                <span className="text-inc">{100 - blindPct}% explained</span>
+                <span className="text-txt-3"> · </span>
+                <span className={blindPct >= 50 ? "text-dng" : "text-exp"}>{blindPct}% blind</span>
+              </span>
+            </div>
+            <div className="h-2.5 rounded-full bg-dng/20 overflow-hidden flex">
+              <div className="h-full bg-inc rounded-l-full" style={{ width: `${100 - blindPct}%` }} />
+            </div>
+          </div>
         </div>
       )}
+
+      {/* Bank charges & interest ------------------------------------- */}
+      {data?.charges_summary && <ChargesCard summary={data.charges_summary} />}
 
       {/* Overall summary --------------------------------------------- */}
       {data?.overall_summary && (
@@ -197,8 +260,8 @@ const Reconciliation = () => {
         </CardSoft>
       )}
 
-      {/* Groups ------------------------------------------------------- */}
-      <Section eyebrow="Statement → potential usage">
+      {/* Statement — money out (tap to see what explains it) --------- */}
+      <Section eyebrow="Statement · money out" title="Tap a row to see its matches">
         {query.isLoading && (
           <CardSoft className="!p-4 text-center text-[12px] text-txt-3">Loading…</CardSoft>
         )}
@@ -219,37 +282,70 @@ const Reconciliation = () => {
         </div>
       </Section>
 
+      {/* Ledger — receipts & entries --------------------------------- */}
+      {candidates.length > 0 && (
+        <Section eyebrow="Ledger · receipts & entries" title={`${candidates.length} backing items`}>
+          <div className="card-soft !p-0 overflow-hidden">
+            {candidates.map((c, i) => (
+              <div key={`${c.source}-${c.ref_id || i}`} className="flex items-center gap-3 px-4 py-2.5 border-b border-border/30 last:border-0">
+                <span className="text-[10px] font-mono-tab uppercase tracking-wider text-txt-3 w-12 shrink-0">
+                  {(c.date || "—").slice(5) || "—"}
+                </span>
+                {c.source === "receipt" ? <Camera className="w-3.5 h-3.5 text-txt-3 shrink-0" /> : <Wallet className="w-3.5 h-3.5 text-txt-3 shrink-0" />}
+                <div className="min-w-0 flex-1">
+                  <div className="text-[12.5px] text-txt-1 truncate">{c.vendor || c.category || "Unlabelled"}</div>
+                  <div className="text-[9px] font-mono-tab uppercase tracking-wider text-txt-4">
+                    {SOURCE_LABEL[c.source]}{c.date_inferred ? " · scan date" : ""}
+                  </div>
+                </div>
+                <span className="text-[12.5px] font-semibold tabular text-txt-1 shrink-0">{fmtTZS(c.amount)}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
+      )}
+
       {/* Patterns ----------------------------------------------------- */}
       {patterns && <PatternsList patterns={patterns} />}
     </div>
   );
 };
 
-const KpiTile = ({
-  label,
-  value,
-  icon: Icon,
-  tone,
-}: {
-  label: string;
-  value: string;
-  icon: any;
-  tone?: "inc" | "exp" | "dng";
-}) => {
-  const toneClass = tone === "inc" ? "text-inc"
-                  : tone === "exp" ? "text-exp"
-                  : tone === "dng" ? "text-dng"
-                  :                   "text-txt-1";
-  return (
-    <div className="card-soft !p-3.5">
-      <div className="flex items-center justify-between text-[10px] font-mono-tab uppercase tracking-ticker text-txt-3">
-        <span>{label}</span>
-        <Icon className="w-3 h-3" />
+type Figure = { label?: string; value?: number; tone?: "inc" | "exp" | "dng" | "accent"; op?: string };
+
+const toneText: Record<string, string> = { inc: "text-inc", exp: "text-exp", dng: "text-dng", accent: "text-accent" };
+
+// A bank-style balance "equation": figures separated by circular
+// operator badges (− + = i), mirroring the web reconciliation panel.
+const BalanceEquation = ({ title, sideLabel, icon: Icon, figures }: { title: string; sideLabel: string; icon: any; figures: Figure[] }) => (
+  <div className="card-soft !p-4">
+    <div className="flex items-center justify-between gap-2 mb-3.5">
+      <div className="flex items-center gap-2">
+        <span className="w-7 h-7 rounded-lg bg-accent/15 text-accent flex items-center justify-center shrink-0">
+          <Icon className="w-3.5 h-3.5" />
+        </span>
+        <Eyebrow>{title}</Eyebrow>
       </div>
-      <div className={`mt-1.5 text-[18px] font-bold tabular ${toneClass}`}>{value}</div>
+      <Badge tone="muted">{sideLabel}</Badge>
     </div>
-  );
-};
+    <div className="flex items-center gap-1">
+      {figures.map((f, i) =>
+        f.op ? (
+          <span key={i} className="w-5 h-5 rounded-full border border-border text-txt-3 flex items-center justify-center text-[11px] font-mono-tab shrink-0">
+            {f.op === "i" ? <AlertTriangle className="w-2.5 h-2.5" /> : f.op}
+          </span>
+        ) : (
+          <div key={i} className="flex-1 min-w-0 text-center">
+            <div className={`text-[14px] font-bold tabular font-mono-tab truncate ${f.tone ? toneText[f.tone] : "text-txt-1"}`}>
+              {fmtTZS(f.value || 0)}
+            </div>
+            <div className="text-[8px] uppercase tracking-wider text-txt-3 font-mono-tab mt-0.5 truncate">{f.label}</div>
+          </div>
+        ),
+      )}
+    </div>
+  </div>
+);
 
 const GroupCard = ({ g, open, onToggle }: { g: Group; open: boolean; onToggle: () => void }) => {
   const status = STATUS_LABEL[g.status];
@@ -314,6 +410,73 @@ const GroupCard = ({ g, open, onToggle }: { g: Group; open: boolean; onToggle: (
               {g.insight}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Bank charges (balance dropped more than the listed debit) + interest
+// (balance rose more than listed), detected from running-balance gaps.
+const ChargesCard = ({ summary }: { summary: ChargesSummary }) => {
+  const [tab, setTab] = useState<"charges" | "interest">("charges");
+  const items = tab === "charges" ? (summary.charges || []) : (summary.interest || []);
+  const hasAny = (summary.charge_occurrences || 0) > 0 || (summary.interest_occurrences || 0) > 0;
+
+  return (
+    <div className="card-soft !p-0 overflow-hidden">
+      <div className="px-4 py-3 border-b border-border/50">
+        <Eyebrow>Bank charges & interest</Eyebrow>
+        <p className="text-[11px] text-txt-3 mt-1">Money your bank quietly deducted or added.</p>
+      </div>
+      <div className="grid grid-cols-2 gap-px bg-border/60">
+        <div className="bg-surface-2 p-3">
+          <div className="text-[10px] font-mono-tab uppercase tracking-ticker text-txt-3">Charges</div>
+          <div className="mt-1 text-[17px] font-bold tabular text-dng">{fmtTZSFull(summary.total_charges)}</div>
+          <div className="text-[9px] font-mono-tab uppercase tracking-wider text-txt-4 mt-0.5">
+            {summary.charge_occurrences} occ.
+          </div>
+        </div>
+        <div className="bg-surface-2 p-3">
+          <div className="text-[10px] font-mono-tab uppercase tracking-ticker text-txt-3">Interest</div>
+          <div className="mt-1 text-[17px] font-bold tabular text-inc">{fmtTZSFull(summary.total_interest)}</div>
+          <div className="text-[9px] font-mono-tab uppercase tracking-wider text-txt-4 mt-0.5">
+            {summary.interest_occurrences} occ.
+          </div>
+        </div>
+      </div>
+
+      {hasAny ? (
+        <>
+          <div className="flex gap-1.5 px-3 pt-2.5">
+            <Pill active={tab === "charges"} onClick={() => setTab("charges")}>
+              Charges ({summary.charges?.length || 0})
+            </Pill>
+            <Pill active={tab === "interest"} onClick={() => setTab("interest")}>
+              Interest ({summary.interest?.length || 0})
+            </Pill>
+          </div>
+          {items.length === 0 ? (
+            <div className="px-4 py-5 text-center text-[11.5px] text-txt-3">None in this range.</div>
+          ) : (
+            <ul className="px-2 py-2 space-y-0.5">
+              {items.map((it, i) => (
+                <li key={i} className="flex items-center gap-2.5 px-2 py-2 text-[11.5px]">
+                  <span className="text-[9px] font-mono-tab uppercase tracking-wider text-txt-3 w-16 shrink-0">
+                    {it.date || "—"}
+                  </span>
+                  <span className="flex-1 truncate text-txt-2">{it.description || "Unlabelled"}</span>
+                  <span className={`font-semibold tabular ${tab === "charges" ? "text-dng" : "text-inc"}`}>
+                    {fmtTZS(it.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      ) : (
+        <div className="px-4 py-5 text-center text-[11.5px] text-txt-3">
+          No bank charges or interest detected in this range.
         </div>
       )}
     </div>

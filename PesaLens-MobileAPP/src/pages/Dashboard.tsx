@@ -11,8 +11,8 @@ import {
   Sparkles,
   Upload as UploadIcon,
 } from "lucide-react";
-import { Badge, CardSoft, Divider, Eyebrow, Section } from "@/components/pl/primitives";
-import { KpiTile } from "@/components/pl/KpiTile";
+import { Badge, Bento, CardSoft, Divider, Eyebrow, Section } from "@/components/pl/primitives";
+import { KpiTile, Sparkline } from "@/components/pl/KpiTile";
 import { IncomeExpenseChart } from "@/components/pl/IncomeExpenseChart";
 import { SpendingBreakdown } from "@/components/pl/SpendingBreakdown";
 // @ts-ignore — JS modules
@@ -152,6 +152,28 @@ const Dashboard = () => {
         </CardSoft>
       </div>
 
+      {/* Net-flow hero — the premium headline */}
+      <Bento className="!p-0 overflow-hidden">
+        <div className="p-4 bg-gradient-to-br from-accent/20 via-net/10 to-transparent">
+          <div className="flex items-center justify-between gap-2">
+            <Eyebrow>Net flow · this period</Eyebrow>
+            {trends.net_pct !== undefined && (
+              <span className={`inline-flex items-center gap-0.5 text-[11px] font-mono-tab font-bold px-2 py-0.5 rounded-full ${Number(trends.net_pct) >= 0 ? "bg-inc/15 text-inc" : "bg-dng/15 text-dng"}`}>
+                {Number(trends.net_pct) >= 0 ? "+" : ""}{Math.abs(Number(trends.net_pct) || 0).toFixed(1)}%
+              </span>
+            )}
+          </div>
+          <div className={`mt-1.5 font-mono-tab text-[34px] font-bold leading-none tabular ${Number(kpis.net_flow) >= 0 ? "text-accent" : "text-dng"}`}>
+            {Number(kpis.net_flow) >= 0 ? "+" : ""}{fmtTZS(Number(kpis.net_flow) || 0)}
+          </div>
+          <div className="mt-2 flex items-center gap-4 text-[11px] font-mono-tab">
+            <span className="inline-flex items-center gap-1.5 text-inc"><span className="w-2 h-2 rounded-full bg-inc" />In {fmtTZS(Number(kpis.money_in) || 0)}</span>
+            <span className="inline-flex items-center gap-1.5 text-exp"><span className="w-2 h-2 rounded-full bg-exp" />Out {fmtTZS(Number(kpis.money_out) || 0)}</span>
+          </div>
+          {netSpark.length > 1 && <div className="mt-2"><Sparkline data={netSpark} color="hsl(var(--accent))" /></div>}
+        </div>
+      </Bento>
+
       {/* Cash Flow Section — iOS style with large title */}
       <div className="space-y-4">
         <div className="ios-section-header">Cash Flow</div>
@@ -169,6 +191,17 @@ const Dashboard = () => {
           />
         </div>
       </div>
+
+      {/* Standing Balance — opening → period end */}
+      {(kpis.opening_balance != null || kpis.closing_balance != null) && (
+        <div className="space-y-4">
+          <div className="ios-section-header">Standing Balance</div>
+          <div className="grid grid-cols-2 gap-3">
+            <KpiTile label="Opening balance" value={Number(kpis.opening_balance) || 0} tone="net" />
+            <KpiTile label="Balance now" value={Number(kpis.closing_balance) || 0} tone="accent" />
+          </div>
+        </div>
+      )}
 
       {/* Balance Check — Chase-style large display */}
       {balance && (

@@ -207,17 +207,19 @@ const Bookkeeping = () => {
         <button
           onClick={() => fileRef.current?.click()}
           disabled={scanning}
-          className="card-soft !p-4 flex flex-col items-center gap-2 active:bg-surface-3 disabled:opacity-60"
+          className="rounded-2xl border border-accent/25 bg-gradient-to-br from-accent/20 via-accent/10 to-transparent p-4 flex flex-col items-center justify-center gap-2 active:opacity-90 disabled:opacity-60"
         >
-          <Camera className="w-6 h-6 text-accent" />
+          <span className="w-11 h-11 rounded-2xl bg-accent/15 text-accent flex items-center justify-center">
+            <Camera className="w-5 h-5" />
+          </span>
           <span className="text-[13px] font-semibold">{scanning ? "Scanning…" : "Scan receipt"}</span>
           <span className="text-[10px] text-txt-3 font-mono-tab">JPEG / PNG · ≤ 8 MB</span>
         </button>
-        <CardSoft className="text-center">
-          <Eyebrow>RECEIPTS</Eyebrow>
-          <div className="font-mono-tab text-[26px] font-bold tabular mt-1">{patterns.receipt_count || 0}</div>
+        <div className="rounded-2xl border border-net/25 bg-gradient-to-br from-net/20 via-net/10 to-transparent p-4 text-center flex flex-col justify-center">
+          <Eyebrow>Receipts</Eyebrow>
+          <div className="font-mono-tab text-[28px] font-bold tabular mt-1 text-net">{patterns.receipt_count || 0}</div>
           <div className="text-[10px] text-txt-3 mt-1">Captured to date</div>
-        </CardSoft>
+        </div>
       </div>
       <input
         ref={fileRef}

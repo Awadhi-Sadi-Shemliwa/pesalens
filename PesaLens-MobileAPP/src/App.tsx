@@ -10,6 +10,7 @@ import Dashboard from "@/pages/Dashboard";
 import Analysis from "@/pages/Analysis";
 import Assistant from "@/pages/Assistant";
 import Markets from "@/pages/Markets";
+import Simulator from "@/pages/Simulator";
 import More from "@/pages/More";
 import SignIn from "@/pages/SignIn";
 import SignUp from "@/pages/SignUp";
@@ -157,6 +158,7 @@ const App = () => {
             <Route path="/analysis" element={<Analysis />} />
             <Route path="/assistant" element={<Assistant />} />
             <Route path="/markets" element={<Markets />} />
+            <Route path="/simulator" element={<Simulator />} />
             <Route path="/upload" element={<Upload />} />
             <Route path="/reconciliation" element={<Reconciliation />} />
             <Route path="/bookkeeping" element={<Bookkeeping />} />

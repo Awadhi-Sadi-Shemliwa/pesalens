@@ -1,354 +1,393 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowDownRight, ArrowUpRight, RefreshCw } from "lucide-react";
-import { Badge, CardSoft, Eyebrow, Pill, Section } from "@/components/pl/primitives";
-// @ts-ignore — JS modules
-import { fetchDashboardSummary, fetchMarketSnapshot, fmtTZS, fmtTZSFull } from "@/data/api";
-// @ts-ignore — JS modules
 import {
-  ASSET_CATEGORIES,
-  assetsInCategory,
-  buildAssetUniverse,
-  CAPACITY_TIERS,
-  computeBuyPlan,
-  investmentCapacity,
-  recommendTier,
-  simulateInvestment,
-  suggestCheaperDseAsset,
-} from "@/data/decisions";
+  ArrowDownRight,
+  ArrowUpRight,
+  BarChart3,
+  Globe,
+  RefreshCw,
+  Send,
+  Sparkles,
+  TrendingUp,
+  Zap,
+  ArrowRight,
+} from "lucide-react";
+import { Badge, Bento, CardSoft, Eyebrow, GlassCard, Section } from "@/components/pl/primitives";
+// @ts-ignore — JS modules
+import { askMarketInsight, fetchMarketSnapshot, fmtTZS } from "@/data/api";
 
-type TierId = "safe" | "moderate" | "aggressive";
-type CategoryId = "stable" | "stocks" | "crypto";
+const OFFLINE_MARKER = "PesaLens AI advisor is offline";
+const QUICK_ASKS = [
+  "Is now a good time to buy DSE stocks?",
+  "What's moving the shilling this week?",
+  "Explain crypto risk in simple terms",
+];
 
-const tierMeta: Record<TierId, { label: string; subtitle: string }> = {
-  safe: { label: "Just dip a toe", subtitle: "5% of surplus · low pressure" },
-  moderate: { label: "Build the habit", subtitle: "15% of surplus · default" },
-  aggressive: { label: "Go bigger", subtitle: "30% of surplus · OK with swings" },
+/* ---------------------------------------------------------------
+   Helpers ported from the web MarketsPage so the mobile deck shows
+   the same leaders / movers / sentiment / indices content.
+   --------------------------------------------------------------- */
+
+const fmtNum = (v: any, decimals = 2) => {
+  if (v == null || Number.isNaN(Number(v))) return "—";
+  return Number(v).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
 };
 
-const categoryMeta: Record<CategoryId, { label: string; sub: string }> = {
-  stable: { label: "Stable", sub: "USDT / USDC tokens" },
-  stocks: { label: "Stocks", sub: "DSE listings" },
-  crypto: { label: "Crypto", sub: "BTC, ETH, alts" },
+/* Deterministic pseudo-random walk so sparklines stay stable across
+   renders. The tail is biased so the visible slope agrees with the
+   real 24h change sign — an INDICATIVE trend glyph, always labelled. */
+const seededSeries = (seed: string, n = 20, pct = 0): number[] => {
+  let s = 2166136261;
+  const str = String(seed);
+  for (let i = 0; i < str.length; i++) { s ^= str.charCodeAt(i); s = Math.imul(s, 16777619); }
+  const rnd = () => { s = Math.imul(s ^ (s >>> 15), 2246822507); s ^= s >>> 13; return ((s >>> 0) % 1000) / 1000; };
+  const out: number[] = [];
+  let v = 50;
+  for (let i = 0; i < n; i++) { v += (rnd() - 0.5) * 6; out.push(v); }
+  const dir = pct >= 0 ? 1 : -1;
+  const from = Math.floor(n * 0.55);
+  const mag = Math.min(3, 0.6 + Math.abs(pct) * 0.15);
+  for (let i = from; i < n; i++) out[i] += dir * (i - from) * mag;
+  return out;
 };
 
-// Single line in the math chain. Sign + tone make the cause-effect
-// relationship visible at a glance — green +, amber −, etc.
-const FlowRow = ({
-  label,
-  value,
-  sign,
-  tone = "muted",
-  bold = false,
-  indent = false,
-}: {
-  label: string;
-  value: string;
-  sign?: string;
-  tone?: "inc" | "exp" | "net" | "accent" | "dng" | "muted";
-  bold?: boolean;
-  indent?: boolean;
-}) => {
-  const toneCls: Record<string, string> = {
-    inc: "text-inc",
-    exp: "text-exp",
-    net: "text-net",
-    accent: "text-accent",
-    dng: "text-dng",
-    muted: "text-txt-3",
-  };
+type URow = { cls: string; symbol: string; name?: string; change: number; price: number; priceStr: string };
+
+/* Collapse every feed carrying a change_pct into one comparable universe. */
+const buildUniverse = (snapshot: any) => {
+  const dse: URow[] = (snapshot?.dse?.data || []).map((r: any) => ({
+    cls: "DSE", symbol: r.symbol, name: r.name, change: Number(r.change_pct) || 0,
+    price: Number(r.price) || 0, priceStr: `TZS ${fmtNum(r.price)}`,
+  }));
+  const crypto: URow[] = (snapshot?.crypto?.data || []).map((r: any) => ({
+    cls: "Crypto", symbol: r.symbol, name: r.name, change: Number(r.change_pct) || 0,
+    price: Number(r.price_usd) || 0, priceStr: `$${fmtNum(r.price_usd)}`,
+  }));
+  const indices: URow[] = (snapshot?.indices?.data || []).map((r: any) => ({
+    cls: "Index", symbol: r.symbol, name: r.name, change: Number(r.change_pct) || 0,
+    price: Number(r.price) || 0, priceStr: `${fmtNum(r.price)} ${r.currency || ""}`.trim(),
+  }));
+  return { dse, crypto, indices };
+};
+
+const catAvg = (rows: URow[]) => (rows && rows.length ? rows.reduce((s, x) => s + x.change, 0) / rows.length : 0);
+
+/* Tone classes spelled out — Tailwind JIT can't see runtime `text-${x}`. */
+const toneText: Record<string, string> = { inc: "text-inc", dng: "text-dng", net: "text-net", muted: "text-txt-3" };
+
+/* Signed % delta with a directional arrow. */
+const Delta = ({ pct, size = 11 }: { pct: number; size?: number }) => {
+  const n = Number(pct) || 0;
+  const up = n > 0;
+  const down = n < 0;
   return (
-    <div className={`flex items-center gap-2 ${indent ? "pl-3" : ""}`}>
-      <span className={`w-3 text-center font-mono-tab text-[11px] ${toneCls[tone]}`}>
-        {sign || ""}
-      </span>
-      <span className={`flex-1 ${indent ? "text-txt-3 text-[11px]" : "text-txt-2"}`}>{label}</span>
-      <span
-        className={`font-mono-tab tabular text-right ${toneCls[tone]} ${
-          bold ? "font-bold text-[14px]" : "text-[13px]"
-        }`}
-      >
-        {value}
-      </span>
-    </div>
+    <span
+      className={`inline-flex items-center gap-0.5 font-mono-tab font-bold tabular ${up ? "text-inc" : down ? "text-dng" : "text-txt-3"}`}
+      style={{ fontSize: size }}
+    >
+      {up ? <ArrowUpRight style={{ width: size, height: size }} /> : down ? <ArrowDownRight style={{ width: size, height: size }} /> : null}
+      {n >= 0 ? "+" : ""}{n.toFixed(2)}%
+    </span>
+  );
+};
+
+/* Lightweight inline-SVG sparkline — one polyline, no chart lib per row. */
+const MiniSpark = ({ values, up, w = 68, h = 26 }: { values: number[]; up: boolean; w?: number; h?: number }) => {
+  if (!values || values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const pts = values
+    .map((v, i) => `${(i / (values.length - 1)) * w},${h - ((v - min) / span) * (h - 3) - 1.5}`)
+    .join(" ");
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} width={w} height={h} className={up ? "text-inc" : "text-dng"} preserveAspectRatio="none">
+      <polyline points={pts} fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+};
+
+/* Ask-the-market-advisor chat panel (mirrors the web InsightPanel). */
+const MarketAdvisor = ({ snapshot }: { snapshot: any }) => {
+  const [history, setHistory] = useState<{ role: "user" | "assistant"; text: string }[]>([]);
+  const [draft, setDraft] = useState("");
+  const [pending, setPending] = useState(false);
+  const [offline, setOffline] = useState(false);
+
+  const send = async (raw?: string) => {
+    const message = (raw ?? draft).trim();
+    if (!message || pending) return;
+    setDraft("");
+    const next = [...history, { role: "user" as const, text: message }];
+    setHistory(next);
+    setPending(true);
+    try {
+      const { reply } = await askMarketInsight(message, history);
+      const isOffline = typeof reply === "string" && reply.includes(OFFLINE_MARKER);
+      setOffline(isOffline);
+      if (!isOffline) setHistory((h) => [...h, { role: "assistant", text: reply || "No reply." }]);
+      else setHistory([]);
+    } catch {
+      setHistory((h) => [...h, { role: "assistant", text: "Couldn't reach the advisor. Try again." }]);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const dseCount = snapshot?.dse?.data?.length || 0;
+  const cryptoCount = snapshot?.crypto?.data?.length || 0;
+
+  return (
+    <GlassCard className="border-accent/25">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <Eyebrow>Ask the market advisor</Eyebrow>
+          <h3 className="text-[15px] font-bold mt-1 leading-tight">
+            Reading {dseCount} DSE stocks & {cryptoCount} coins for you
+          </h3>
+        </div>
+        <Badge tone="accent">AI</Badge>
+      </div>
+
+      {offline && (
+        <div className="mt-3 rounded-lg border border-exp/30 bg-exp/5 p-2.5 text-[11px] text-txt-2">
+          The advisor is offline right now — live feeds below still work.
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div className="mt-3 space-y-2 max-h-64 overflow-y-auto scroll-hide">
+          {history.map((m, i) => (
+            <div key={i} className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
+              <div className={`max-w-[88%] px-3 py-2 rounded-2xl text-[12px] leading-snug whitespace-pre-wrap ${
+                m.role === "user" ? "bg-accent text-white rounded-br-sm" : "bg-surface-3 text-txt-1 rounded-bl-sm"
+              }`}>
+                {m.text}
+              </div>
+            </div>
+          ))}
+          {pending && <div className="text-[11px] text-txt-3 px-1">Thinking…</div>}
+        </div>
+      )}
+
+      {history.length === 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {QUICK_ASKS.map((q) => (
+            <button key={q} onClick={() => send(q)} className="text-[11px] px-2.5 py-1.5 rounded-lg border border-border text-txt-2 active:bg-surface-3">
+              {q}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <form onSubmit={(e) => { e.preventDefault(); send(); }} className="mt-3 flex gap-2 items-center">
+        <input
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          disabled={pending}
+          placeholder="Ask about DSE, crypto, FX…"
+          className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-surface-2 border border-border text-[13px] outline-none focus:border-accent/40"
+        />
+        <button type="submit" disabled={pending || !draft.trim()} className="w-10 h-10 rounded-xl bg-accent text-white flex items-center justify-center disabled:opacity-50 ios-press shrink-0">
+          <Send className="w-4 h-4" />
+        </button>
+      </form>
+    </GlassCard>
+  );
+};
+
+/* ================================================================
+   MarketExplorer — a category-driven overview. Three selector cards
+   (DSE · Crypto · Global Indices) scope the leaders, the movers and
+   the sentiment read to ONE category at a time, so every number on
+   screen belongs to the same market.
+   ================================================================ */
+const CATEGORIES = [
+  { id: "dse", label: "DSE Equities", sub: "Dar es Salaam Stock Exchange", icon: BarChart3 },
+  { id: "crypto", label: "Crypto", sub: "Bitcoin, Ethereum & altcoins", icon: Zap },
+  { id: "indices", label: "Global Indices", sub: "Nasdaq · S&P 500 · FTSE", icon: Globe },
+] as const;
+type CatId = (typeof CATEGORIES)[number]["id"];
+
+const MarketExplorer = ({ universe }: { universe: ReturnType<typeof buildUniverse> }) => {
+  const [cat, setCat] = useState<CatId>("dse");
+  const active = CATEGORIES.find((c) => c.id === cat) || CATEGORIES[0];
+  const rows: URow[] = (universe as any)[cat] || [];
+
+  const sorted = useMemo(() => [...rows].sort((a, b) => b.change - a.change), [rows]);
+  const leaders = sorted.slice(0, 3);
+  const top = sorted[0];
+  const bottom = sorted.length > 1 ? sorted[sorted.length - 1] : null;
+  const avg = catAvg(rows);
+
+  const band =
+    avg >= 0.4
+      ? { label: "Bullish", tone: "inc", means: `Most ${active.label} assets are rising — buyers are in control right now.` }
+      : avg <= -0.4
+      ? { label: "Bearish", tone: "dng", means: `Most ${active.label} assets are falling — sellers are in control right now.` }
+      : { label: "Neutral", tone: "net", means: `${active.label} is roughly balanced — gains and losses are cancelling out.` };
+
+  return (
+    <Section eyebrow="Explore" title="Live markets">
+      {/* Category selector */}
+      <div className="grid grid-cols-3 gap-2">
+        {CATEGORIES.map((c) => {
+          const on = c.id === cat;
+          const crows: URow[] = (universe as any)[c.id] || [];
+          const Icon = c.icon;
+          return (
+            <button
+              key={c.id}
+              onClick={() => setCat(c.id)}
+              aria-pressed={on}
+              className={`card-soft !p-3 text-left transition-colors ${on ? "border-accent/50 bg-accent/5" : ""}`}
+            >
+              <Icon className={`w-4 h-4 mb-1.5 ${on ? "text-accent" : "text-txt-3"}`} />
+              <div className="text-[12px] font-bold leading-tight">{c.label}</div>
+              <div className="mt-1.5 flex items-center justify-between gap-1">
+                <span className="text-[10px] text-txt-3 font-mono-tab">{crows.length}</span>
+                <Delta pct={catAvg(crows)} size={10} />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Leaders — top-3 performers in the chosen category */}
+      <div>
+        <div className="flex items-center gap-2 mb-2 px-1">
+          <TrendingUp className="w-3.5 h-3.5 text-accent" />
+          <h3 className="text-[13px] font-semibold">Leaders in {active.label}</h3>
+          <span className="text-[10px] text-txt-3 font-mono-tab uppercase tracking-wider">top · 24h</span>
+        </div>
+        {leaders.length === 0 ? (
+          <CardSoft className="text-center text-[12px] text-txt-3 !py-6">No {active.label} data cached yet — the bot will retry.</CardSoft>
+        ) : (
+          <div className="grid grid-cols-1 gap-2">
+            {leaders.map((p, i) => (
+              <div key={p.cls + p.symbol} className="card-soft !p-3 flex items-center gap-3">
+                <span className="text-[11px] font-mono-tab text-txt-3 w-4 shrink-0">#{i + 1}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold truncate">{p.symbol}</div>
+                  <div className="text-[10px] text-txt-3 truncate uppercase tracking-wider">{p.name || p.cls}</div>
+                </div>
+                <MiniSpark values={seededSeries(p.symbol + p.cls, 18, p.change)} up={p.change >= 0} />
+                <div className="text-right shrink-0">
+                  <div className="font-mono-tab text-[13px] font-bold tabular">{p.priceStr}</div>
+                  <Delta pct={p.change} size={11} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Movers — top performer + top decliner for the active category */}
+      {top && bottom && top.symbol !== bottom.symbol && (
+        <div className="grid grid-cols-2 gap-2">
+          {[{ item: top, up: true }, { item: bottom, up: false }].map(({ item, up }) => (
+            <div key={item.symbol} className={`surface-inset rounded-xl p-3 border ${up ? "border-inc/25" : "border-dng/25"}`}>
+              <div className="flex items-center gap-1.5 mb-1.5">
+                {up ? <TrendingUp className="w-3 h-3 text-inc" /> : <ArrowDownRight className="w-3 h-3 text-dng" />}
+                <span className="text-[9px] uppercase tracking-wider text-txt-3 font-mono-tab">{up ? "Top performer" : "Top decliner"}</span>
+              </div>
+              <div className="font-mono-tab text-[13px] font-semibold truncate">{item.symbol}</div>
+              <div className="text-[10px] text-txt-3 truncate">{item.name || item.cls}</div>
+              <div className="mt-1.5 flex items-center justify-between gap-1">
+                <span className="text-[11px] text-txt-2 tabular truncate">{item.priceStr}</span>
+                <Delta pct={item.change} size={11} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Sentiment — one-line, self-describing read */}
+      {rows.length > 0 && (
+        <div className="surface-inset rounded-xl p-3">
+          <div className="flex items-center justify-between gap-2">
+            <Eyebrow>Sentiment · {active.label}</Eyebrow>
+            <Badge tone={band.tone as any}>{band.label}</Badge>
+          </div>
+          <p className="text-[11px] text-txt-2 leading-snug mt-1.5">
+            <span className={`font-semibold ${toneText[band.tone]}`}>{avg >= 0 ? "+" : ""}{avg.toFixed(2)}% avg 24h — </span>
+            {band.means}
+          </p>
+        </div>
+      )}
+    </Section>
   );
 };
 
 const Markets = () => {
-  const summaryQuery = useQuery({ queryKey: ["dashboard-summary"], queryFn: fetchDashboardSummary });
+  const navigate = useNavigate();
   const marketsQuery = useQuery({
     queryKey: ["markets-all"],
     queryFn: fetchMarketSnapshot,
     refetchInterval: 5 * 60 * 1000,
   });
 
-  const summary = summaryQuery.data || null;
   const snapshot = marketsQuery.data || null;
 
-  const universe = useMemo(() => buildAssetUniverse(snapshot), [snapshot]);
-  const cap = useMemo(() => investmentCapacity(summary), [summary]);
-  const recommended: { id: TierId } = useMemo(() => recommendTier(summary), [summary]);
-
-  const [tierId, setTierId] = useState<TierId>(recommended.id);
-  const [categoryId, setCategoryId] = useState<CategoryId>("stocks");
-  const [assetId, setAssetId] = useState<string | null>(null);
-
-  const monthly = cap.capacity[tierId] || 0;
-  const surplus = cap.flow.monthlySurplus || 0;
-  const monthlyIn = cap.flow.monthlyIn || 0;
-  const monthlyOut = cap.flow.monthlyOut || 0;
-  // Backend exposes a `transaction_costs.estimated_total` block — that's
-  // the user's "fees" line. Spread across the same number of periods we
-  // averaged income / expense over so the row stays apples-to-apples.
-  const fees = useMemo(() => {
-    const tc: any = (summary as any)?.transaction_costs || {};
-    const total = Number(tc.estimated_total) || 0;
-    const periods = Math.max(1, cap.flow.periods || 1);
-    return total / periods;
-  }, [summary, cap.flow.periods]);
-  const tierPct = Math.round((CAPACITY_TIERS.find((t: any) => t.id === tierId)?.pct || 0) * 100);
-
-  const assetsForCat = useMemo(() => assetsInCategory(universe, categoryId), [universe, categoryId]);
-
-  const activeAsset = useMemo(() => {
-    if (assetId) return assetsForCat.find((a: any) => a.id === assetId) || assetsForCat[0] || null;
-    return assetsForCat[0] || null;
-  }, [assetsForCat, assetId]);
-
-  const buyPlan = useMemo(
-    () => (activeAsset ? computeBuyPlan(activeAsset, monthly, surplus) : null),
-    [activeAsset, monthly, surplus]
-  );
-
-  const cheaper = useMemo(
-    () => (activeAsset && buyPlan && !buyPlan.meetsMinimum
-      ? suggestCheaperDseAsset(universe, activeAsset, monthly)
-      : null),
-    [universe, activeAsset, buyPlan, monthly]
-  );
-
-  const sim = useMemo(
-    () => (activeAsset ? simulateInvestment({ summary, asset: activeAsset, monthly }) : null),
-    [summary, activeAsset, monthly]
-  );
-
   const dse = (snapshot as any)?.dse?.data || [];
-  const fx = (snapshot as any)?.forex?.data || [];
+  const fx = (snapshot as any)?.forex_bot?.data || [];
   const fuel = (snapshot as any)?.fuel?.data || null;
   const crypto = (snapshot as any)?.crypto?.data || [];
+  const indices = (snapshot as any)?.indices?.data || [];
+
+  const universe = useMemo(() => buildUniverse(snapshot), [snapshot]);
 
   return (
     <div className="px-4 py-4 space-y-5">
-      {/* Hero — explicit math chain. Money out is split into Spending
-          and Fees so users can see fees aren't being subtracted twice
-          (a previous "of which" sub-row was confusing). Full TZS
-          amounts are shown so the rows actually reconcile when the
-          user adds them up — rounded shorthand like "1.59M" hides the
-          real precision and made the surplus look wrong. */}
-      <CardSoft className="!p-0 overflow-hidden">
-        <div className="p-4 bg-gradient-to-br from-accent/20 via-net/10 to-transparent">
-          <Eyebrow>How much you can invest</Eyebrow>
-          <p className="text-[12px] text-txt-2 mt-2 leading-snug">
-            Here's the math from your statement — every line below is the average per month, computed from the actual transactions, not rounded estimates.
-          </p>
+      {/* Ask the market advisor */}
+      <MarketAdvisor snapshot={snapshot} />
 
-          <div className="mt-3 surface-inset rounded-xl p-3 space-y-2 text-[12px]">
-            <FlowRow label="Money you received" value={fmtTZSFull(monthlyIn)} sign="+" tone="inc" />
-            <FlowRow label="Spending (excl. fees)" value={fmtTZSFull(Math.max(0, monthlyOut - fees))} sign="−" tone="exp" />
-            <FlowRow label="Bank & wallet fees" value={fmtTZSFull(fees)} sign="−" tone="exp" />
-            <div className="hairline my-1" />
-            <FlowRow
-              label="Surplus left at month-end"
-              value={fmtTZSFull(surplus)}
-              sign="="
-              tone={surplus > 0 ? "net" : "dng"}
-              bold
-            />
-            <FlowRow
-              label={`Investable (${tierPct}% of surplus · ${tierMeta[tierId].label})`}
-              value={fmtTZSFull(monthly)}
-              sign="→"
-              tone="accent"
-              bold
-            />
-          </div>
-
-          <p className="text-[10px] text-txt-3 mt-2 leading-snug">
-            <span className="font-bold">Why these numbers:</span> "Money out" on the dashboard equals Spending + Fees — they aren't deducted twice. Surplus is what's literally left in your account each month after both.
-          </p>
-
-          <div className="mt-3 flex items-baseline gap-2">
-            <span className="font-mono-tab text-[28px] font-bold tabular text-accent">{fmtTZS(monthly)}</span>
-            <span className="text-[12px] text-txt-3">/ month is yours to invest</span>
-          </div>
-          <p className="text-[11px] text-txt-3 mt-1">
-            Recommended tier: <span className="text-accent font-semibold">{tierMeta[recommended.id].label}</span>.
-            Pick a different tier below to see the same math at 5%, 15%, or 30%.
-          </p>
+      {/* Jump to the simulator (the personal planning surface) */}
+      <Bento onClick={() => navigate("/simulator")} className="!p-3.5 flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-accent/15 text-accent flex items-center justify-center shrink-0">
+          <Sparkles className="w-4.5 h-4.5" />
         </div>
-      </CardSoft>
+        <div className="flex-1 min-w-0">
+          <div className="text-[14px] font-semibold">Investment simulator</div>
+          <div className="text-[11px] text-txt-3 mt-0.5">See what you can safely invest & where →</div>
+        </div>
+        <ArrowRight className="w-4 h-4 text-txt-3 shrink-0" />
+      </Bento>
 
-      {/* Tier picker */}
-      <Section eyebrow="Step 1" title="How much each month?">
-        <div className="grid grid-cols-1 gap-2">
-          {CAPACITY_TIERS.map((t: any) => {
-            const id = t.id as TierId;
-            const amount = cap.capacity[id] || 0;
-            const active = tierId === id;
-            return (
-              <button
-                key={id}
-                onClick={() => setTierId(id)}
-                className={`card-soft !p-3.5 flex items-center gap-3 text-left transition-colors ${
-                  active ? "border-accent/50 bg-accent/5" : ""
-                }`}
-              >
-                <div className={`w-10 h-10 rounded-md flex items-center justify-center font-mono-tab text-[10px] font-bold ${
-                  active ? "bg-accent/15 text-accent" : "bg-surface-3 text-txt-3"
-                }`}>
-                  {Math.round(t.pct * 100)}%
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] font-semibold">{tierMeta[id].label}</span>
-                    {recommended.id === id && <Badge tone="accent">Recommended</Badge>}
+      {/* Category-driven overview: leaders · movers · sentiment */}
+      <MarketExplorer universe={universe} />
+
+      {/* Global indices — the "other form of investment" grid */}
+      <Section eyebrow="Global" title="World indices" action={<Badge tone="net">{indices.length}</Badge>}>
+        {indices.length === 0 ? (
+          <CardSoft className="text-center text-[12px] text-txt-3 !py-6">
+            {marketsQuery.isLoading ? "Loading indices…" : "Equity indices feed warming up."}
+          </CardSoft>
+        ) : (
+          <div className="grid grid-cols-2 gap-2">
+            {indices.map((i: any) => {
+              const up = Number(i.change_pct || 0) >= 0;
+              return (
+                <div key={i.symbol} className="card-soft !p-3 min-w-0">
+                  <div className="text-[10px] uppercase tracking-wider text-txt-3 font-mono-tab truncate">{i.symbol}</div>
+                  <div className="text-[12px] font-semibold truncate">{i.name}</div>
+                  <div className="mt-1.5 font-mono-tab text-[15px] font-bold tabular truncate">
+                    {fmtNum(i.price)} <span className="text-[10px] text-txt-3">{i.currency}</span>
                   </div>
-                  <div className="text-[11px] text-txt-3 mt-0.5">{tierMeta[id].subtitle}</div>
+                  <div className="mt-1 flex items-center justify-between gap-1">
+                    <Delta pct={Number(i.change_pct || 0)} size={11} />
+                    <MiniSpark values={seededSeries(i.symbol + "idx", 14, Number(i.change_pct || 0))} up={up} w={48} h={20} />
+                  </div>
                 </div>
-                <div className="font-mono-tab text-[14px] font-bold tabular shrink-0">{fmtTZS(amount)}</div>
-              </button>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </Section>
 
-      {/* Category picker */}
-      <Section eyebrow="Step 2" title="Where will the money go?">
-        <div className="grid grid-cols-3 gap-2">
-          {(Object.keys(categoryMeta) as CategoryId[]).map((id) => {
-            const active = categoryId === id;
-            return (
-              <button
-                key={id}
-                onClick={() => {
-                  setCategoryId(id);
-                  setAssetId(null);
-                }}
-                className={`card-soft !p-3 text-left ${active ? "border-accent/50 bg-accent/5" : ""}`}
-              >
-                <div className="text-[13px] font-bold">{categoryMeta[id].label}</div>
-                <div className="text-[10px] text-txt-3 mt-0.5">{categoryMeta[id].sub}</div>
-              </button>
-            );
-          })}
-        </div>
-        <div className="flex gap-2 overflow-x-auto scroll-hide -mx-1 px-1 mt-3">
-          {assetsForCat.length === 0 && (
-            <span className="text-[11px] font-mono-tab text-txt-3 px-1">
-              {marketsQuery.isLoading ? "Loading assets…" : "No assets in this category yet."}
-            </span>
-          )}
-          {assetsForCat.map((a: any) => (
-            <Pill
-              key={a.id}
-              active={(activeAsset?.id || "") === a.id}
-              onClick={() => setAssetId(a.id)}
-            >
-              {a.symbol} · {Number(a.change || 0) >= 0 ? "+" : ""}{Number(a.change || 0).toFixed(1)}%
-            </Pill>
-          ))}
-        </div>
-      </Section>
-
-      {/* Buy breakdown */}
-      {activeAsset && buyPlan && (
-        <CardSoft>
-          <Eyebrow>Buy breakdown</Eyebrow>
-          <div className="mt-2 grid grid-cols-3 gap-3 text-center">
-            <div>
-              <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">Budget</div>
-              <div className="font-mono-tab text-[14px] font-bold tabular mt-1">{fmtTZS(buyPlan.cash)}</div>
-            </div>
-            <div>
-              <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">Unit price</div>
-              <div className="font-mono-tab text-[14px] font-bold tabular mt-1">
-                {activeAsset.currency === "USD" ? `$${Number(activeAsset.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : fmtTZS(activeAsset.price)}
-              </div>
-            </div>
-            <div>
-              <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">You get</div>
-              <div className={`font-mono-tab text-[14px] font-bold tabular mt-1 ${buyPlan.meetsMinimum ? "text-inc" : "text-dng"}`}>
-                {buyPlan.fractional
-                  ? `${Number(buyPlan.units).toFixed(buyPlan.units < 1 ? 6 : 4)}`
-                  : buyPlan.lots > 0 ? `${buyPlan.lots * (buyPlan.lotQty || 1)}` : "0"}
-              </div>
-            </div>
-          </div>
-          {!buyPlan.meetsMinimum ? (
-            <div className="mt-3 text-[12px] text-dng bg-dng/10 border border-dng/30 rounded-lg p-3">
-              {buyPlan.kind === "DSE"
-                ? `One board lot of ${activeAsset.symbol} costs ${fmtTZS(buyPlan.lotCost)}. You'd need ${buyPlan.monthsToAccumulate} month(s) at ${fmtTZS(buyPlan.cash)}/mo to afford one lot.`
-                : `Most exchanges reject orders under ${fmtTZS(buyPlan.lotCost)}. Add to your monthly amount or switch to a stable.`}
-              {cheaper && (
-                <button
-                  className="mt-2 inline-flex items-center gap-1 underline"
-                  onClick={() => setAssetId(cheaper.asset.id)}
-                >
-                  Switch to {cheaper.asset.symbol} (lot {fmtTZS(cheaper.lotCost)}) →
-                </button>
-              )}
-            </div>
-          ) : (
-            <div className="mt-3 text-[12px] text-txt-2 bg-inc/5 border border-inc/20 rounded-lg p-3">
-              You'd spend {fmtTZS(buyPlan.actualCost)} this month and have {fmtTZS(buyPlan.leftover)} idle.
-            </div>
-          )}
-        </CardSoft>
-      )}
-
-      {/* Step 3 — projection */}
-      {sim && (
-        <Section eyebrow="Step 3" title="What actually happens?">
-          <div className="grid grid-cols-1 gap-2">
-            <CardSoft>
-              <Eyebrow>Lifestyle impact</Eyebrow>
-              <div className="text-[14px] font-semibold mt-1">{sim.statusLabel}</div>
-              <p className="text-[12px] text-txt-3 mt-1">{sim.recommendation}</p>
-            </CardSoft>
-            <CardSoft>
-              <Eyebrow>What it could grow into</Eyebrow>
-              <div className="grid grid-cols-3 gap-2 mt-1 text-center">
-                <div>
-                  <div className="text-[10px] text-txt-3">12 mo</div>
-                  <div className="font-mono-tab font-bold text-[13px] tabular">{fmtTZS(sim.fv12)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-txt-3">36 mo</div>
-                  <div className="font-mono-tab font-bold text-[13px] tabular">{fmtTZS(sim.fv36)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] text-txt-3">60 mo</div>
-                  <div className="font-mono-tab font-bold text-[13px] tabular">{fmtTZS(sim.fv60)}</div>
-                </div>
-              </div>
-            </CardSoft>
-            <CardSoft>
-              <Eyebrow>Worst case (12 mo)</Eyebrow>
-              <div className="font-mono-tab text-[14px] font-bold text-dng tabular mt-1">{fmtTZS(sim.downside12)}</div>
-              <p className="text-[12px] text-txt-3 mt-1">
-                Drawdown on {sim.profile?.label}: {(Number(sim.profile?.drawdown || 0) * 100).toFixed(0)}%.
-              </p>
-            </CardSoft>
-          </div>
-        </Section>
-      )}
-
-      {/* Live feeds */}
-      <Section
-        eyebrow="Live"
-        title="DSE equities"
-        action={<Badge tone="inc">{dse.length}</Badge>}
-      >
+      {/* DSE equities */}
+      <Section eyebrow="Live" title="DSE equities" action={<Badge tone="inc">{dse.length}</Badge>}>
         <div className="card-soft !p-0 divide-y divide-border overflow-hidden">
           {dse.slice(0, 8).map((e: any) => (
             <div key={e.symbol} className="flex items-center gap-3 px-4 py-3">
@@ -383,31 +422,28 @@ const Markets = () => {
         <Section eyebrow="BoT FX · EWURA fuel" title="Macro snapshot">
           <div className="grid grid-cols-2 gap-3">
             {fx.slice(0, 4).map((c: any) => (
-              <div key={c.code || c.pair} className="card-soft !p-3">
+              <div key={c.currency || c.code || c.pair} className="card-soft !p-3">
                 <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">
-                  {c.pair || `${c.code}/TZS`}
+                  {c.currency || c.pair || `${c.code}/TZS`}
                 </div>
-                <div className="font-mono-tab text-[18px] font-bold tabular mt-1">{Number(c.tzs ?? c.rate ?? c.price ?? 0).toLocaleString()}</div>
+                <div className="font-mono-tab text-[18px] font-bold tabular mt-1">{Number(c.selling ?? c.tzs ?? c.rate ?? c.price ?? 0).toLocaleString()}</div>
                 <div className="flex items-center justify-between mt-1">
                   <span className="text-[10px] text-txt-4 font-mono-tab">{c.source || "BoT"}</span>
-                  <span className={`text-[10px] font-mono-tab font-bold ${Number(c.change_pct || 0) >= 0 ? "text-inc" : "text-dng"}`}>
-                    {Number(c.change_pct || 0) >= 0 ? "+" : ""}
-                    {Number(c.change_pct || 0).toFixed(2)}%
-                  </span>
+                  <span className="text-[10px] text-txt-4 font-mono-tab">TZS</span>
                 </div>
               </div>
             ))}
-            {fuel?.petrol_dar && (
+            {fuel?.petrol && (
               <div className="card-soft !p-3">
-                <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">Petrol Dar</div>
-                <div className="font-mono-tab text-[18px] font-bold tabular mt-1">{Number(fuel.petrol_dar).toLocaleString()}</div>
+                <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">Petrol</div>
+                <div className="font-mono-tab text-[18px] font-bold tabular mt-1">{Number(fuel.petrol).toLocaleString()}</div>
                 <div className="text-[10px] text-txt-4 font-mono-tab mt-1">TZS / litre</div>
               </div>
             )}
-            {fuel?.diesel_dar && (
+            {fuel?.diesel && (
               <div className="card-soft !p-3">
-                <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">Diesel Dar</div>
-                <div className="font-mono-tab text-[18px] font-bold tabular mt-1">{Number(fuel.diesel_dar).toLocaleString()}</div>
+                <div className="text-[10px] font-mono-tab text-txt-3 tracking-wider uppercase">Diesel</div>
+                <div className="font-mono-tab text-[18px] font-bold tabular mt-1">{Number(fuel.diesel).toLocaleString()}</div>
                 <div className="text-[10px] text-txt-4 font-mono-tab mt-1">TZS / litre</div>
               </div>
             )}
@@ -416,7 +452,7 @@ const Markets = () => {
       )}
 
       {crypto.length > 0 && (
-        <Section eyebrow="Crypto" title="CoinGecko">
+        <Section eyebrow="Crypto" title="CoinGecko" action={<Badge tone="accent">{crypto.length}</Badge>}>
           <div className="card-soft !p-0 divide-y divide-border overflow-hidden">
             {crypto.slice(0, 6).map((c: any) => (
               <div key={c.symbol} className="flex items-center gap-3 px-4 py-3">

@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import { ReactNode, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 
 export const Eyebrow = ({ children, className }: { children: ReactNode; className?: string }) => (
@@ -10,6 +10,47 @@ export const CardSoft = ({ children, className, onClick }: { children: ReactNode
     {children}
   </div>
 );
+
+/* Bento — the web client's signature surface (green-tinted border,
+   press-lift). The default card for the mirrored design. */
+export const Bento = ({ children, className, onClick }: { children: ReactNode; className?: string; onClick?: () => void }) => (
+  <div onClick={onClick} className={cn("bento p-4", onClick && "cursor-pointer", className)}>
+    {children}
+  </div>
+);
+
+/* Frosted brand-glow panel — AI hero / spotlight surfaces. */
+export const GlassCard = ({ children, className }: { children: ReactNode; className?: string }) => (
+  <div className={cn("glass-card p-4", className)}>{children}</div>
+);
+
+/* Pointer-driven 3D tilt (the "little 3D movement"). Static on touch. */
+export const Tilt = ({ children, className, max = 6 }: { children: ReactNode; className?: string; max?: number }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const onMove = useCallback(
+    (e: React.PointerEvent) => {
+      const el = ref.current;
+      if (!el || e.pointerType === "touch") return;
+      const r = el.getBoundingClientRect();
+      const px = (e.clientX - r.left) / r.width;
+      const py = (e.clientY - r.top) / r.height;
+      el.style.setProperty("--rx", `${(px - 0.5) * max * 2}deg`);
+      el.style.setProperty("--ry", `${(0.5 - py) * max * 2}deg`);
+    },
+    [max],
+  );
+  const reset = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.setProperty("--rx", "0deg");
+    el.style.setProperty("--ry", "0deg");
+  }, []);
+  return (
+    <div ref={ref} onPointerMove={onMove} onPointerLeave={reset} className={cn("tilt-3d", className)}>
+      {children}
+    </div>
+  );
+};
 
 export const SurfaceInset = ({ children, className }: { children: ReactNode; className?: string }) => (
   <div className={cn("surface-inset p-3", className)}>{children}</div>

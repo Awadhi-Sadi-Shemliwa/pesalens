@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Eyebrow } from "@/components/pl/primitives";
 import { Markdown } from "@/components/pl/Markdown";
-import { Send, Sparkles, FileText } from "lucide-react";
+import { Send, Sparkles, FileText, Wallet, AlertTriangle } from "lucide-react";
 // @ts-ignore — JS modules
 import { fetchDashboardSummary, sendAssistantMessage } from "@/data/api";
 // @ts-ignore — JS modules
@@ -85,6 +85,25 @@ const Assistant = () => {
             <p className="text-[13px] text-txt-3 mt-2 max-w-xs mx-auto">
               {t("ai.heroLede")}
             </p>
+
+            {/* Explore cards — grounded entry points (mirror the web hero) */}
+            <div className="grid grid-cols-3 gap-2.5 mt-5 text-left">
+              {[
+                { icon: FileText, label: "Statement", tint: "bg-accent/15 text-accent", prompt: "Summarise my latest statement — the key numbers and what stands out." },
+                { icon: Wallet, label: "Spending", tint: "bg-net/15 text-net", prompt: "Break down where my money goes and my biggest spending categories." },
+                { icon: AlertTriangle, label: "Anomalies", tint: "bg-exp/15 text-exp", prompt: "Flag any unusual transactions, hidden fees, or anomalies you can see." },
+              ].map((c) => {
+                const Icon = c.icon;
+                return (
+                  <button key={c.label} onClick={() => send(c.prompt)} className="card-soft !p-3 active:bg-surface-3 transition-colors">
+                    <span className={`w-8 h-8 rounded-lg ${c.tint} flex items-center justify-center mb-2`}>
+                      <Icon className="w-4 h-4" />
+                    </span>
+                    <div className="text-[12px] font-semibold">{c.label}</div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
         {msgs.map((m, i) => (

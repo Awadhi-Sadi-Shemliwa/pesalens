@@ -115,10 +115,19 @@ const Upgrade = () => {
 
   return (
     <div className="px-4 py-4 space-y-5">
-      <div>
-        <Eyebrow>Upgrade</Eyebrow>
-        <h1 className="text-[22px] font-bold tracking-tight mt-1">PesaLens Pro</h1>
-        <p className="text-[13px] text-txt-3 mt-1">Unlimited uploads, full markets simulator, and the AI advisor.</p>
+      {/* Premium gradient hero */}
+      <div className="rounded-2xl border border-accent/25 bg-gradient-to-br from-accent/20 via-net/10 to-transparent p-5 relative overflow-hidden">
+        <span aria-hidden className="absolute -right-8 -top-8 w-28 h-28 rounded-full bg-accent/15 blur-2xl pointer-events-none" />
+        <div className="relative flex items-center gap-3">
+          <span className="w-12 h-12 rounded-2xl bg-accent/15 text-accent flex items-center justify-center shrink-0">
+            <Crown className="w-6 h-6" />
+          </span>
+          <div>
+            <Eyebrow>Upgrade</Eyebrow>
+            <h1 className="text-[22px] font-bold tracking-tight leading-tight">PesaLens Pro</h1>
+          </div>
+        </div>
+        <p className="relative text-[13px] text-txt-2 mt-3 leading-snug">Unlimited uploads, the full markets simulator, and the AI advisor — in English or Swahili.</p>
       </div>
 
       {/* Status card */}

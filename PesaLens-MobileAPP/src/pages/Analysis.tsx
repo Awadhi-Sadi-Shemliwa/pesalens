@@ -9,7 +9,8 @@ import {
   Upload as UploadIcon,
   X,
 } from "lucide-react";
-import { Badge, CardSoft, Eyebrow, Pill } from "@/components/pl/primitives";
+import { Badge, Bento, CardSoft, Eyebrow, Pill, Tilt } from "@/components/pl/primitives";
+import { SpendingBreakdown } from "@/components/pl/SpendingBreakdown";
 // @ts-ignore — JS modules
 import { fetchAnalysis, fetchUploads, fmtTZS, fmtTZSFull } from "@/data/api";
 
@@ -163,6 +164,82 @@ const TxnDetailDrawer = ({
   );
 };
 
+// ---------- category drill-down drawer ----------
+// Full transaction list for a tapped category. Tapping a row hands off to
+// the transaction detail sheet. Mirrors the webapp's category Drawer.
+const CategoryDrawer = ({
+  category,
+  txns,
+  totalCount,
+  onClose,
+  onPick,
+}: {
+  category: any | null;
+  txns: any[];
+  totalCount: number;
+  onClose: () => void;
+  onPick: (txn: any) => void;
+}) => {
+  if (!category) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 ios-press"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-[440px] bg-surface-2 rounded-t-3xl border-t border-border max-h-[85vh] overflow-y-auto pb-safe shadow-2xl"
+      >
+        <div className="sticky top-0 bg-surface-2 px-5 pt-4 pb-3 flex items-center justify-between border-b border-border/50">
+          <div className="min-w-0">
+            <div className="text-[12px] font-mono-tab text-txt-3 tabular tracking-wider">
+              {fmtTZSFull(Number(category.value) || 0)}
+            </div>
+            <div className="text-[16px] font-semibold truncate">{category.name}</div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="w-9 h-9 rounded-full bg-surface-3 flex items-center justify-center text-txt-2 active:bg-surface-4 ios-press shrink-0"
+          >
+            <X className="w-4.5 h-4.5" />
+          </button>
+        </div>
+
+        <div className="px-5 py-4">
+          <div className="text-[12px] font-mono-tab text-txt-3 mb-3">
+            {txns.length} of {totalCount} transactions
+          </div>
+          {txns.length === 0 ? (
+            <p className="text-[13px] text-txt-3 py-6 text-center">No transactions in this category.</p>
+          ) : (
+            <div className="space-y-2.5">
+              {txns.map((t: any, i: number) => (
+                <button
+                  key={`${t.row_index ?? i}-${t.txn_date}`}
+                  type="button"
+                  onClick={() => onPick(t)}
+                  className="ios-group w-full text-left ios-press"
+                >
+                  <div className="px-4 py-3 ios-group-item">
+                    <div className="flex items-start justify-between gap-2">
+                      <span className="text-[14px] font-semibold truncate">{t.description || "—"}</span>
+                      <span className="font-mono-tab text-[14px] font-bold tabular shrink-0 text-exp">
+                        − {fmtTZS(Number(t.debit) || 0)}
+                      </span>
+                    </div>
+                    <div className="text-[12px] text-txt-3 font-mono-tab mt-1.5">{formatDateShort(t.txn_date)}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const DetailRow = ({
   label,
   value,
@@ -186,6 +263,7 @@ const Analysis = () => {
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<any | null>(null);
+  const [activeCat, setActiveCat] = useState<any | null>(null);
 
   const jobIdParam = params.get("job_id");
 
@@ -210,6 +288,24 @@ const Analysis = () => {
   });
 
   const transactions: any[] = (analysis as any)?.transactions || [];
+  const categories: any[] = (analysis as any)?.categories || [];
+
+  const incomeTotal = transactions.reduce((s: number, t: any) => s + (Number(t.credit) || 0), 0);
+  const expenseTotal = transactions.reduce((s: number, t: any) => s + (Number(t.debit) || 0), 0);
+  const analysisTiles = [
+    { label: "Transactions", val: transactions.length, money: false, grad: "from-net/25 via-net/10 to-transparent", chip: "bg-net/15 text-net" },
+    { label: "Money in", val: incomeTotal, money: true, grad: "from-inc/25 via-inc/10 to-transparent", chip: "bg-inc/15 text-inc", tone: "text-inc" },
+    { label: "Money out", val: expenseTotal, money: true, grad: "from-exp/25 via-exp/10 to-transparent", chip: "bg-exp/15 text-exp", tone: "text-exp" },
+  ];
+
+  // Transactions for the drilled-in category. Filter on debit so the list
+  // reconciles with category.value (the breakdown sums debits only).
+  const catTxns = useMemo(() => {
+    if (!activeCat) return [];
+    return transactions
+      .filter((tx: any) => tx.category === activeCat.name && tx.debit)
+      .sort((a: any, b: any) => (Number(b.debit) || 0) - (Number(a.debit) || 0));
+  }, [transactions, activeCat]);
 
   const filtered = useMemo(() => {
     const debounced = q.trim().toLowerCase();
@@ -290,6 +386,23 @@ const Analysis = () => {
 
   return (
     <div className="px-5 py-5 space-y-5">
+      {/* KPI hero — premium at-a-glance totals for this statement */}
+      <div className="grid grid-cols-3 gap-2.5">
+        {analysisTiles.map((tile) => (
+          <Tilt key={tile.label} max={5}>
+            <div className={`rounded-2xl border border-border bg-gradient-to-br ${tile.grad} p-3`}>
+              <div className={`w-7 h-7 rounded-lg ${tile.chip} flex items-center justify-center mb-2 text-[11px] font-bold font-mono-tab`}>
+                {tile.label[0]}
+              </div>
+              <div className={`font-mono-tab text-[15px] font-bold tabular truncate ${tile.tone || "text-txt-1"}`}>
+                {tile.money ? fmtTZS(tile.val) : tile.val}
+              </div>
+              <div className="text-[10px] text-txt-3 uppercase tracking-wider font-mono-tab truncate mt-0.5">{tile.label}</div>
+            </div>
+          </Tilt>
+        ))}
+      </div>
+
       {uploads.length > 1 && (
         <div className="ios-group">
           <select
@@ -349,6 +462,14 @@ const Analysis = () => {
           </Pill>
         ))}
       </div>
+
+      {categories.length > 0 && (
+        <SpendingBreakdown
+          data={categories}
+          title="Tap a category for details"
+          onSelect={(c) => setActiveCat(c)}
+        />
+      )}
 
       <div className="text-[12px] font-mono-tab text-txt-3 px-1">
         Showing {Math.min(total, start + 1)}–{Math.min(total, start + visible.length)} of {total}
@@ -415,6 +536,14 @@ const Analysis = () => {
           </button>
         </div>
       )}
+
+      <CategoryDrawer
+        category={activeCat}
+        txns={catTxns}
+        totalCount={transactions.length}
+        onClose={() => setActiveCat(null)}
+        onPick={(t) => { setActiveCat(null); setSelected(t); }}
+      />
 
       <TxnDetailDrawer txn={selected} onClose={() => setSelected(null)} />
     </div>

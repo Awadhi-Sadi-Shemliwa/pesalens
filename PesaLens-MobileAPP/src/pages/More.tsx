@@ -3,6 +3,7 @@ import { Section, Eyebrow, Divider } from "@/components/pl/primitives";
 import {
   Receipt,
   Wallet,
+  LineChart,
   Target,
   Crown,
   User,
@@ -75,6 +76,13 @@ const More = () => {
           },
         ]
       : []),
+    {
+      icon: LineChart,
+      title: "Simulator",
+      sub: "Plan your first investment · playbooks & insurance",
+      tone: "accent" as const,
+      onClick: () => navigate("/simulator"),
+    },
     {
       icon: Target,
       title: "Action Plan",

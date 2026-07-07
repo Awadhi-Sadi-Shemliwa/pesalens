@@ -20,9 +20,11 @@ const PALETTE = [
 export const SpendingBreakdown = ({
   data,
   title = "Top categories",
+  onSelect,
 }: {
   data: CategoryRow[];
   title?: string;
+  onSelect?: (row: CategoryRow & { color: string }) => void;
 }) => {
   if (!data || data.length === 0) {
     return (
@@ -53,16 +55,30 @@ export const SpendingBreakdown = ({
           ))}
         </div>
         <div className="space-y-3.5">
-          {rows.map((b) => (
-            <div key={b.name} className="flex items-center gap-3.5">
-              <span className="w-3 h-3 rounded-full shrink-0" style={{ background: b.color }} />
-              <span className="flex-1 text-[14px] text-txt-2 truncate">{b.name}</span>
-              <span className="font-mono-tab text-[12px] text-txt-3 tabular w-10 text-right">{b.pct}%</span>
-              <span className="font-mono-tab text-[14px] font-semibold tabular w-24 text-right">
-                {fmtTZS(b.value).replace("TZS ", "")}
-              </span>
-            </div>
-          ))}
+          {rows.map((b) => {
+            const inner = (
+              <>
+                <span className="w-3 h-3 rounded-full shrink-0" style={{ background: b.color }} />
+                <span className="flex-1 text-[14px] text-txt-2 truncate text-left">{b.name}</span>
+                <span className="font-mono-tab text-[12px] text-txt-3 tabular w-10 text-right">{b.pct}%</span>
+                <span className="font-mono-tab text-[14px] font-semibold tabular w-24 text-right">
+                  {fmtTZS(b.value).replace("TZS ", "")}
+                </span>
+              </>
+            );
+            return onSelect ? (
+              <button
+                key={b.name}
+                type="button"
+                onClick={() => onSelect(b)}
+                className="w-full flex items-center gap-3.5 ios-press active:opacity-70"
+              >
+                {inner}
+              </button>
+            ) : (
+              <div key={b.name} className="flex items-center gap-3.5">{inner}</div>
+            );
+          })}
         </div>
       </div>
     </div>

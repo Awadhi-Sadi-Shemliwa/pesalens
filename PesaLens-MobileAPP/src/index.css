@@ -7,105 +7,124 @@
 /* PesaLens design tokens — mirrors mobile spec §4.2 */
 @layer base {
   :root {
-    /* Dark theme (default) */
-    --background: 225 16% 5%;
-    --foreground: 0 0% 100%;
+    /* Dark theme (default) — "money black": near-black with a faint
+       green undertone; signature spring-green accent + blue hint.
+       Mirrors the web client (src/index.css). */
+    --background: 165 22% 3%;
+    --foreground: 150 10% 93%;
 
-    --deep: 225 16% 5%;            /* #08090C */
-    --surface-1: 225 17% 7%;       /* #0E1015 */
-    --surface-2: 224 16% 10%;      /* #13161D */
-    --surface-3: 222 17% 13%;      /* #181C25 */
-    --surface-4: 222 19% 16%;      /* #1F242E */
-    --surface-5: 222 19% 19%;      /* #262C38 */
+    --deep: 165 22% 3%;
+    --surface-1: 158 18% 5%;
+    --surface-2: 162 16% 7%;
+    --surface-3: 156 15% 9%;
+    --surface-4: 159 13% 12%;
+    --surface-5: 157 13% 15%;
 
-    --card: 224 16% 10%;
-    --card-foreground: 0 0% 100%;
-    --popover: 222 17% 13%;
-    --popover-foreground: 0 0% 100%;
+    --card: 162 16% 7%;
+    --card-foreground: 150 10% 93%;
+    --popover: 156 15% 9%;
+    --popover-foreground: 150 10% 93%;
 
-    --primary: 230 89% 63%;        /* accent #4C6EF5 */
-    --primary-foreground: 0 0% 100%;
+    --primary: 149 71% 53%;        /* signature spring-green */
+    --primary-foreground: 160 30% 6%;  /* dark ink on green = premium + AA */
 
-    --secondary: 222 19% 16%;
-    --secondary-foreground: 0 0% 100%;
+    --secondary: 159 13% 12%;
+    --secondary-foreground: 150 10% 93%;
 
-    --muted: 222 17% 13%;
-    --muted-foreground: 220 9% 59%; /* txt-3 */
+    --muted: 156 15% 9%;
+    --muted-foreground: 156 8% 39%;
 
-    --accent: 230 89% 63%;
-    --accent-foreground: 0 0% 100%;
+    --accent: 149 71% 53%;         /* brand green (pages use text-accent) */
+    --accent-foreground: 160 30% 6%;
 
-    --inc: 152 62% 44%;            /* #2BB673 */
-    --exp: 33 91% 56%;             /* #F4A12C */
-    --dng: 358 76% 59%;            /* #E5484D */
-    --net: 234 100% 68%;           /* #5C6CFF */
+    --inc: 160 84% 39%;            /* income emerald — cooler than accent */
+    --exp: 38 92% 50%;             /* amber */
+    --dng: 0 84% 60%;              /* red */
+    --net: 216 90% 59%;            /* the "hint of blue" — secondary glow */
 
-    --txt-1: 0 0% 100%;
-    --txt-2: 220 12% 81%;
-    --txt-3: 220 9% 59%;
-    --txt-4: 220 11% 40%;
+    --txt-1: 150 10% 93%;
+    --txt-2: 154 7% 58%;
+    --txt-3: 156 8% 39%;
+    --txt-4: 158 10% 26%;
 
-    --destructive: 358 76% 59%;
+    --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 226 13% 14%;         /* #1F2128 */
-    --input: 222 19% 16%;
-    --ring: 230 89% 63%;
+    --border: 161 15% 16%;
+    --input: 159 13% 12%;
+    --ring: 149 71% 53%;
 
     --radius: 1rem;
 
-    --shadow-soft: 0 2px 8px 0 hsl(0 0% 0% / 0.4);
-    --shadow-lift: 0 6px 18px 0 hsl(0 0% 0% / 0.5);
-    --gradient-accent: linear-gradient(135deg, hsl(230 89% 63%), hsl(234 100% 68%));
-    --gradient-inc: linear-gradient(135deg, hsl(152 62% 44%), hsl(160 70% 38%));
-    --gradient-surface: linear-gradient(180deg, hsl(224 16% 10%), hsl(225 17% 7%));
+    --shadow-soft: 0 2px 8px 0 hsl(0 0% 0% / 0.5);
+    --shadow-lift: 0 6px 18px 0 hsl(0 0% 0% / 0.6);
+    --gradient-accent: linear-gradient(135deg, hsl(149 71% 53%), hsl(148 80% 61%));
+    --gradient-inc: linear-gradient(135deg, hsl(160 84% 39%), hsl(160 70% 34%));
+    --gradient-surface: linear-gradient(180deg, hsl(162 16% 7%), hsl(158 18% 5%));
 
     --tracking-ticker: 0.18em;
 
-    --sidebar-background: 225 17% 7%;
-    --sidebar-foreground: 220 12% 81%;
-    --sidebar-primary: 230 89% 63%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 222 17% 13%;
-    --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 226 13% 14%;
-    --sidebar-ring: 230 89% 63%;
+    --sidebar-background: 158 18% 5%;
+    --sidebar-foreground: 154 7% 58%;
+    --sidebar-primary: 149 71% 53%;
+    --sidebar-primary-foreground: 160 30% 6%;
+    --sidebar-accent: 156 15% 9%;
+    --sidebar-accent-foreground: 150 10% 93%;
+    --sidebar-border: 161 15% 16%;
+    --sidebar-ring: 149 71% 53%;
   }
 
   .light {
-    --background: 240 14% 98%;
-    --foreground: 225 22% 5%;
-    --deep: 240 14% 98%;
+    /* Light theme — warm paper + blue primary (blue stays the accent
+       in light; a faint blue+green duotone in glows). */
+    --background: 240 20% 98%;
+    --foreground: 230 27% 9%;
+    --deep: 240 20% 98%;
     --surface-1: 0 0% 100%;
-    --surface-2: 228 18% 96%;
-    --surface-3: 225 16% 93%;
-    --surface-4: 225 16% 90%;
-    --surface-5: 225 16% 86%;
+    --surface-2: 240 20% 98%;
+    --surface-3: 228 27% 96%;
+    --surface-4: 226 23% 93%;
+    --surface-5: 225 20% 89%;
     --card: 0 0% 100%;
-    --card-foreground: 225 22% 5%;
+    --card-foreground: 230 27% 9%;
     --popover: 0 0% 100%;
-    --popover-foreground: 225 22% 5%;
-    --primary: 226 70% 54%;
+    --popover-foreground: 230 27% 9%;
+    --primary: 228 69% 55%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 228 18% 96%;
-    --secondary-foreground: 225 22% 5%;
-    --muted: 228 18% 96%;
-    --muted-foreground: 222 7% 45%;
-    --accent: 226 70% 54%;
+    --secondary: 240 20% 98%;
+    --secondary-foreground: 230 27% 9%;
+    --muted: 228 27% 96%;
+    --muted-foreground: 224 10% 52%;
+    --accent: 228 69% 55%;
     --accent-foreground: 0 0% 100%;
-    --inc: 147 74% 31%;
-    --exp: 36 100% 35%;
-    --dng: 359 60% 49%;
-    --net: 232 67% 54%;
-    --txt-1: 225 22% 5%;
-    --txt-2: 222 13% 26%;
-    --txt-3: 222 7% 45%;
-    --txt-4: 218 11% 60%;
-    --destructive: 359 60% 49%;
+    --inc: 161 88% 30%;
+    --exp: 32 90% 44%;
+    --dng: 0 72% 51%;
+    --net: 192 90% 36%;
+    --txt-1: 230 27% 9%;
+    --txt-2: 225 12% 37%;
+    --txt-3: 224 10% 52%;
+    --txt-4: 225 14% 73%;
+    --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
-    --border: 224 17% 90%;
-    --input: 224 17% 90%;
-    --ring: 226 70% 54%;
+    --border: 225 20% 89%;
+    --input: 225 20% 89%;
+    --ring: 228 69% 55%;
+
+    --shadow-soft: 0 1px 3px hsl(0 0% 0% / 0.08), 0 1px 2px -1px hsl(0 0% 0% / 0.08);
+    --shadow-lift: 0 6px 18px hsl(0 0% 0% / 0.1);
+    --gradient-accent: linear-gradient(135deg, hsl(228 69% 55%), hsl(228 89% 63%));
+    --gradient-inc: linear-gradient(135deg, hsl(161 88% 30%), hsl(161 80% 26%));
+    --gradient-surface: linear-gradient(180deg, hsl(0 0% 100%), hsl(240 20% 98%));
+
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 225 12% 37%;
+    --sidebar-primary: 228 69% 55%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 228 27% 96%;
+    --sidebar-accent-foreground: 230 27% 9%;
+    --sidebar-border: 225 20% 89%;
+    --sidebar-ring: 228 69% 55%;
   }
 }
 
@@ -163,6 +182,35 @@
   .surface-inset {
     background: hsl(var(--surface-3));
     border-radius: var(--radius-xl);
+  }
+
+  /* Bento card — the web client's signature surface, mirrored here.
+     Subtle green-tinted border + lift on press for the premium feel. */
+  .bento {
+    background: hsl(var(--surface-2));
+    border: 1px solid hsl(var(--border) / 0.8);
+    border-radius: var(--radius-2xl);
+    position: relative;
+    transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .bento:active { transform: scale(0.99); }
+
+  /* Frosted brand-glow card — used for AI hero / spotlight panels. */
+  .glass-card {
+    background: hsl(var(--surface-1) / 0.6);
+    backdrop-filter: blur(20px) saturate(1.4);
+    -webkit-backdrop-filter: blur(20px) saturate(1.4);
+    border: 1px solid hsl(var(--border) / 0.7);
+    border-radius: var(--radius-2xl);
+  }
+
+  /* Pointer-driven 3D tilt (consumes --rx/--ry set in JS). Mirrors the
+     web TiltCard; degrades to a static card on touch / reduced-motion. */
+  .tilt-3d {
+    transform: perspective(900px) rotateX(var(--ry, 0deg)) rotateY(var(--rx, 0deg));
+    transform-style: preserve-3d;
+    transition: transform 0.18s ease;
+    will-change: transform;
   }
 
   /* iOS-style hairline separator */
@@ -319,3 +367,26 @@
   50% { opacity: 0.4; }
 }
 .animate-pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+
+/* ---- Money motion (mirrors web motion.jsx) ---- */
+@keyframes cashflow-dash { to { stroke-dashoffset: -1000; } }
+.cashflow-stream {
+  stroke-dasharray: 10 14;
+  animation: cashflow-dash 2.2s linear infinite;
+}
+@keyframes float-3d {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-6px) rotate(1.5deg); }
+}
+.anim-float-3d { animation: float-3d 6s ease-in-out infinite; }
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+.anim-glow-pulse { animation: glow-pulse 3s ease-in-out infinite; }
+@keyframes count-pop {
+  0% { transform: scale(0.96); opacity: 0.5; }
+  60% { transform: scale(1.02); }
+  100% { transform: scale(1); opacity: 1; }
+}
+.anim-count-pop { animation: count-pop 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
