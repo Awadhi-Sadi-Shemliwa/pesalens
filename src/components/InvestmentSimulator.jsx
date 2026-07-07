@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Icon } from './Icon';
 import { Eyebrow, Badge } from './common';
+import { TiltCard } from './motion';
+import { ChartJS, chartTheme } from './ChartJS';
 import {
   ASSET_CATEGORIES,
   CAPACITY_TIERS,
@@ -32,15 +34,15 @@ import { useT, AutoT } from '../data/i18n';
    ---------------------------------------------------------------- */
 
 const TIER_THEME = {
-  safe:       { ring: 'ring-inc/40', accent: 'text-inc', dot: 'bg-inc', soft: 'bg-inc/10 border-inc/25' },
-  moderate:   { ring: 'ring-net/40', accent: 'text-net', dot: 'bg-net', soft: 'bg-net/10 border-net/25' },
-  aggressive: { ring: 'ring-dng/40', accent: 'text-dng', dot: 'bg-dng', soft: 'bg-dng/10 border-dng/25' },
+  safe:       { ring: 'ring-inc/50', accent: 'text-inc', dot: 'bg-inc', border: 'border-inc/30', glow: 'bg-inc/15' },
+  moderate:   { ring: 'ring-net/50', accent: 'text-net', dot: 'bg-net', border: 'border-net/30', glow: 'bg-net/15' },
+  aggressive: { ring: 'ring-dng/50', accent: 'text-dng', dot: 'bg-dng', border: 'border-dng/30', glow: 'bg-dng/15' },
 };
 
 const CATEGORY_THEME = {
-  stable: { soft: 'bg-inc/10 border-inc/25',     accent: 'text-inc',    dot: 'bg-inc',    icon: 'shield' },
-  stocks: { soft: 'bg-accent/10 border-accent/25',accent: 'text-accent', dot: 'bg-accent', icon: 'chart' },
-  crypto: { soft: 'bg-dng/10 border-dng/25',     accent: 'text-dng',    dot: 'bg-dng',    icon: 'zap'   },
+  stable: { chip: 'bg-inc/10',    accent: 'text-inc',    border: 'border-inc/30',    glow: 'bg-inc/15',    icon: 'shield' },
+  stocks: { chip: 'bg-accent/10', accent: 'text-accent', border: 'border-accent/30', glow: 'bg-accent/15', icon: 'chart' },
+  crypto: { chip: 'bg-dng/10',    accent: 'text-dng',    border: 'border-dng/30',    glow: 'bg-dng/15',    icon: 'zap'   },
 };
 
 const RISK_BADGE = {
@@ -61,7 +63,7 @@ const fmtPct = (v) => {
    the visual hierarchy is identical across them.
    ---------------------------------------------------------------- */
 const StepCard = ({ stepEyebrow, title, lede, children, className = '' }) => (
-  <section className={`card-soft p-4 sm:p-6 lg:p-8 ${className}`}>
+  <section className={`bento p-4 sm:p-6 lg:p-8 ${className}`}>
     <div className="mb-5 sm:mb-6">
       <Eyebrow>{stepEyebrow}</Eyebrow>
       <h2 className="mt-2.5 text-lg sm:text-xl lg:text-2xl font-semibold tracking-tight break-words">
@@ -112,7 +114,7 @@ const HeroBlock = ({ flow, fees, headline, tierPct, tierLabel, t }) => {
   // statement where fees overshoot total outflow still renders.
   const spending = Math.max(0, flow.monthlyOut - (fees || 0));
   return (
-    <section className="card-soft p-4 sm:p-6 lg:p-8 relative overflow-hidden border-accent/20">
+    <section className="bento p-4 sm:p-6 lg:p-8 relative overflow-hidden border-accent/20">
       <div className="absolute -right-24 -top-24 w-72 h-72 bg-accent/10 rounded-full blur-3xl pointer-events-none" />
       <div className="relative">
         <Eyebrow>{t('sim.hero.eyebrow')}</Eyebrow>
@@ -186,35 +188,37 @@ const HeroBlock = ({ flow, fees, headline, tierPct, tierLabel, t }) => {
 const TierCard = ({ tier, value, active, recommended, onPick, t }) => {
   const theme = TIER_THEME[tier.id];
   return (
-    <button
-      type="button"
-      onClick={() => onPick(value)}
-      aria-pressed={active}
-      className={`relative w-full text-left rounded-2xl border p-4 sm:p-5 transition-all min-h-[160px]
-        ${theme.soft}
-        ${active ? `ring-2 ${theme.ring} -translate-y-0.5 shadow-lg` : 'hover:-translate-y-0.5 hover:shadow-md'}`}
-    >
-      {recommended && (
-        <span className="absolute -top-2.5 right-3 text-[10px] uppercase tracking-ticker font-semibold px-2 py-0.5 rounded-full bg-accent text-white shadow-md">
-          {t('sim.step1.recommend')}
-        </span>
-      )}
-      <div className="flex items-center gap-2 mb-2">
-        <span className={`w-2 h-2 rounded-full ${theme.dot}`} />
-        <span className={`text-xs uppercase tracking-ticker font-semibold ${theme.accent}`}>
-          {t(`sim.tier.${tier.id}.title`)}
-        </span>
-      </div>
-      <div className="text-2xl sm:text-3xl font-bold tabular text-txt-1 break-all leading-tight">
-        {fmtTZS(value)}
-      </div>
-      <div className="text-xs text-txt-3 mt-0.5 mb-3">
-        {t(`sim.tier.${tier.id}.short`)}
-      </div>
-      <p className="text-xs sm:text-sm text-txt-2 leading-relaxed break-words">
-        {t(`sim.tier.${tier.id}.bestFor`)}
-      </p>
-    </button>
+    <TiltCard max={6} className="h-full">
+      <button
+        type="button"
+        onClick={() => onPick(value)}
+        aria-pressed={active}
+        className={`relative w-full h-full text-left glass-pane rounded-2xl border p-4 sm:p-5 transition-all min-h-[160px] overflow-hidden
+          ${active ? `${theme.border} ring-2 ${theme.ring}` : 'border-bdr/60 hover:border-bdr-hover'}`}
+      >
+        <span aria-hidden className={`absolute -right-10 -top-10 w-28 h-28 rounded-full blur-2xl ${theme.glow} pointer-events-none transition-opacity ${active ? 'opacity-100' : 'opacity-0'}`} />
+        {recommended && (
+          <span className="absolute -top-2.5 right-3 text-[10px] uppercase tracking-ticker font-semibold px-2 py-0.5 rounded-full btn-primary shadow-md">
+            {t('sim.step1.recommend')}
+          </span>
+        )}
+        <div className="relative flex items-center gap-2 mb-2">
+          <span className={`w-2 h-2 rounded-full ${theme.dot}`} />
+          <span className={`text-xs uppercase tracking-ticker font-semibold ${theme.accent}`}>
+            {t(`sim.tier.${tier.id}.title`)}
+          </span>
+        </div>
+        <div className="relative text-2xl sm:text-3xl font-bold tabular text-txt-1 break-all leading-tight">
+          {fmtTZS(value)}
+        </div>
+        <div className="relative text-xs text-txt-3 mt-0.5 mb-3">
+          {t(`sim.tier.${tier.id}.short`)}
+        </div>
+        <p className="relative text-xs sm:text-sm text-txt-2 leading-relaxed break-words">
+          {t(`sim.tier.${tier.id}.bestFor`)}
+        </p>
+      </button>
+    </TiltCard>
   );
 };
 
@@ -224,43 +228,45 @@ const TierCard = ({ tier, value, active, recommended, onPick, t }) => {
 const CategoryCard = ({ category, profile, active, onPick, t }) => {
   const theme = CATEGORY_THEME[category.id];
   return (
-    <button
-      type="button"
-      onClick={() => onPick(category.id)}
-      aria-pressed={active}
-      className={`relative w-full text-left rounded-2xl border p-4 sm:p-5 transition-all min-h-[200px]
-        ${theme.soft}
-        ${active ? 'ring-2 ring-accent/60 -translate-y-0.5 shadow-lg' : 'hover:-translate-y-0.5 hover:shadow-md'}`}
-    >
-      <div className="flex items-start gap-3 mb-3">
-        <div className={`p-2 rounded-lg ${theme.soft} border ${theme.dot.replace('bg-', 'border-')} flex-shrink-0`}>
-          <Icon name={theme.icon} size={18} className={theme.accent} />
+    <TiltCard max={5} className="h-full">
+      <button
+        type="button"
+        onClick={() => onPick(category.id)}
+        aria-pressed={active}
+        className={`relative w-full h-full text-left glass-pane rounded-2xl border p-4 sm:p-5 transition-all min-h-[200px] overflow-hidden
+          ${active ? `${theme.border} ring-2 ring-accent/50` : 'border-bdr/60 hover:border-bdr-hover'}`}
+      >
+        <span aria-hidden className={`absolute -right-10 -top-10 w-28 h-28 rounded-full blur-2xl ${theme.glow} pointer-events-none transition-opacity ${active ? 'opacity-100' : 'opacity-0'}`} />
+        <div className="relative flex items-start gap-3 mb-3">
+          <div className={`p-2 rounded-lg ${theme.chip} border ${theme.border} flex-shrink-0`}>
+            <Icon name={theme.icon} size={18} className={theme.accent} />
+          </div>
+          <h3 className="text-base sm:text-lg font-semibold leading-tight break-words">
+            {t(`sim.cat.${category.id}.title`)}
+          </h3>
         </div>
-        <h3 className="text-base sm:text-lg font-semibold leading-tight break-words">
-          {t(`sim.cat.${category.id}.title`)}
-        </h3>
-      </div>
-      <p className="text-xs sm:text-sm text-txt-2 leading-relaxed mb-4 break-words">
-        {t(`sim.cat.${category.id}.body`)}
-      </p>
-      <div className="grid grid-cols-2 gap-3 mb-3">
-        <div>
-          <div className="text-[10px] uppercase tracking-ticker text-txt-3">{t('sim.cat.typicalReturn')}</div>
-          <div className={`text-base font-bold tabular ${theme.accent}`}>
-            ~{(profile.annual * 100).toFixed(0)}%
+        <p className="relative text-xs sm:text-sm text-txt-2 leading-relaxed mb-4 break-words">
+          {t(`sim.cat.${category.id}.body`)}
+        </p>
+        <div className="relative grid grid-cols-2 gap-3 mb-3">
+          <div className="surface-inset rounded-lg p-2.5">
+            <div className="text-[10px] uppercase tracking-ticker text-txt-3">{t('sim.cat.typicalReturn')}</div>
+            <div className={`text-base font-bold tabular ${theme.accent}`}>
+              ~{(profile.annual * 100).toFixed(0)}%
+            </div>
+          </div>
+          <div className="surface-inset rounded-lg p-2.5">
+            <div className="text-[10px] uppercase tracking-ticker text-txt-3">{t('sim.cat.typicalRisk')}</div>
+            <div className="text-base font-bold tabular text-txt-1">
+              ~{(profile.drawdown * 100).toFixed(0)}%
+            </div>
           </div>
         </div>
-        <div>
-          <div className="text-[10px] uppercase tracking-ticker text-txt-3">{t('sim.cat.typicalRisk')}</div>
-          <div className="text-base font-bold tabular text-txt-1">
-            ~{(profile.drawdown * 100).toFixed(0)}%
-          </div>
+        <div className="relative text-[11px] text-txt-3 italic break-words">
+          {t(`sim.cat.${category.id}.bestFor`)}
         </div>
-      </div>
-      <div className="text-[11px] text-txt-3 italic break-words">
-        {t(`sim.cat.${category.id}.bestFor`)}
-      </div>
-    </button>
+      </button>
+    </TiltCard>
   );
 };
 
@@ -538,31 +544,162 @@ const BuyBreakdown = ({ plan, asset, surplus, capacity, currentTierId, onUpgrade
    AnswerCard — one of the three big result blocks in step 3.
    ---------------------------------------------------------------- */
 const AnswerCard = ({ icon, tone, question, headline, body, footer }) => {
-  const tones = {
-    income:  'border-inc/30 bg-inc/5',
-    expense: 'border-exp/30 bg-exp/5',
-    danger:  'border-dng/30 bg-dng/5',
-    net:     'border-net/30 bg-net/5',
-    muted:   'border-bdr bg-surface-3/40',
+  const borders = {
+    income:  'border-inc/30',
+    expense: 'border-exp/30',
+    danger:  'border-dng/30',
+    net:     'border-net/30',
+    muted:   'border-bdr/60',
   };
-  const accents = {
-    income:  'text-inc',
-    expense: 'text-exp',
-    danger:  'text-dng',
-    net:     'text-net',
-    muted:   'text-txt-2',
+  const chips = {
+    income:  'bg-inc/10 text-inc',
+    expense: 'bg-exp/10 text-exp',
+    danger:  'bg-dng/10 text-dng',
+    net:     'bg-net/10 text-net',
+    muted:   'bg-surface-4/60 text-txt-2',
+  };
+  const glows = {
+    income: 'bg-inc/12', expense: 'bg-exp/12', danger: 'bg-dng/12', net: 'bg-net/12', muted: 'bg-txt-3/5',
   };
   return (
-    <div className={`rounded-2xl border p-4 sm:p-5 ${tones[tone] || tones.muted}`}>
-      <div className={`flex items-center gap-2 mb-2 ${accents[tone] || accents.muted}`}>
-        <Icon name={icon} size={16} />
-        <span className="text-xs uppercase tracking-ticker font-semibold">{question}</span>
+    <div className={`relative glass-pane rounded-2xl border p-4 sm:p-5 overflow-hidden ${borders[tone] || borders.muted}`}>
+      <span aria-hidden className={`absolute -right-8 -top-8 w-24 h-24 rounded-full blur-2xl pointer-events-none ${glows[tone] || glows.muted}`} />
+      <div className="relative flex items-center gap-2 mb-3">
+        <span className={`p-1.5 rounded-lg ${chips[tone] || chips.muted}`}><Icon name={icon} size={14} /></span>
+        <span className="text-xs uppercase tracking-ticker font-semibold text-txt-2">{question}</span>
       </div>
-      <div className="text-base sm:text-lg font-bold text-txt-1 leading-snug mb-2 break-words">
+      <div className="relative text-base sm:text-lg font-bold text-txt-1 leading-snug mb-2 break-words">
         {headline}
       </div>
-      <div className="text-sm text-txt-2 leading-relaxed break-words">{body}</div>
-      {footer && <div className="text-[11px] text-txt-3 mt-3 leading-relaxed break-words">{footer}</div>}
+      <div className="relative text-sm text-txt-2 leading-relaxed break-words">{body}</div>
+      {footer && <div className="relative text-[11px] text-txt-3 mt-3 leading-relaxed break-words">{footer}</div>}
+    </div>
+  );
+};
+
+/* ----------------------------------------------------------------
+   ProjectionChart — the "alive" money-growth curve.
+   ----------------------------------------------------------------
+   Compounds the monthly contribution at the chosen asset's typical
+   annual return and plots value vs. cash-in over 60 months, so the
+   user literally sees the money the stock's movement could hand back.
+   Mirrors the Markets market-cap chart for a consistent premium feel.
+   ---------------------------------------------------------------- */
+const ProjectionChart = ({ monthly, annual, drawdown, fv12, fv36, fv60, t }) => {
+  const th = chartTheme();
+  const MONTHS = 60;
+
+  const { series, invested, downside } = useMemo(() => {
+    const r = Math.pow(1 + (annual || 0), 1 / 12) - 1;
+    const val = [], inv = [], down = [];
+    for (let m = 0; m <= MONTHS; m++) {
+      const fv = r === 0 ? monthly * m : monthly * ((Math.pow(1 + r, m) - 1) / r);
+      val.push(fv);
+      inv.push(monthly * m);
+      // A single-shock drawdown applied to the accumulated value — the
+      // "bad month" floor, so the green upside always has a red shadow.
+      down.push(fv * (1 - (drawdown || 0)));
+    }
+    return { series: val, invested: inv, downside: down };
+  }, [monthly, annual, drawdown]);
+
+  const data = {
+    labels: series.map((_, i) => i),
+    datasets: [
+      {
+        label: 'Projected value',
+        data: series,
+        borderColor: th.accent,
+        backgroundColor: th.accentFill,
+        fill: true, tension: 0.4, borderWidth: 2.4, pointRadius: 0, pointHoverRadius: 4,
+        pointHoverBackgroundColor: th.accent,
+      },
+      {
+        label: 'Money you put in',
+        data: invested,
+        borderColor: th.net,
+        backgroundColor: 'transparent',
+        fill: false, tension: 0.3, borderWidth: 1.6, borderDash: [5, 5], pointRadius: 0,
+      },
+      {
+        label: 'Bad-month floor',
+        data: downside,
+        borderColor: th.danger,
+        backgroundColor: 'transparent',
+        fill: false, tension: 0.4, borderWidth: 1.2, borderDash: [2, 4], pointRadius: 0,
+      },
+    ],
+  };
+
+  const options = {
+    interaction: { mode: 'index', intersect: false },
+    scales: {
+      x: {
+        grid: { display: false },
+        ticks: {
+          color: th.tick, font: { size: 10 },
+          callback: (v) => (v % 12 === 0 ? `${v / 12}y` : ''),
+          maxRotation: 0,
+        },
+      },
+      y: {
+        grid: { color: th.grid, drawBorder: false },
+        ticks: {
+          color: th.tick, font: { size: 10 },
+          callback: (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}K` : v),
+        },
+      },
+    },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: th.tooltipBg, titleColor: th.tooltipTitle, bodyColor: th.tooltipBody,
+        borderColor: th.tooltipBorder, borderWidth: 1, padding: 12, cornerRadius: 8,
+        callbacks: {
+          title: (items) => `Month ${items[0].label}`,
+          label: (ctx) => `${ctx.dataset.label}: ${fmtTZS(ctx.parsed.y)}`,
+        },
+      },
+    },
+  };
+
+  const legend = [
+    { c: th.accent, label: t('sim.proj.value') },
+    { c: th.net,    label: t('sim.proj.invested') },
+    { c: th.danger, label: t('sim.proj.floor') },
+  ];
+
+  return (
+    <div className="bento p-4 sm:p-6 relative overflow-hidden mb-5 sm:mb-6">
+      <span aria-hidden className="absolute -right-24 -top-24 w-64 h-64 rounded-full blur-3xl bg-accent/10 pointer-events-none" />
+      <div className="relative flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-4">
+        <div className="min-w-0">
+          <Eyebrow>{t('sim.proj.eyebrow')}</Eyebrow>
+          <h3 className="mt-2 text-base sm:text-lg font-semibold tracking-tight">{t('sim.proj.title')}</h3>
+          <p className="text-xs text-txt-3 mt-1 max-w-md">{t('sim.proj.sub')}</p>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          {[
+            { k: '1y', v: fv12 }, { k: '3y', v: fv36 }, { k: '5y', v: fv60 },
+          ].map((p) => (
+            <div key={p.k} className="surface-inset rounded-xl px-3 py-2 min-w-[92px]">
+              <div className="text-[10px] uppercase tracking-ticker text-txt-3 font-mono">{p.k}</div>
+              <div className="text-sm sm:text-base font-bold tabular text-accent break-all">{fmtTZS(p.v)}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="relative">
+        <ChartJS type="line" data={data} options={options} height={220} />
+      </div>
+      <div className="relative flex flex-wrap gap-x-4 gap-y-1.5 mt-3">
+        {legend.map((l) => (
+          <span key={l.label} className="inline-flex items-center gap-1.5 text-[11px] text-txt-2">
+            <span className="w-3 h-[2px] rounded-full" style={{ background: l.c }} />
+            {l.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 };
@@ -571,7 +708,7 @@ const AnswerCard = ({ icon, tone, question, headline, body, footer }) => {
    Fallback / deficit screens
    ---------------------------------------------------------------- */
 const NoStatementFallback = ({ t }) => (
-  <div className="card-soft p-5 sm:p-6 lg:p-8 border border-accent/20 bg-gradient-to-br from-accent/5 to-transparent">
+  <div className="bento p-5 sm:p-6 lg:p-8 border border-accent/20 bg-gradient-to-br from-accent/5 to-transparent">
     <div className="flex flex-col sm:flex-row gap-4 sm:gap-6 items-start">
       <div className="p-3 rounded-xl bg-accent/10 border border-accent/25 flex-shrink-0">
         <Icon name="upload" size={22} className="text-accent" />
@@ -596,7 +733,7 @@ const NoStatementFallback = ({ t }) => (
 );
 
 const DeficitFallback = ({ t }) => (
-  <div className="card-soft p-5 sm:p-6 lg:p-8 border border-dng/30 bg-dng/5">
+  <div className="bento p-5 sm:p-6 lg:p-8 border border-dng/30 bg-dng/5">
     <div className="flex flex-col sm:flex-row gap-4 sm:gap-6 items-start">
       <div className="p-3 rounded-xl bg-dng/15 text-dng flex-shrink-0">
         <Icon name="alert" size={22} />
@@ -887,6 +1024,19 @@ const InvestmentSimulator = ({ summary, snapshot }) => {
         title={t('sim.step3.title')}
         lede={t('sim.step3.lede')}
       >
+        {/* Alive projection — the money-growth curve for the picked asset */}
+        {amount > 0 && (
+          <ProjectionChart
+            monthly={amount}
+            annual={sim.profile.annual}
+            drawdown={sim.profile.drawdown}
+            fv12={sim.fv12}
+            fv36={sim.fv36}
+            fv60={sim.fv60}
+            t={t}
+          />
+        )}
+
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4 mb-5 sm:mb-6">
           <AnswerCard
             icon={q1.icon}

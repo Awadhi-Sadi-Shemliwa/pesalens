@@ -7,32 +7,35 @@
    Switch: <html class="light"> ↔ <html>  (dark is default)
    ================================================================ */
 :root {
-  /* surfaces (dark) */
-  --c-deep:    8 9 12;
-  --c-ink:     5 6 10;
-  --c-s1:     12 13 18;
-  --c-s2:     18 19 26;
-  --c-s3:     22 23 31;
-  --c-s4:     28 29 40;
-  --c-s5:     34 35 47;
-  /* borders */
-  --c-bdr:    37 38 54;
-  --c-bdr-h:  53 54 72;
-  --c-bdr-s:  30 31 45;
-  /* accents */
-  --c-accent:   76 110 245;
-  --c-accent-h:101 131 255;
-  --c-accent-d: 59 91 219;
-  /* semantic */
+  /* surfaces (dark) — "money black": near-black with a faint green undertone */
+  --c-deep:    7 11 10;
+  --c-ink:     4 7  6;
+  --c-s1:     11 16 14;
+  --c-s2:     15 21 19;
+  --c-s3:     20 27 24;
+  --c-s4:     26 34 31;
+  --c-s5:     33 43 39;
+  /* borders — greenish charcoal */
+  --c-bdr:    34 46 42;
+  --c-bdr-h:  49 63 57;
+  --c-bdr-s:  27 37 34;
+  /* accents — signature spring-green (UI chrome). Distinct from income emerald. */
+  --c-accent:   48 220 130;
+  --c-accent-h: 74 235 150;
+  --c-accent-d: 28 180 104;
+  /* semantic — income emerald is cooler/deeper so it reads apart from accent */
   --c-inc:  16 185 129;
   --c-exp: 245 158  11;
-  --c-net:   6 182 212;
+  --c-net:   56 132 245;   /* the "hint of blue" — secondary glow */
   --c-dng: 239  68  68;
-  /* text */
-  --c-t1: 238 238 240;
-  --c-t2: 148 150 168;
-  --c-t3:  94  96 120;
-  --c-t4:  63  65  84;
+  /* text — faint green tint */
+  --c-t1: 236 240 238;
+  --c-t2: 141 155 149;
+  --c-t3:  91 106 100;
+  --c-t4:  59  72  67;
+
+  /* primary-button foreground: dark ink on bright green reads premium + AA */
+  --btn-primary-fg: 6 12 10;
 
   /* compositional helpers */
   --grain-opacity: 0.4;
@@ -40,25 +43,25 @@
   --grid-line:     rgba(255,255,255,0.025);
   --grid-dot:      rgba(255,255,255,0.06);
   --bg-noise-fg:   0.93 0.93 0.94;
-  --selection-bg:  rgba(76,110,245,0.32);
-  --selection-fg:  238 238 240;
+  --selection-bg:  rgba(48,220,130,0.30);
+  --selection-fg:  236 240 238;
   --scrollbar-track: transparent;
 
   --hero-bg:
-    radial-gradient(120% 80% at 0% 0%, rgba(76,110,245,0.10) 0%, transparent 55%),
-    radial-gradient(80% 60% at 100% 100%, rgba(6,182,212,0.06) 0%, transparent 55%),
-    rgb(18 19 26);
-  --hero-border: rgba(76,110,245,0.18);
-  --hero-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 30px 80px -40px rgba(76,110,245,0.30);
+    radial-gradient(120% 80% at 0% 0%, rgba(48,220,130,0.12) 0%, transparent 55%),
+    radial-gradient(80% 60% at 100% 100%, rgba(56,132,245,0.08) 0%, transparent 55%),
+    rgb(15 21 19);
+  --hero-border: rgba(48,220,130,0.20);
+  --hero-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 30px 80px -40px rgba(48,220,130,0.28);
 
-  --card-shadow-hover: 0 12px 36px -12px rgba(0,0,0,0.5), 0 0 0 1px rgba(76,110,245,0.10);
+  --card-shadow-hover: 0 12px 36px -12px rgba(0,0,0,0.55), 0 0 0 1px rgba(48,220,130,0.12);
 
-  --btn-primary-bg: linear-gradient(180deg,#5577F8 0%,#3B5BDB 100%);
-  --btn-primary-bg-hover: linear-gradient(180deg,#6583FF 0%,#4C6EF5 100%);
-  --btn-primary-shadow: inset 0 1px 0 rgba(255,255,255,0.18), 0 6px 20px -8px rgba(76,110,245,0.55);
-  --btn-primary-shadow-hover: inset 0 1px 0 rgba(255,255,255,0.22), 0 10px 28px -8px rgba(76,110,245,0.7);
+  --btn-primary-bg: linear-gradient(180deg,#3EE28C 0%,#1CB468 100%);
+  --btn-primary-bg-hover: linear-gradient(180deg,#57ED9E 0%,#25C878 100%);
+  --btn-primary-shadow: inset 0 1px 0 rgba(255,255,255,0.28), 0 6px 20px -8px rgba(48,220,130,0.5);
+  --btn-primary-shadow-hover: inset 0 1px 0 rgba(255,255,255,0.34), 0 10px 28px -8px rgba(48,220,130,0.65);
 
-  --modal-shadow: 0 40px 100px -20px rgba(0,0,0,0.7), 0 0 0 1px rgba(76,110,245,0.04);
+  --modal-shadow: 0 40px 100px -20px rgba(0,0,0,0.72), 0 0 0 1px rgba(48,220,130,0.05);
   --drawer-shadow: -30px 0 60px -20px rgba(0,0,0,0.6);
 
   color-scheme: dark;
@@ -77,7 +80,7 @@
   --c-bdr:   222 225 233;
   --c-bdr-h: 196 200 212;
   --c-bdr-s: 232 234 240;
-  /* accents — same hue, slightly deeper for AA contrast on light bg */
+  /* accents — blue stays the primary in light; deeper for AA on white */
   --c-accent:   59  91 219;
   --c-accent-h: 76 110 245;
   --c-accent-d: 47  72 187;
@@ -92,6 +95,9 @@
   --c-t3: 122 128 145;
   --c-t4: 175 180 195;
 
+  /* primary-button foreground: white on blue in light */
+  --btn-primary-fg: 255 255 255;
+
   --grain-opacity: 0.18;
   --grain-blend:   multiply;
   --grid-line:     rgba(0,0,0,0.04);
@@ -102,7 +108,7 @@
 
   --hero-bg:
     radial-gradient(120% 80% at 0% 0%, rgba(76,110,245,0.08) 0%, transparent 60%),
-    radial-gradient(80% 60% at 100% 100%, rgba(6,182,212,0.05) 0%, transparent 60%),
+    radial-gradient(80% 60% at 100% 100%, rgba(5,150,105,0.05) 0%, transparent 60%),
     rgb(255 255 255);
   --hero-border: rgba(76,110,245,0.18);
   --hero-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 30px 60px -30px rgba(59,91,219,0.18);
@@ -229,8 +235,28 @@ body::before {
   to   { transform: translateX(-50%); }
 }
 @keyframes glow-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(76,110,245,0.0); }
-  50%      { box-shadow: 0 0 0 8px rgba(76,110,245,0.10); }
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--c-accent) / 0); }
+  50%      { box-shadow: 0 0 0 8px rgb(var(--c-accent) / 0.10); }
+}
+@keyframes coin-flip {
+  0%   { transform: rotateY(0deg); }
+  100% { transform: rotateY(360deg); }
+}
+@keyframes float-3d {
+  0%, 100% { transform: translateY(0) rotateX(0deg); }
+  50%      { transform: translateY(-8px) rotateX(4deg); }
+}
+@keyframes sheen {
+  0%   { background-position: -180% 0; }
+  60%, 100% { background-position: 180% 0; }
+}
+@keyframes count-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+@keyframes cashflow-dash {
+  to { stroke-dashoffset: -1000; }
 }
 @keyframes draw-line {
   from { stroke-dashoffset: 1000; }
@@ -247,6 +273,30 @@ body::before {
 .anim-float { animation: float 6s ease-in-out infinite; }
 .anim-glow  { animation: glow-pulse 2.4s ease-in-out infinite; }
 .anim-pulse-soft { animation: pulse-soft 2s ease-in-out infinite; }
+.anim-float-3d { animation: float-3d 7s ease-in-out infinite; }
+.anim-coin { animation: coin-flip 3.4s cubic-bezier(0.45,0,0.55,1) infinite; }
+
+/* Pointer-driven 3D tilt base (JS sets --rx/--ry from TiltCard) */
+.tilt-3d {
+  transform: perspective(900px) rotateX(var(--ry, 0deg)) rotateY(var(--rx, 0deg));
+  transform-style: preserve-3d;
+  transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+/* Gold sheen sweep — for "money"/premium accents */
+.gold-sheen {
+  background: linear-gradient(100deg,
+    transparent 20%, rgba(255,255,255,0.22) 42%, rgba(255,215,120,0.35) 50%,
+    rgba(255,255,255,0.22) 58%, transparent 80%);
+  background-size: 220% 100%;
+  animation: sheen 3.2s ease-in-out infinite;
+}
+.count-pop { animation: count-pop 0.6s cubic-bezier(0.34,1.56,0.64,1) both; }
+.cashflow-stream {
+  stroke-dasharray: 10 14;
+  animation: cashflow-dash 2.2s linear infinite;
+}
 
 .delay-1 { animation-delay: 0.06s; }
 .delay-2 { animation-delay: 0.12s; }
@@ -325,6 +375,11 @@ body::before {
   border: 1px solid rgb(var(--c-bdr) / 0.55);
 }
 
+/* Hide the scrollbar on horizontal strips (ticker, tab rails) while
+   keeping them scrollable — for the command-deck market look. */
+.scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
 .grid-faint {
   background-image:
     linear-gradient(to right, var(--grid-line) 1px, transparent 1px),
@@ -347,9 +402,9 @@ body::before {
   pointer-events: none;
 }
 
-.glow-accent { box-shadow: 0 0 40px rgba(76,110,245,0.18); }
-.glow-income { box-shadow: 0 0 32px rgba(16,185,129,0.14); }
-.glow-net    { box-shadow: 0 0 32px rgba(6,182,212,0.14); }
+.glow-accent { box-shadow: 0 0 40px rgb(var(--c-accent) / 0.20); }
+.glow-income { box-shadow: 0 0 32px rgb(var(--c-inc) / 0.16); }
+.glow-net    { box-shadow: 0 0 32px rgb(var(--c-net) / 0.16); }
 
 /* ================================================================
    Inputs / focus
@@ -370,13 +425,13 @@ input:focus,
 select:focus,
 textarea:focus {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(76, 110, 245, 0.32), 0 0 0 4px rgba(76, 110, 245, 0.08);
-  border-color: rgba(76, 110, 245, 0.5) !important;
+  box-shadow: 0 0 0 2px rgb(var(--c-accent) / 0.32), 0 0 0 4px rgb(var(--c-accent) / 0.08);
+  border-color: rgb(var(--c-accent) / 0.5) !important;
 }
 
 button:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px rgba(76, 110, 245, 0.5);
+  box-shadow: 0 0 0 2px rgb(var(--c-accent) / 0.5);
 }
 
 /* ================================================================
@@ -427,8 +482,8 @@ button:focus-visible {
    ================================================================ */
 .btn-primary {
   background: var(--btn-primary-bg);
-  color: #fff;
-  border: 1px solid rgba(76, 110, 245, 0.6);
+  color: rgb(var(--btn-primary-fg));
+  border: 1px solid rgb(var(--c-accent) / 0.6);
   box-shadow: var(--btn-primary-shadow);
   transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
               box-shadow 0.2s ease,
@@ -511,7 +566,7 @@ button:focus-visible {
   width: 3px;
   border-radius: 0 4px 4px 0;
   background: rgb(var(--c-accent));
-  box-shadow: 0 0 12px rgba(76, 110, 245, 0.6);
+  box-shadow: 0 0 12px rgb(var(--c-accent) / 0.6);
 }
 
 /* Drag-pulse ring for upload zone */

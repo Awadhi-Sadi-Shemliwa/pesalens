@@ -2,8 +2,17 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
 import { Eyebrow, Badge, Modal } from '../components/common';
+import { TiltCard } from '../components/motion';
 import { useT } from '../data/i18n';
 import LiveTextScanner from '../components/LiveTextScanner';
+
+const TONE = {
+  accent: 'bg-accent/12 text-accent border-accent/25',
+  exp:    'bg-exp/12 text-exp border-exp/25',
+  inc:    'bg-inc/12 text-inc border-inc/25',
+  net:    'bg-net/12 text-net border-net/25',
+};
+const TONE_TXT = { accent: 'text-txt-1', exp: 'text-exp', inc: 'text-inc', net: 'text-net' };
 import {
   fetchReceiptPatterns,
   scanReceipt,
@@ -224,7 +233,7 @@ const BookkeepingPage = () => {
         </div>
 
         {/* ---- Month picker + PDF download ---- */}
-        <div className="card-soft p-5 lg:p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="bento p-5 lg:p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <Eyebrow num="01">Reporting period</Eyebrow>
             <h3 className="mt-2 text-base font-semibold tracking-tight">Monthly P&amp;L &amp; Balance Sheet</h3>
@@ -251,22 +260,25 @@ const BookkeepingPage = () => {
         {/* ---- KPI tiles from summary ---- */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           {[
-            { label: 'Revenue',    val: fmtTZS(monthly.revenue_total),  c: 'inc' },
-            { label: 'Expenses',   val: fmtTZS(monthly.expense_total),  c: 'exp' },
-            { label: 'Net Income', val: fmtTZS(monthly.net_income),     c: monthly.net_income >= 0 ? 'inc' : 'exp' },
-            { label: 'Assets (cum.)', val: fmtTZS(balance.asset_total), c: 'accent' },
+            { label: 'Revenue',    val: fmtTZS(monthly.revenue_total),  c: 'inc',    icon: 'arrowUpRight' },
+            { label: 'Expenses',   val: fmtTZS(monthly.expense_total),  c: 'exp',    icon: 'arrowDownRight' },
+            { label: 'Net Income', val: fmtTZS(monthly.net_income),     c: monthly.net_income >= 0 ? 'inc' : 'exp', icon: 'trending' },
+            { label: 'Assets (cum.)', val: fmtTZS(balance.asset_total), c: 'accent', icon: 'wallet' },
           ].map((stat, idx) => (
-            <div key={idx} className="card-soft p-4 card-hover">
+            <TiltCard key={idx} max={6} className="bento p-4">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] uppercase tracking-ticker text-txt-3">{stat.label}</span>
+                <span className="text-[10px] uppercase tracking-ticker text-txt-3 truncate">{stat.label}</span>
+                <span className={`w-7 h-7 rounded-lg flex items-center justify-center border flex-shrink-0 ${TONE[stat.c]}`}>
+                  <Icon name={stat.icon} size={13} />
+                </span>
               </div>
-              <div className={`text-lg lg:text-xl font-bold tabular tracking-tight ${stat.c === 'inc' ? 'text-inc' : stat.c === 'exp' ? 'text-exp' : 'text-txt-1'}`}>{stat.val}</div>
-            </div>
+              <div className={`text-lg lg:text-xl font-bold tabular tracking-tight truncate ${TONE_TXT[stat.c]}`}>{stat.val}</div>
+            </TiltCard>
           ))}
         </div>
 
         {/* ---- P&L preview ---- */}
-        <div className="card-soft overflow-hidden">
+        <div className="bento overflow-hidden">
           <div className="p-5 border-b border-bdr/70">
             <Eyebrow num="02">Income Statement</Eyebrow>
             <h3 className="mt-2 text-base font-semibold tracking-tight">Profit &amp; Loss · {month}</h3>
@@ -310,7 +322,7 @@ const BookkeepingPage = () => {
         </div>
 
         {/* ---- Balance sheet preview ---- */}
-        <div className="card-soft overflow-hidden">
+        <div className="bento overflow-hidden">
           <div className="p-5 border-b border-bdr/70 flex items-center justify-between">
             <div>
               <Eyebrow num="03">Balance Sheet</Eyebrow>
@@ -344,7 +356,7 @@ const BookkeepingPage = () => {
         </div>
 
         {/* ---- Manual ledger entries ---- */}
-        <div className="card-soft overflow-hidden">
+        <div className="bento overflow-hidden">
           <div className="p-5 border-b border-bdr/70 flex items-center justify-between">
             <div>
               <Eyebrow num="04">Ledger</Eyebrow>
@@ -422,7 +434,7 @@ const BookkeepingPage = () => {
         </div>
 
         {/* ---- Receipt scan tools ---- */}
-        <div className="card-soft p-5 lg:p-6">
+        <div className="bento p-5 lg:p-6">
           <Eyebrow num="05">Capture a receipt</Eyebrow>
           <h3 className="mt-2 mb-4 text-base font-semibold tracking-tight">Add expenses by photo</h3>
           <input ref={galleryRef} type="file" accept="image/*" className="hidden" onChange={onPick} />
@@ -461,7 +473,7 @@ const BookkeepingPage = () => {
         </div>
 
         {latest && (
-          <div className="card-soft p-5 lg:p-6">
+          <div className="bento p-5 lg:p-6">
             <Eyebrow num="06">Latest receipt</Eyebrow>
             <h3 className="mt-2 mb-4 text-base font-semibold tracking-tight">Parsed details</h3>
             <div className="grid sm:grid-cols-2 gap-4 text-sm">
@@ -497,7 +509,7 @@ const BookkeepingPage = () => {
           </div>
         )}
 
-        <div className="card-soft p-5 lg:p-6">
+        <div className="bento p-5 lg:p-6">
           <Eyebrow num="07">Patterns from your receipts</Eyebrow>
           <h3 className="mt-2 text-base font-semibold tracking-tight">
             {patterns.receipt_count || 0} receipt{patterns.receipt_count === 1 ? '' : 's'} on file

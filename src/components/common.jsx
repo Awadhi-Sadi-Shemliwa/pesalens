@@ -80,8 +80,8 @@ export const Mark = ({ size = 32, withWord = true, className = '' }) => (
         width: size,
         height: size,
         background: 'linear-gradient(140deg, rgb(var(--c-s4)) 0%, rgb(var(--c-s1)) 100%)',
-        border: '1px solid rgba(76,110,245,0.35)',
-        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04), 0 6px 18px -6px rgba(76,110,245,0.45)',
+        border: '1px solid rgb(var(--c-accent) / 0.38)',
+        boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.05), 0 6px 18px -6px rgb(var(--c-accent) / 0.45)',
       }}
     >
       <img
@@ -221,14 +221,15 @@ export const Sparkline = ({
     >
       <defs>
         <linearGradient id={id} x1="0" x2="0" y1="0" y2="1">
-          <stop offset="0%" stopColor={color} stopOpacity="0.32" />
-          <stop offset="100%" stopColor={color} stopOpacity="0" />
+          {/* style-based so CSS var() colors (rgb(var(--c-inc))) resolve */}
+          <stop offset="0%" style={{ stopColor: color, stopOpacity: 0.32 }} />
+          <stop offset="100%" style={{ stopColor: color, stopOpacity: 0 }} />
         </linearGradient>
       </defs>
       {fill && <path d={path.area} fill={`url(#${id})`} />}
       <path
         d={path.line}
-        stroke={color}
+        style={{ stroke: color }}
         strokeWidth={strokeWidth}
         fill="none"
         strokeLinecap="round"
@@ -241,8 +242,20 @@ export const Sparkline = ({
 /* ----------------------------------------------------------------
    KPI Card — three variants (hero, standard, compact)
    ---------------------------------------------------------------- */
-const accentColor = {
-  accent: '#4C6EF5', income: '#10B981', expense: '#F59E0B', net: '#06B6D4', danger: '#EF4444',
+/* Resolve a live theme token to an rgb() string (green accent in dark,
+   blue in light), falling back to a hex if the var isn't available yet. */
+export const readToken = (name, fallback) => {
+  if (typeof window === 'undefined') return fallback;
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return raw ? `rgb(${raw.replace(/\s+/g, ' ')})` : fallback;
+};
+const tokenVar = {
+  accent: ['--c-accent', '#30DC82'], income: ['--c-inc', '#10B981'],
+  expense: ['--c-exp', '#F59E0B'], net: ['--c-net', '#3884F5'], danger: ['--c-dng', '#EF4444'],
+};
+const resolveAccent = (key) => {
+  const [name, fb] = tokenVar[key] || tokenVar.accent;
+  return readToken(name, fb);
 };
 const accentText = {
   accent: 'text-accent', income: 'text-inc', expense: 'text-exp', net: 'text-net', danger: 'text-dng',
@@ -260,10 +273,12 @@ const KpiCard = ({
   rawNumber,            // optional number for count-up; if present `value` becomes the formatter
   formatter,            // optional formatter for count-up
 }) => {
+  const [theme] = useTheme(); // re-render on theme toggle so token colors refresh
   const isHero = variant === 'hero';
   const isCompact = variant === 'compact';
-  const color = accentColor[accent] || accentColor.accent;
+  const color = resolveAccent(accent); // eslint-disable-line no-unused-vars
   const textC = accentText[accent] || accentText.accent;
+  void theme;
 
   const baseClasses = isHero
     ? 'surface-hero rounded-2xl p-4 sm:p-5 lg:p-6 relative overflow-hidden'

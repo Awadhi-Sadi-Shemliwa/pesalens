@@ -13,6 +13,7 @@ const dict = {
     'nav.analysis':         'Analysis',
     'nav.assistant':        'AI Assistant',
     'nav.markets':          'Markets',
+    'nav.simulator':        'Simulator',
     'nav.bookkeeping':      'Bookkeeping',
     'nav.personal':         'Personal Spending',
     'nav.reconcile':        'Reconciliation',
@@ -56,6 +57,8 @@ const dict = {
     'common.debit':         'Debit',
     'common.credit':        'Credit',
     'common.balance':       'Balance',
+    'common.openingBalance':'Opening balance',
+    'common.balanceNow':    'Balance now',
     'common.amount':        'Amount',
     'common.method':        'Method',
     'common.type':          'Type',
@@ -175,6 +178,8 @@ const dict = {
     'an.mix.title':         'Spending by category',
     'an.top.eyebrow':       'Top categories',
     'an.top.title':         'Where it goes',
+    'an.cat.viewTx':        'View transactions',
+    'an.cat.empty':         'No transactions in this category.',
     'an.search':            'Search transactions, categories…',
     'an.sort.latest':       'Latest first',
     'an.sort.oldest':       'Oldest first',
@@ -208,6 +213,16 @@ const dict = {
     'ai.snapshot.empty':    'No statement uploaded yet.',
     'ai.spending.empty':    'Upload a statement to see categories.',
     'ai.no':                'No statement uploaded yet.',
+    'ai.hello':             'Hello, {name}',
+    'ai.howHelp':           'How can I help with your money today?',
+    'ai.explore':           'What would you like to explore?',
+    'ai.send':              'Send',
+    'ai.export':            'Export chat',
+    'ai.copied':            'Copied',
+    'ai.flagged':           'flagged',
+    'ai.card.statement':    'Give me a plain-English summary of my latest statement.',
+    'ai.card.spending':     'Which categories drained the most money, and why?',
+    'ai.card.anomalies':    'Explain the issues flagged on my statement and how to fix them.',
 
     /* Markets — Ask the Advisor (chat panel) */
     'mki.eyebrow':          'Ask the Market Advisor',
@@ -276,6 +291,11 @@ const dict = {
     'sim.title':            'Can I invest? And if so, how — without breaking my month?',
     'sim.lede':             'A three-step guide built from your own statement. No jargon, no pressure — just numbers that make sense.',
     'sim.badge':            'Personalised',
+
+    /* Simulator page header */
+    'sim.page.eyebrow':     'Simulator',
+    'sim.page.title':       'Plan your first investment',
+    'sim.page.desc':        'Turn your statement into a decision — how much you can safely invest each month, where to put it, and what it could become.',
 
     /* Hero — the headline number */
     'sim.hero.eyebrow':     'Your starting point',
@@ -416,6 +436,12 @@ const dict = {
     'sim.fallback.body':    'The simulator computes a safe-to-invest amount from your real cash flow — not a guess. Without a statement we cannot tell you how much is actually free.',
     'sim.fallback.cta':     'Go to Dashboard',
     'sim.disclaimer':       'Educational simulation only. Projections use long-run averages, not forecasts. Real returns can be higher or lower in any given year. Not financial advice.',
+    'sim.proj.eyebrow':     'Projection',
+    'sim.proj.title':       'How your money could grow',
+    'sim.proj.sub':         'Your monthly amount compounded at the asset’s typical return, with the money you put in and a bad-month floor for context.',
+    'sim.proj.value':       'Projected value',
+    'sim.proj.invested':    'Money you put in',
+    'sim.proj.floor':       'Bad-month floor',
 
     /* Sign in / Sign up */
     'auth.signin.eyebrow':  'Welcome back',
@@ -549,6 +575,7 @@ const dict = {
     'nav.analysis':         'Uchambuzi',
     'nav.assistant':        'Msaidizi wa AI',
     'nav.markets':          'Soko',
+    'nav.simulator':        'Kikokotoo',
     'nav.bookkeeping':      'Hesabu za Biashara',
     'nav.personal':         'Matumizi Binafsi',
     'nav.reconcile':        'Ulinganisho',
@@ -592,6 +619,8 @@ const dict = {
     'common.debit':         'Toleo',
     'common.credit':        'Pokeo',
     'common.balance':       'Salio',
+    'common.openingBalance':'Salio la awali',
+    'common.balanceNow':    'Salio sasa',
     'common.amount':        'Kiasi',
     'common.method':        'Njia',
     'common.type':          'Aina',
@@ -711,6 +740,8 @@ const dict = {
     'an.mix.title':         'Matumizi kwa kategoria',
     'an.top.eyebrow':       'Kategoria za juu',
     'an.top.title':         'Pesa zinakwenda wapi',
+    'an.cat.viewTx':        'Tazama miamala',
+    'an.cat.empty':         'Hakuna miamala katika kategoria hii.',
     'an.search':            'Tafuta miamala, kategoria…',
     'an.sort.latest':       'Mpya zaidi kwanza',
     'an.sort.oldest':       'Za zamani kwanza',
@@ -743,6 +774,16 @@ const dict = {
     'ai.anom.empty':        'Hakuna ilichoashiriwa kwenye taarifa ya hivi karibuni.',
     'ai.snapshot.empty':    'Hakuna taarifa iliyopakiwa.',
     'ai.spending.empty':    'Pakia taarifa kuona kategoria.',
+    'ai.hello':             'Habari, {name}',
+    'ai.howHelp':           'Nikusaidie vipi na fedha zako leo?',
+    'ai.explore':           'Ungependa kuchunguza nini?',
+    'ai.send':              'Tuma',
+    'ai.export':            'Hamisha mazungumzo',
+    'ai.copied':            'Imenakiliwa',
+    'ai.flagged':           'zimeashiriwa',
+    'ai.card.statement':    'Nipe muhtasari wa lugha rahisi wa taarifa yangu ya hivi karibuni.',
+    'ai.card.spending':     'Ni kategoria zipi zilizotumia pesa nyingi, na kwa nini?',
+    'ai.card.anomalies':    'Eleza hitilafu zilizoashiriwa kwenye taarifa yangu na jinsi ya kuzirekebisha.',
 
     /* Markets — Ask the Advisor (chat panel) */
     'mki.eyebrow':          'Uliza Mshauri wa Soko',
@@ -810,6 +851,11 @@ const dict = {
     'sim.title':            'Naweza kuwekeza? Na ikiwa ndio, vipi — bila kuvuruga mwezi wangu?',
     'sim.lede':             'Mwongozo wa hatua tatu uliojengwa kutoka taarifa yako mwenyewe. Bila lugha ngumu, bila shinikizo — nambari tu zinazoeleweka.',
     'sim.badge':            'Imebinafsishwa',
+
+    /* Kichwa cha ukurasa wa Kikokotoo */
+    'sim.page.eyebrow':     'Kikokotoo',
+    'sim.page.title':       'Panga uwekezaji wako wa kwanza',
+    'sim.page.desc':        'Geuza taarifa yako kuwa uamuzi — kiasi unachoweza kuwekeza salama kila mwezi, wapi pa kukiweka, na kinachoweza kuwa.',
 
     /* Hero */
     'sim.hero.eyebrow':     'Mwanzo wako',
@@ -947,6 +993,12 @@ const dict = {
     'sim.fallback.body':    'Mfano huhesabu kiasi salama cha kuwekeza kutoka mtiririko wako halisi — siyo nadhani. Bila taarifa hatuwezi kukuambia kiasi gani kipo huru.',
     'sim.fallback.cta':     'Nenda Dashibodi',
     'sim.disclaimer':       'Mfano wa kielimu pekee. Makadirio yanatumia wastani wa muda mrefu, siyo utabiri. Faida halisi inaweza kuwa kubwa au ndogo zaidi kwa mwaka wowote. Siyo ushauri wa kifedha.',
+    'sim.proj.eyebrow':     'Makadirio',
+    'sim.proj.title':       'Jinsi pesa yako inavyoweza kukua',
+    'sim.proj.sub':         'Kiasi chako cha kila mwezi kikikua kwa faida ya kawaida ya mali, pamoja na pesa uliyoweka na kiwango cha chini cha mwezi mbaya.',
+    'sim.proj.value':       'Thamani inayotarajiwa',
+    'sim.proj.invested':    'Pesa uliyoweka',
+    'sim.proj.floor':       'Kiwango cha mwezi mbaya',
 
     /* Sign in / Sign up */
     'auth.signin.eyebrow':  'Karibu tena',

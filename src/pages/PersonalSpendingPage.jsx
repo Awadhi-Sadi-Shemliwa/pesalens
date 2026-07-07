@@ -1,7 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { Badge, Modal, Eyebrow } from '../components/common';
+import { Badge, Modal, Eyebrow, CountUp } from '../components/common';
+import { TiltCard } from '../components/motion';
+import { ChartJS, chartTheme } from '../components/ChartJS';
 import LiveTextScanner from '../components/LiveTextScanner';
 import {
   fetchReceiptPatterns,
@@ -16,6 +18,26 @@ import {
 import { useT, AutoT } from '../data/i18n';
 
 const PERSONAL_CATEGORIES = ['Groceries', 'Transport', 'Dining', 'Utilities', 'Health', 'Housing', 'Entertainment', 'Other'];
+
+// A recognisable glyph per category so transaction rows read like the
+// avatar-led lists in premium finance apps (falls back to a wallet).
+const CATEGORY_ICON = {
+  Groceries: 'receipt', Transport: 'trending', Dining: 'wallet', Utilities: 'zap',
+  Health: 'shield', Housing: 'dashboard', Entertainment: 'play', Other: 'dollar',
+};
+const iconForCategory = (c) => CATEGORY_ICON[c] || 'wallet';
+
+// "Today" / "Yesterday" / long date for the grouped transaction headers.
+const dayHeading = (isoKey) => {
+  if (!isoKey || isoKey === '—') return 'Undated';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = new Date(isoKey + 'T00:00:00');
+  if (Number.isNaN(d.getTime())) return isoKey;
+  const diff = Math.round((today - d) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'long' });
+};
 
 // Backend receipt categories are lowercase — map onto the Title-Case labels
 // the ledger renders so a grocery receipt files under Groceries, not "other".
@@ -72,6 +94,8 @@ const PersonalSpendingPage = () => {
   const [patterns, setPatterns] = useState({ insights: [], by_category: {}, receipt_count: 0 });
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  const [txnFilter, setTxnFilter] = useState('all');   // all | receipt | manual
+  const [trendRange, setTrendRange] = useState(14);     // 7 | 14 | 30 days
   const { t } = useT();
 
   const galleryRef = useRef(null);
@@ -257,6 +281,79 @@ const PersonalSpendingPage = () => {
     .filter((e) => e.date === today)
     .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   const monthlyTotal = allEntries.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const receiptSpend = allEntries.filter((e) => e.source === 'receipt').reduce((s, e) => s + (Number(e.amount) || 0), 0);
+
+  /* ---- Derived analytics (all from real entries — nothing faked) ---- */
+  const th = chartTheme();
+
+  // Spend per category, biggest first, each with a stable palette colour.
+  const catAgg = useMemo(() => {
+    const m = {};
+    for (const e of allEntries) {
+      const k = e.category || 'Other';
+      m[k] = (m[k] || 0) + (Number(e.amount) || 0);
+    }
+    return Object.entries(m).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries.length, monthlyTotal]);
+  const palette = th.palette;
+  const catColor = Object.fromEntries(catAgg.map((c, i) => [c.name, palette[i % palette.length]]));
+  const topCategory = catAgg[0];
+
+  // Daily spend for the trend area chart (last N days, zero-filled).
+  const dailySeries = useMemo(() => {
+    const m = {};
+    for (const e of allEntries) {
+      const k = (e.date || '').slice(0, 10);
+      if (k) m[k] = (m[k] || 0) + (Number(e.amount) || 0);
+    }
+    const out = [];
+    for (let i = trendRange - 1; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const k = d.toISOString().slice(0, 10);
+      out.push({ key: k, value: m[k] || 0 });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries.length, monthlyTotal, trendRange]);
+
+  // Favourite spends — vendors you pay most, by total.
+  const topVendors = useMemo(() => {
+    const m = {};
+    for (const e of allEntries) {
+      const k = (e.vendor || '').trim() || 'Unlabelled';
+      if (!m[k]) m[k] = { vendor: k, total: 0, count: 0, category: e.category };
+      m[k].total += Number(e.amount) || 0;
+      m[k].count += 1;
+    }
+    return Object.values(m).sort((a, b) => b.total - a.total).slice(0, 5);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries.length, monthlyTotal]);
+
+  // Transactions grouped by day, honouring the receipt/manual filter.
+  const filteredEntries = allEntries.filter((e) =>
+    txnFilter === 'all' ? true : txnFilter === 'receipt' ? e.source === 'receipt' : e.source !== 'receipt',
+  );
+  const dayGroups = useMemo(() => {
+    const by = {};
+    for (const e of filteredEntries) {
+      const k = (e.date || '').slice(0, 10) || '—';
+      (by[k] || (by[k] = [])).push(e);
+    }
+    return Object.keys(by).sort((a, b) => b.localeCompare(a)).map((k) => ({
+      key: k,
+      heading: dayHeading(k),
+      total: by[k].reduce((s, e) => s + (Number(e.amount) || 0), 0),
+      items: by[k],
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredEntries.length, txnFilter, monthlyTotal]);
+
+  const overviewTiles = [
+    { label: t('pp.session'), sub: 'All recorded spend', val: monthlyTotal, grad: 'from-exp/25 via-exp/10 to-transparent', ring: 'border-exp/25', chip: 'bg-exp/15 text-exp', icon: 'wallet' },
+    { label: t('pp.todayExpenses'), sub: "Spent so far today", val: todayExpenses, grad: 'from-accent/25 via-accent/10 to-transparent', ring: 'border-accent/25', chip: 'bg-accent/15 text-accent', icon: 'arrowDownRight' },
+    { label: 'From receipts', sub: `${totalScanned} scanned`, val: receiptSpend, grad: 'from-net/25 via-net/10 to-transparent', ring: 'border-net/25', chip: 'bg-net/15 text-net', icon: 'receipt' },
+  ];
 
   return (
     <AppShell>
@@ -277,25 +374,237 @@ const PersonalSpendingPage = () => {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-          {[
-            { label: t('pp.todayExpenses'),    val: fmtTZS(todayExpenses),            icon: 'arrowDownRight', c: 'exp' },
-            { label: t('pp.scanned'),          val: totalScanned,                     icon: 'receipt',        c: 'accent' },
-            { label: t('pp.session'),          val: fmtTZS(monthlyTotal),             icon: 'wallet',         c: 'net' },
-            { label: t('pp.patternInsights'),  val: (patterns.insights || []).length, icon: 'sparkles',       c: 'inc' },
-          ].map((stat, idx) => (
-            <div key={idx} className="card-soft p-4 card-hover">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] uppercase tracking-ticker text-txt-3">{stat.label}</span>
-                <Icon name={stat.icon} size={14} className={stat.c === 'inc' ? 'text-inc' : stat.c === 'exp' ? 'text-exp' : stat.c === 'net' ? 'text-net' : 'text-accent'} />
-              </div>
-              <div className={`text-lg lg:text-xl font-bold tabular tracking-tight ${stat.c === 'inc' ? 'text-inc' : stat.c === 'exp' ? 'text-exp' : stat.c === 'net' ? 'text-net' : 'text-txt-1'}`}>{stat.val}</div>
+        {/* Top-level status banners (kept visible above the fold). */}
+        {notice && (
+          <div className="p-3 bg-net/10 border border-net/30 rounded-xl text-sm text-net flex items-start gap-2">
+            <Icon name="alert" size={16} className="mt-0.5 flex-shrink-0" /><span>{notice}</span>
+          </div>
+        )}
+        {error && (
+          <div className="p-3 bg-exp/10 border border-exp/30 rounded-xl text-sm text-exp">{error}</div>
+        )}
+
+        {/* ===== OVERVIEW + ANALYTICS ================================= */}
+        <div className="grid lg:grid-cols-12 gap-4 sm:gap-5">
+          {/* Overview — gradient headline tiles */}
+          <div className="lg:col-span-7 min-w-0">
+            <Eyebrow num="01">Overview</Eyebrow>
+            <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+              {overviewTiles.map((tile) => (
+                <TiltCard key={tile.label} max={6} className="h-full">
+                  <div className={`relative h-full overflow-hidden rounded-2xl border ${tile.ring} bg-gradient-to-br ${tile.grad} p-4 sm:p-5`}>
+                    <span aria-hidden className="absolute -right-8 -top-8 w-24 h-24 rounded-full bg-white/5 blur-2xl pointer-events-none" />
+                    <div className="relative flex items-center justify-between mb-3">
+                      <span className={`w-9 h-9 rounded-xl flex items-center justify-center ${tile.chip}`}>
+                        <Icon name={tile.icon} size={16} />
+                      </span>
+                      <Icon name="chevRight" size={14} className="text-txt-4" />
+                    </div>
+                    <div className="relative text-xl sm:text-2xl font-bold tabular tracking-tight text-txt-1 truncate">
+                      <CountUp value={tile.val} formatter={fmtTZS} />
+                    </div>
+                    <div className="relative text-[11px] font-medium text-txt-2 mt-1 truncate">{tile.label}</div>
+                    <div className="relative text-[10px] text-txt-3 uppercase tracking-ticker font-mono mt-0.5 truncate">{tile.sub}</div>
+                  </div>
+                </TiltCard>
+              ))}
             </div>
-          ))}
+
+            {/* Spending trend area chart lives under the tiles (the
+                "portfolio" area from the reference, but your real daily spend). */}
+            <div className="bento p-4 sm:p-5 mt-3 sm:mt-4">
+              <div className="flex items-start justify-between gap-3 mb-3">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold tracking-tight">Spending trend</h3>
+                  <p className="text-[11px] text-txt-3 mt-0.5">Daily out over the last {trendRange} days.</p>
+                </div>
+                <div className="flex items-center gap-1 rounded-lg border border-bdr/60 p-0.5 flex-shrink-0">
+                  {[7, 14, 30].map((r) => (
+                    <button key={r} onClick={() => setTrendRange(r)}
+                      className={`text-[11px] px-2.5 py-1 rounded-md transition font-medium ${trendRange === r ? 'bg-accent/15 text-accent' : 'text-txt-3 hover:text-txt-1'}`}>
+                      {r}D
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <SpendTrend series={dailySeries} th={th} />
+            </div>
+          </div>
+
+          {/* Analytics — spend by category */}
+          <div className="lg:col-span-5 min-w-0">
+            <div className="bento p-4 sm:p-5 h-full flex flex-col">
+              <div className="flex items-start justify-between gap-2 mb-1">
+                <Eyebrow num="02">Analytics</Eyebrow>
+                <Badge color="muted">{catAgg.length} categories</Badge>
+              </div>
+              <div className="mt-2 mb-3">
+                <div className="text-[11px] text-txt-3 uppercase tracking-ticker font-mono">Top category</div>
+                <div className="flex items-baseline gap-2 mt-0.5">
+                  <span className="text-xl sm:text-2xl font-bold tabular tracking-tight">
+                    {topCategory ? fmtTZS(topCategory.value) : fmtTZS(0)}
+                  </span>
+                  {topCategory && <span className="text-xs text-txt-2">· {topCategory.name}</span>}
+                </div>
+              </div>
+              {catAgg.length === 0 ? (
+                <div className="flex-1 flex items-center justify-center text-sm text-txt-3 py-8">
+                  Add or scan an expense to see the breakdown.
+                </div>
+              ) : (
+                <CategoryBars data={catAgg} colorFor={(n) => catColor[n]} total={monthlyTotal} />
+              )}
+            </div>
+          </div>
         </div>
 
-        <div className="card-soft p-5 lg:p-6">
-          <Eyebrow num="01">{t('pp.capture.eyebrow')}</Eyebrow>
+        {/* ===== TRANSACTIONS + ACTION =============================== */}
+        <div className="grid lg:grid-cols-12 gap-4 sm:gap-5">
+          {/* Grouped transactions */}
+          <div className="lg:col-span-7 min-w-0 bento overflow-hidden flex flex-col">
+            <div className="p-4 sm:p-5 border-b border-bdr/70 flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <Eyebrow num="03">Transactions</Eyebrow>
+                <h3 className="mt-1.5 text-base font-semibold tracking-tight">{allEntries.length} recorded</h3>
+              </div>
+              <div className="flex items-center gap-1 rounded-lg border border-bdr/60 p-0.5">
+                {[{ id: 'all', label: 'All' }, { id: 'receipt', label: 'Receipts' }, { id: 'manual', label: 'Manual' }].map((f) => (
+                  <button key={f.id} onClick={() => setTxnFilter(f.id)}
+                    className={`text-[11px] px-2.5 py-1 rounded-md transition font-medium ${txnFilter === f.id ? 'bg-accent/15 text-accent' : 'text-txt-3 hover:text-txt-1'}`}>
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {dayGroups.length === 0 ? (
+              <div className="p-10 text-center text-sm text-txt-3">
+                {t('pp.entriesEmpty')} <span className="text-accent font-medium">{t('bk.addEntry')}</span>.
+              </div>
+            ) : (
+              <div className="max-h-[560px] overflow-y-auto scrollbar-none divide-y divide-bdr/40">
+                {dayGroups.map((grp) => (
+                  <div key={grp.key}>
+                    <div className="sticky top-0 z-10 flex items-center justify-between px-4 sm:px-5 py-2 bg-surface-2/90 backdrop-blur-sm">
+                      <span className="text-[11px] font-semibold text-txt-2 uppercase tracking-ticker">{grp.heading}</span>
+                      <span className="text-[11px] font-mono tabular text-txt-3">−{fmtTZS(grp.total)}</span>
+                    </div>
+                    {grp.items.map((entry) => {
+                      const isReceipt = entry.source === 'receipt';
+                      const color = catColor[entry.category] || th.tick;
+                      return (
+                        <div
+                          key={entry.id}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => setSelected(entry)}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(entry); } }}
+                          className="group flex items-center gap-3 px-4 sm:px-5 py-3 cursor-pointer hover:bg-surface-4/30 transition-colors"
+                        >
+                          <span className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"
+                            style={{ background: `color-mix(in srgb, ${color} 16%, transparent)`, color }}>
+                            <Icon name={isReceipt ? 'receipt' : iconForCategory(entry.category)} size={15} />
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium text-txt-1 truncate">{entry.vendor || entry.category}</p>
+                            <p className="text-[11px] text-txt-3 truncate">
+                              {entry.category}{entry.description ? ` · ${entry.description}` : ''}
+                            </p>
+                          </div>
+                          <div className="text-sm font-semibold text-exp tabular flex-shrink-0">−{fmtTZS(entry.amount)}</div>
+                          {!isReceipt && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); removeManualEntry(entry.id); }}
+                              className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-txt-3 hover:text-exp p-1 flex-shrink-0 transition"
+                              aria-label="Delete entry"
+                            >
+                              <Icon name="x" size={14} />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Action column */}
+          <div className="lg:col-span-5 min-w-0 space-y-4 sm:space-y-5">
+            {/* Quick actions */}
+            <div className="grid grid-cols-2 gap-3 sm:gap-4">
+              <button onClick={() => { setError(null); setShowAdd(true); }}
+                className="bento p-4 text-left hover:border-accent/40 transition group">
+                <span className="w-10 h-10 rounded-xl bg-accent/12 text-accent flex items-center justify-center mb-3 group-hover:scale-105 transition">
+                  <Icon name="plus" size={18} />
+                </span>
+                <div className="text-sm font-semibold">Add expense</div>
+                <div className="text-[11px] text-txt-3 mt-0.5">Log a payment manually</div>
+              </button>
+              <button onClick={() => setShowScan(true)}
+                className="bento p-4 text-left hover:border-accent/40 transition group">
+                <span className="w-10 h-10 rounded-xl bg-net/12 text-net flex items-center justify-center mb-3 group-hover:scale-105 transition">
+                  <Icon name="receipt" size={18} />
+                </span>
+                <div className="text-sm font-semibold">Scan receipt</div>
+                <div className="text-[11px] text-txt-3 mt-0.5">Extract line items with AI</div>
+              </button>
+            </div>
+
+            {/* Spending this period + segmented category bar */}
+            <div className="bento p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <span className="text-[11px] text-txt-3 uppercase tracking-ticker font-mono">Total spending</span>
+                <Icon name="chart" size={14} className="text-txt-3" />
+              </div>
+              <div className="text-2xl font-bold tabular tracking-tight mb-3">{fmtTZS(monthlyTotal)}</div>
+              <SegmentedCategoryBar data={catAgg} colorFor={(n) => catColor[n]} total={monthlyTotal} />
+              <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5">
+                {catAgg.slice(0, 6).map((c) => (
+                  <span key={c.name} className="inline-flex items-center gap-1.5 text-[11px] text-txt-2">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: catColor[c.name] }} />
+                    {c.name}
+                  </span>
+                ))}
+                {catAgg.length === 0 && <span className="text-xs text-txt-3">No spend recorded yet.</span>}
+              </div>
+            </div>
+
+            {/* Favourite spends */}
+            <div className="bento p-4 sm:p-5">
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <span className="text-[11px] text-txt-3 uppercase tracking-ticker font-mono">Favourite spends</span>
+                <Icon name="sparkles" size={14} className="text-accent" />
+              </div>
+              {topVendors.length === 0 ? (
+                <p className="text-xs text-txt-3">Your most-paid vendors will appear here.</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {topVendors.map((v) => {
+                    const color = catColor[v.category] || th.tick;
+                    return (
+                      <div key={v.vendor} className="flex items-center gap-3">
+                        <span className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-[11px] font-bold uppercase"
+                          style={{ background: `color-mix(in srgb, ${color} 16%, transparent)`, color }}>
+                          {v.vendor.slice(0, 2)}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium truncate">{v.vendor}</div>
+                          <div className="text-[11px] text-txt-3">×{v.count} · {v.category || 'Other'}</div>
+                        </div>
+                        <div className="text-sm font-semibold tabular flex-shrink-0">{fmtTZS(v.total)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="bento p-5 lg:p-6">
+          <Eyebrow num="04">{t('pp.capture.eyebrow')}</Eyebrow>
           <h3 className="mt-2 mb-4 text-base font-semibold tracking-tight">{t('pp.capture.title')}</h3>
 
           <input
@@ -338,21 +647,11 @@ const PersonalSpendingPage = () => {
               ? 'Scanning… reading the image with vision AI.'
               : 'Any image works. We will tell you if it is not a receipt.'}
           </p>
-
-          {notice && (
-            <div className="mt-4 p-3 bg-net/10 border border-net/30 rounded-xl text-sm text-net flex items-start gap-2">
-              <Icon name="alert" size={16} className="mt-0.5 flex-shrink-0" />
-              <span>{notice}</span>
-            </div>
-          )}
-          {error && (
-            <div className="mt-4 p-3 bg-exp/10 border border-exp/30 rounded-xl text-sm text-exp">{error}</div>
-          )}
         </div>
 
         {latest && (
-          <div className="card-soft p-5 lg:p-6">
-            <Eyebrow num="02">{t('pp.latest.eyebrow')}</Eyebrow>
+          <div className="bento p-5 lg:p-6">
+            <Eyebrow num="05">{t('pp.latest.eyebrow')}</Eyebrow>
             <h3 className="mt-2 mb-4 text-base font-semibold tracking-tight">{t('pp.latest.title')}</h3>
             <div className="grid sm:grid-cols-2 gap-4 text-sm">
               <div className="space-y-2">
@@ -382,115 +681,8 @@ const PersonalSpendingPage = () => {
           </div>
         )}
 
-        <div className="card-soft overflow-hidden">
-          <div className="p-5 border-b border-bdr/70 flex items-center justify-between">
-            <div>
-              <Eyebrow num="03">{t('pp.manual.eyebrow')}</Eyebrow>
-              <h3 className="mt-2 text-base font-semibold tracking-tight">{t('pp.manual.title')}</h3>
-            </div>
-            <span className="text-xs text-txt-3 font-mono uppercase tracking-ticker">{allEntries.length}</span>
-          </div>
-          {allEntries.length === 0 ? (
-            <div className="p-8 text-center text-sm text-txt-3">
-              {t('pp.entriesEmpty')} <span className="text-accent font-medium">{t('bk.addEntry')}</span>.
-            </div>
-          ) : (
-            <>
-              {/* MOBILE — card stack */}
-              <div className="md:hidden divide-y divide-bdr/40">
-                {allEntries.map((entry) => {
-                  const isReceipt = entry.source === 'receipt';
-                  return (
-                    <div
-                      key={entry.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSelected(entry)}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelected(entry); } }}
-                      className="px-4 py-3.5 cursor-pointer hover:bg-surface-4/30 transition-colors"
-                    >
-                      <div className="flex items-start justify-between gap-3 mb-1.5">
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-txt-1 leading-snug truncate">{entry.vendor}</p>
-                          <p className="text-[11px] text-txt-3 font-mono mt-0.5 tabular">{entry.date}</p>
-                        </div>
-                        <div className="text-sm font-semibold text-exp tabular flex-shrink-0">−{fmtTZSFull(entry.amount)}</div>
-                      </div>
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <Badge color="muted">{entry.category}</Badge>
-                          {isReceipt && <Badge color="accent">Receipt</Badge>}
-                        </div>
-                        {!isReceipt && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); removeManualEntry(entry.id); }}
-                            className="text-xs text-txt-3 hover:text-exp p-1"
-                            aria-label="Delete entry"
-                          >
-                            <Icon name="x" size={14} />
-                          </button>
-                        )}
-                      </div>
-                      {entry.description && <p className="text-xs text-txt-2 mt-1 line-clamp-2">{entry.description}</p>}
-                    </div>
-                  );
-                })}
-              </div>
-              {/* DESKTOP — table */}
-              <div className="hidden md:block overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-bdr bg-surface-4/50 text-txt-3 text-left">
-                      <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-ticker font-medium">{t('common.date')}</th>
-                      <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-ticker font-medium">{t('common.vendor')}</th>
-                      <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-ticker font-medium">{t('common.category')}</th>
-                      <th className="hidden lg:table-cell px-4 py-3 font-mono text-[10px] uppercase tracking-ticker font-medium">{t('common.description')}</th>
-                      <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-ticker font-medium text-right">{t('common.amount')}</th>
-                      <th className="px-4 py-3 font-mono text-[10px] uppercase tracking-ticker font-medium text-right">&nbsp;</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {allEntries.map((entry) => {
-                      const isReceipt = entry.source === 'receipt';
-                      return (
-                        <tr
-                          key={entry.id}
-                          onClick={() => setSelected(entry)}
-                          className="border-b border-bdr/30 hover:bg-surface-4/30 transition-colors cursor-pointer"
-                        >
-                          <td className="px-4 py-3 text-txt-3 whitespace-nowrap font-mono text-xs tabular">{entry.date}</td>
-                          <td className="px-4 py-3 font-medium text-txt-1 max-w-[16ch] truncate">{entry.vendor}</td>
-                          <td className="px-4 py-3">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <Badge color="muted">{entry.category}</Badge>
-                              {isReceipt && <Badge color="accent">Receipt</Badge>}
-                            </div>
-                          </td>
-                          <td className="hidden lg:table-cell px-4 py-3 text-txt-2">{entry.description || '—'}</td>
-                          <td className="px-4 py-3 text-right font-semibold text-exp tabular whitespace-nowrap">−{fmtTZSFull(entry.amount)}</td>
-                          <td className="px-4 py-3 text-right">
-                            {!isReceipt && (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); removeManualEntry(entry.id); }}
-                                className="text-xs text-txt-3 hover:text-exp"
-                                aria-label="Delete entry"
-                              >
-                                <Icon name="x" size={14} />
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
-        </div>
-
-        <div className="card-soft p-5 lg:p-6">
-          <Eyebrow num="04">{t('pp.patterns.eyebrow')}</Eyebrow>
+        <div className="bento p-5 lg:p-6">
+          <Eyebrow num="06">{t('pp.patterns.eyebrow')}</Eyebrow>
           <h3 className="mt-2 mb-5 text-base font-semibold tracking-tight">{t('pp.patterns.title')}</h3>
           {patterns.insights && patterns.insights.length > 0 ? (
             <div className="grid sm:grid-cols-2 gap-4">
@@ -633,6 +825,101 @@ const PersonalSpendingPage = () => {
       </div>
     </AppShell>
   );
+};
+
+/* ----------------------------------------------------------------
+   Spend-by-category horizontal bars — top category highlighted.
+   ---------------------------------------------------------------- */
+const CategoryBars = ({ data, colorFor, total }) => {
+  const peak = Math.max(1, ...data.map((d) => d.value));
+  return (
+    <div className="space-y-2.5 flex-1">
+      {data.slice(0, 6).map((c) => {
+        const pct = total > 0 ? Math.round((c.value / total) * 100) : 0;
+        return (
+          <div key={c.name}>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="inline-flex items-center gap-1.5 text-xs text-txt-2 truncate">
+                <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: colorFor(c.name) }} />
+                <span className="truncate">{c.name}</span>
+              </span>
+              <span className="text-[11px] font-mono tabular text-txt-3 flex-shrink-0">{fmtTZS(c.value)} · {pct}%</span>
+            </div>
+            <div className="h-2 rounded-full bg-surface-4/60 overflow-hidden">
+              <div className="h-full rounded-full transition-all" style={{ width: `${(c.value / peak) * 100}%`, background: colorFor(c.name) }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+/* One-line stacked bar — every category's share of total spend. */
+const SegmentedCategoryBar = ({ data, colorFor, total }) => {
+  if (!total || data.length === 0) {
+    return <div className="h-3 rounded-full bg-surface-4/60" />;
+  }
+  return (
+    <div className="h-3 rounded-full overflow-hidden flex bg-surface-4/60">
+      {data.map((c) => (
+        <div
+          key={c.name}
+          title={`${c.name} · ${fmtTZS(c.value)}`}
+          style={{ width: `${(c.value / total) * 100}%`, background: colorFor(c.name) }}
+          className="h-full first:rounded-l-full last:rounded-r-full"
+        />
+      ))}
+    </div>
+  );
+};
+
+/* Daily-spend area chart (Chart.js, theme-aware). */
+const SpendTrend = ({ series, th }) => {
+  const data = {
+    labels: series.map((d) => d.key),
+    datasets: [{
+      data: series.map((d) => d.value),
+      borderColor: th.accent,
+      backgroundColor: th.accentFill,
+      fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4,
+      pointHoverBackgroundColor: th.accent,
+    }],
+  };
+  const options = {
+    scales: {
+      x: {
+        grid: { display: false },
+        ticks: {
+          color: th.tick, font: { size: 9 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 6,
+          callback(v) {
+            const raw = this.getLabelForValue(v);
+            const d = new Date(raw + 'T00:00:00');
+            return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' });
+          },
+        },
+      },
+      y: {
+        grid: { color: th.grid, drawBorder: false },
+        ticks: {
+          color: th.tick, font: { size: 9 },
+          callback: (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${Math.round(v / 1e3)}K` : v),
+        },
+      },
+    },
+    plugins: {
+      tooltip: {
+        callbacks: {
+          title: (items) => {
+            const d = new Date(items[0].label + 'T00:00:00');
+            return Number.isNaN(d.getTime()) ? items[0].label : d.toLocaleDateString(undefined, { weekday: 'short', day: '2-digit', month: 'long' });
+          },
+          label: (ctx) => `Spent: ${fmtTZS(ctx.parsed.y)}`,
+        },
+      },
+    },
+  };
+  return <ChartJS type="line" data={data} options={options} height={170} />;
 };
 
 const EntryDetailModal = ({ entry, onClose }) => {

@@ -16,6 +16,7 @@ const COMMON_NAV_KEYS = [
 const BUSINESS_NAV_KEYS = [
   ...COMMON_NAV_KEYS,
   { key: '/markets',        icon: 'trending', t: 'nav.markets' },
+  { key: '/simulator',      icon: 'dollar',   t: 'nav.simulator' },
   { key: '/bookkeeping',    icon: 'book',     t: 'nav.bookkeeping' },
   { key: '/reconciliation', icon: 'shield',   t: 'nav.reconcile' },
 ];
@@ -23,6 +24,7 @@ const BUSINESS_NAV_KEYS = [
 const INDIVIDUAL_NAV_KEYS = [
   ...COMMON_NAV_KEYS,
   { key: '/markets',           icon: 'trending', t: 'nav.markets' },
+  { key: '/simulator',         icon: 'dollar',   t: 'nav.simulator' },
   { key: '/personal-spending', icon: 'wallet',   t: 'nav.personal' },
   { key: '/reconciliation',    icon: 'shield',   t: 'nav.reconcile' },
 ];
@@ -291,6 +293,7 @@ const AppTopBar = ({ onMenuToggle }) => {
     '/analysis':          'nav.analysis',
     '/assistant':         'nav.assistant',
     '/markets':           'nav.markets',
+    '/simulator':         'nav.simulator',
     '/bookkeeping':       'nav.bookkeeping',
     '/personal-spending': 'nav.personal',
   };

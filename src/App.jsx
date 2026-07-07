@@ -8,6 +8,7 @@ import DashboardPage from './pages/DashboardPage';
 import AnalysisPage from './pages/AnalysisPage';
 import AssistantPage from './pages/AssistantPage';
 import MarketsPage from './pages/MarketsPage';
+import SimulatorPage from './pages/SimulatorPage';
 import BookkeepingPage from './pages/BookkeepingPage';
 import PersonalSpendingPage from './pages/PersonalSpendingPage';
 import ReconciliationPage from './pages/ReconciliationPage';
@@ -41,8 +42,8 @@ const App = () => {
 
   if (!booted) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50">
-        <div className="h-10 w-10 animate-spin rounded-full border-2 border-slate-200 border-t-slate-700" />
+      <div className="flex min-h-screen items-center justify-center bg-deep">
+        <div className="h-10 w-10 animate-spin rounded-full border-2 border-bdr border-t-accent" />
       </div>
     );
   }
@@ -63,6 +64,7 @@ const App = () => {
         <Route path="/analysis" component={AnalysisPage} protected />
         <Route path="/assistant" component={AssistantPage} protected />
         <Route path="/markets" component={MarketsPage} protected />
+        <Route path="/simulator" component={SimulatorPage} protected />
         <Route path="/bookkeeping" component={BookkeepingPage} protected />
         <Route path="/personal-spending" component={PersonalSpendingPage} protected />
         <Route path="/reconciliation" component={ReconciliationPage} protected />

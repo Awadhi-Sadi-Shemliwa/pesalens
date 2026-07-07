@@ -46,8 +46,8 @@ export default {
         ticker:   '0.18em',
       },
       boxShadow: {
-        float: '0 24px 60px -28px rgba(0,0,0,0.6), 0 0 0 1px rgba(76,110,245,0.06)',
-        ring:  '0 0 0 1px rgba(76,110,245,0.18), 0 12px 40px -12px rgba(76,110,245,0.25)',
+        float: '0 24px 60px -28px rgba(0,0,0,0.6), 0 0 0 1px rgb(var(--c-accent) / 0.06)',
+        ring:  '0 0 0 1px rgb(var(--c-accent) / 0.18), 0 12px 40px -12px rgb(var(--c-accent) / 0.25)',
       },
     },
   },

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
 import { Badge, Eyebrow } from '../components/common';
+import { TiltCard } from '../components/motion';
 import {
   cancelSubscription,
   fetchBillingStatus,
@@ -113,13 +114,17 @@ const StatusCard = ({ subscription }) => {
 
 const PlanCard = ({ plan, busy, onChoose, recommended }) => {
   return (
-    <div
-      className={`relative card-soft p-4 sm:p-6 transition-all ${
-        recommended ? 'border-2 border-accent/60 shadow-lg shadow-accent/10' : 'border border-bdr/60'
-      }`}
+    <TiltCard
+      max={5}
+      glare={recommended}
+      className={`relative ${recommended ? 'glass-pane' : 'bento'} rounded-[22px] p-4 sm:p-6 overflow-hidden`}
+      style={recommended ? { borderColor: 'rgb(var(--c-accent) / 0.55)', boxShadow: '0 24px 70px -34px rgb(var(--c-accent) / 0.55)' } : undefined}
     >
       {recommended && (
-        <Badge color="accent" className="absolute top-4 right-4">Best value</Badge>
+        <>
+          <span aria-hidden className="absolute -right-14 -top-14 w-48 h-48 rounded-full blur-3xl bg-accent/15 pointer-events-none" />
+          <Badge color="accent" dot className="absolute top-4 right-4 z-10">Best value</Badge>
+        </>
       )}
       <Eyebrow>{plan.interval === 'year' ? 'Annual' : 'Monthly'}</Eyebrow>
       <h3 className="mt-2 text-base sm:text-lg font-semibold tracking-tight">{plan.name}</h3>
@@ -150,7 +155,7 @@ const PlanCard = ({ plan, busy, onChoose, recommended }) => {
       >
         {busy ? 'Starting…' : `Choose ${plan.interval === 'year' ? 'Annual' : 'Monthly'}`}
       </button>
-    </div>
+    </TiltCard>
   );
 };
 
@@ -298,7 +303,7 @@ const UpgradePage = () => {
         )}
 
         {loading ? (
-          <div className="card-soft p-8 text-center text-sm text-txt-3">Loading subscription…</div>
+          <div className="bento p-8 text-center text-sm text-txt-3">Loading subscription…</div>
         ) : (
           <StatusCard subscription={subscription} />
         )}
@@ -319,8 +324,8 @@ const UpgradePage = () => {
           ))}
         </div>
 
-        <div className="card-soft p-3 sm:p-5 lg:p-6">
-          <Eyebrow num="01">What's included</Eyebrow>
+        <div className="bento p-3 sm:p-5 lg:p-6">
+          <Eyebrow>What's included</Eyebrow>
           <h3 className="mt-2 mb-4 text-sm sm:text-base font-semibold tracking-tight">Every Pro feature, in every plan</h3>
           <div className="grid sm:grid-cols-2 gap-3">
             {FEATURES.map((f) => (

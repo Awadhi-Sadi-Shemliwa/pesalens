@@ -23,7 +23,7 @@ const SectionHeader = ({ eyebrow, title, sub }) => (
 );
 
 const Card = ({ children, className = '' }) => (
-  <div className={`bg-surface-2 border border-bdr rounded-2xl p-4 sm:p-5 ${className}`}>
+  <div className={`bento p-4 sm:p-5 ${className}`}>
     {children}
   </div>
 );

@@ -1,10 +1,20 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { ChartJS } from '../components/ChartJS';
+import { ChartJS, chartTheme } from '../components/ChartJS';
+import { TiltCard } from '../components/motion';
 import { Badge, Drawer, EmptyState, Eyebrow, Segmented } from '../components/common';
 import { fetchAnalysis, fetchDashboardSummary, fmtTZS, fmtTZSFull } from '../data/api';
+import { useTheme } from '../data/theme';
 import { useT } from '../data/i18n';
+
+/* icon-chip tones for the KPI tiles */
+const TONE = {
+  accent: 'bg-accent/12 text-accent border-accent/25',
+  exp:    'bg-exp/12 text-exp border-exp/25',
+  inc:    'bg-inc/12 text-inc border-inc/25',
+  net:    'bg-net/12 text-net border-net/25',
+};
 
 const AnalysisPage = () => {
   const [data, setData] = useState(null);
@@ -15,9 +25,13 @@ const AnalysisPage = () => {
   const [search, setSearch] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selected, setSelected] = useState(null);
+  const [catOpen, setCatOpen] = useState(false);
+  const [activeCat, setActiveCat] = useState(null);
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 50;
   const { t } = useT();
+  const [theme] = useTheme();
+  void theme;
 
   useEffect(() => {
     let cancelled = false;
@@ -45,6 +59,15 @@ const AnalysisPage = () => {
   const transactions = data?.transactions || [];
   const categories = data?.categories || [];
   const kpis = data?.kpis || {};
+
+  const catTxns = useMemo(() => {
+    if (!activeCat) return [];
+    return transactions
+      .filter((tx) => tx.category === activeCat.name && tx.debit)
+      .sort((a, b) => (b.debit || 0) - (a.debit || 0));
+  }, [transactions, activeCat]);
+
+  const openCategory = (category) => { setActiveCat(category); setCatOpen(true); };
 
   const filtered = useMemo(() => {
     let txns = [...transactions];
@@ -101,102 +124,136 @@ const AnalysisPage = () => {
   if (!data) {
     return (
       <AppShell>
-        <EmptyState
-          icon="chart"
-          title={t('an.empty.title')}
-          desc={t('an.empty.desc')}
-        />
+        <EmptyState icon="chart" title={t('an.empty.title')} desc={t('an.empty.desc')} />
       </AppShell>
     );
   }
 
   const meta = data.metadata || {};
-  const palette = ['#4C6EF5', '#06B6D4', '#10B981', '#F59E0B', '#EF4444', '#5B7CFA', '#0EA5E9', '#8B95A8'];
+  const th = chartTheme();
+  const palette = th.palette;
+  const catTotal = categories.reduce((s, c) => s + (c.value || 0), 0) || 1;
+
+  const kpiTiles = [
+    { label: t('common.totalTx'),       val: kpis.total_transactions ?? 0, icon: 'file',           tone: 'accent' },
+    { label: t('common.largestExp'),    val: fmtTZS(kpis.largest_expense), icon: 'arrowDownRight', tone: 'exp' },
+    { label: t('common.largestInc'),    val: fmtTZS(kpis.largest_income),  icon: 'arrowUpRight',   tone: 'inc' },
+    { label: t('common.avgDailySpend'), val: fmtTZS(kpis.avg_daily_spend), icon: 'chart',          tone: 'net' },
+  ];
 
   return (
     <AppShell>
-      <div className="space-y-7">
-        <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+      <div className="space-y-4 sm:space-y-5">
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <Eyebrow num="00">{t('an.eyebrow')}</Eyebrow>
-            <h1 className="mt-2 text-2xl lg:text-3xl font-semibold tracking-tight">{t('an.title')}</h1>
-            <p className="text-xs text-txt-3 mt-1.5 font-mono uppercase tracking-ticker">
-              {(meta.bank || t('common.bank')).toString()}
-              {meta.period_start && meta.period_end ? ` · ${meta.period_start} → ${meta.period_end}` : ''}
-            </p>
+            <Eyebrow>{t('an.eyebrow')}</Eyebrow>
+            <h1 className="mt-1.5 text-xl sm:text-2xl lg:text-[28px] font-semibold tracking-tight">{t('an.title')}</h1>
           </div>
+          <span className="text-[11px] text-txt-3 font-mono uppercase tracking-ticker self-start sm:self-auto">
+            {(meta.bank || t('common.bank')).toString()}
+            {meta.period_start && meta.period_end ? ` · ${meta.period_start} → ${meta.period_end}` : ''}
+          </span>
         </div>
 
+        {/* KPI tiles */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
-          {[
-            { label: t('common.totalTx'),       val: kpis.total_transactions ?? 0,    icon: 'file',           c: 'accent', tc: 'text-accent' },
-            { label: t('common.largestExp'),    val: fmtTZS(kpis.largest_expense),    icon: 'arrowDownRight', c: 'exp',    tc: 'text-exp' },
-            { label: t('common.largestInc'),    val: fmtTZS(kpis.largest_income),     icon: 'arrowUpRight',   c: 'inc',    tc: 'text-inc' },
-            { label: t('common.avgDailySpend'), val: fmtTZS(kpis.avg_daily_spend),    icon: 'chart',          c: 'net',    tc: 'text-net' },
-          ].map((item, idx) => (
-            <div key={idx} className="card-soft p-4 card-hover">
+          {kpiTiles.map((item, idx) => (
+            <TiltCard key={idx} max={6} className="bento p-4">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-[11px] uppercase tracking-ticker text-txt-3">{item.label}</span>
-                <Icon name={item.icon} size={14} className={item.tc} />
+                <span className="text-[10px] uppercase tracking-ticker text-txt-3 truncate">{item.label}</span>
+                <span className={`w-7 h-7 rounded-lg flex items-center justify-center border flex-shrink-0 ${TONE[item.tone]}`}>
+                  <Icon name={item.icon} size={13} />
+                </span>
               </div>
-              <div className="text-lg lg:text-xl font-bold tabular tracking-tight">{item.val}</div>
-            </div>
+              <div className="text-lg lg:text-xl font-bold tabular tracking-tight truncate">{item.val}</div>
+            </TiltCard>
           ))}
         </div>
 
+        {/* Category bento — gauge + top categories */}
         {categories.length > 0 && (
-          <div className="grid lg:grid-cols-12 gap-5">
-            <div className="lg:col-span-5 card-soft p-5 lg:p-6">
-              <Eyebrow num="01">{t('an.mix.eyebrow')}</Eyebrow>
-              <h3 className="mt-2 mb-4 text-base font-semibold tracking-tight">{t('an.mix.title')}</h3>
-              <ChartJS
-                type="doughnut"
-                height={240}
-                data={{
-                  labels: categories.map((c) => c.name),
-                  datasets: [{
-                    data: categories.map((c) => c.value),
-                    backgroundColor: categories.map((c, i) => c.color || palette[i % palette.length]),
-                    borderWidth: 0,
-                    borderRadius: 4,
-                  }],
-                }}
-                options={{
-                  cutout: '70%',
-                  plugins: {
-                    tooltip: {
-                      backgroundColor: '#0C0D12', borderColor: '#252636', borderWidth: 1, padding: 10,
-                      titleColor: '#EEEEF0', bodyColor: '#9496A8',
-                      callbacks: { label: (ctx) => `${ctx.label}: ${fmtTZSFull(ctx.raw)}` },
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+            <TiltCard max={4} className="lg:col-span-5 bento p-5 lg:p-6">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <Eyebrow>{t('an.mix.eyebrow')}</Eyebrow>
+                  <h3 className="mt-1.5 text-sm font-semibold tracking-tight">{t('an.mix.title')}</h3>
+                </div>
+                <Icon name="chart" size={16} className="text-txt-3" />
+              </div>
+              <div className="relative">
+                <ChartJS
+                  type="doughnut"
+                  height={230}
+                  data={{
+                    labels: categories.map((c) => c.name),
+                    datasets: [{
+                      data: categories.map((c) => c.value),
+                      backgroundColor: categories.map((c, i) => c.color || palette[i % palette.length]),
+                      borderWidth: 0,
+                    }],
+                  }}
+                  options={{
+                    cutout: '72%',
+                    onHover: (evt, els) => { if (evt?.native?.target) evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
+                    onClick: (evt, els) => { if (els && els.length) { const category = categories[els[0].index]; if (category) openCategory(category); } },
+                    plugins: {
+                      legend: { display: false },
+                      tooltip: {
+                        backgroundColor: th.tooltipBg, borderColor: th.tooltipBorder, borderWidth: 1, padding: 10,
+                        titleColor: th.tooltipTitle, bodyColor: th.tooltipBody,
+                        callbacks: { label: (ctx) => `${ctx.label}: ${fmtTZSFull(ctx.raw)}` },
+                      },
                     },
-                  },
-                }}
-              />
-            </div>
-            <div className="lg:col-span-7 card-soft p-5 lg:p-6">
-              <Eyebrow num="02">{t('an.top.eyebrow')}</Eyebrow>
-              <h3 className="mt-2 mb-5 text-base font-semibold tracking-tight">{t('an.top.title')}</h3>
+                  }}
+                />
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div className="text-center">
+                    <div className="text-[10px] uppercase tracking-ticker text-txt-3 font-mono">{t('dash.mix.total')}</div>
+                    <div className="text-lg font-bold tabular text-txt-1">{fmtTZS(catTotal)}</div>
+                  </div>
+                </div>
+              </div>
+            </TiltCard>
+
+            <div className="lg:col-span-7 bento p-5 lg:p-6">
+              <div className="mb-5">
+                <Eyebrow>{t('an.top.eyebrow')}</Eyebrow>
+                <h3 className="mt-1.5 text-sm font-semibold tracking-tight">{t('an.top.title')}</h3>
+              </div>
               <div className="space-y-4">
                 {categories.slice(0, 6).map((category, idx) => {
                   const max = categories[0]?.value || 1;
                   const pct = Math.max(4, Math.round((category.value / max) * 100));
                   const color = category.color || palette[idx % palette.length];
                   return (
-                    <div key={idx} className="group">
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => openCategory(category)}
+                      className="group w-full text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded-lg -mx-1 px-1 py-0.5"
+                      title={t('an.cat.viewTx')}
+                    >
                       <div className="flex justify-between items-baseline text-sm mb-1.5">
                         <div className="flex items-center gap-2.5">
                           <span className="font-mono text-[10px] tabular text-txt-3 w-5">0{idx + 1}</span>
                           <span className="font-medium text-txt-1 group-hover:text-accent transition-colors">{category.name}</span>
                         </div>
-                        <span className="text-txt-2 tabular text-xs font-medium">{fmtTZS(category.value)}</span>
+                        <span className="text-txt-2 tabular text-xs font-medium flex items-center gap-1.5">
+                          {fmtTZS(category.value)}
+                          <span className="text-txt-4">·</span>
+                          <span className="text-txt-3">{((category.value / catTotal) * 100).toFixed(0)}%</span>
+                          <Icon name="chevRight" size={12} className="text-txt-4 group-hover:text-accent transition-colors" />
+                        </span>
                       </div>
-                      <div className="h-1 bg-surface-4 rounded-full overflow-hidden">
+                      <div className="h-1.5 bg-surface-4 rounded-full overflow-hidden">
                         <div
                           className="h-full rounded-full transition-all duration-700"
-                          style={{ width: `${pct}%`, background: color, boxShadow: `0 0 10px ${color}55` }}
+                          style={{ width: `${pct}%`, background: color, boxShadow: `0 0 10px ${color}` }}
                         />
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -204,6 +261,7 @@ const AnalysisPage = () => {
           </div>
         )}
 
+        {/* Filters */}
         <div className="flex flex-wrap items-center gap-3">
           <Segmented
             options={[
@@ -240,8 +298,9 @@ const AnalysisPage = () => {
           </div>
         </div>
 
-        <div className="card-soft overflow-hidden">
-          {/* MOBILE — card stack, < md */}
+        {/* Transactions */}
+        <div className="bento overflow-hidden">
+          {/* MOBILE — card stack */}
           <div className="md:hidden divide-y divide-bdr/40">
             {pageTxns.map((transaction) => {
               const isCredit = !!transaction.credit;
@@ -254,24 +313,17 @@ const AnalysisPage = () => {
                 >
                   <div className="flex items-start justify-between gap-3 mb-1.5">
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-txt-1 leading-snug truncate">
-                        {transaction.description || '—'}
-                      </p>
-                      <p className="text-[11px] text-txt-3 font-mono mt-0.5 tabular">
-                        {transaction.txn_date || '—'}
-                      </p>
+                      <p className="text-sm font-medium text-txt-1 leading-snug truncate">{transaction.description || '—'}</p>
+                      <p className="text-[11px] text-txt-3 font-mono mt-0.5 tabular">{transaction.txn_date || '—'}</p>
                     </div>
                     <div className={`text-sm font-semibold tabular flex-shrink-0 ${isCredit ? 'text-inc' : 'text-exp'}`}>
-                      {isCredit ? '+' : '−'}
-                      {fmtTZS(transaction.credit ?? transaction.debit ?? 0)}
+                      {isCredit ? '+' : '−'}{fmtTZS(transaction.credit ?? transaction.debit ?? 0)}
                     </div>
                   </div>
                   <div className="flex items-center justify-between gap-2">
                     <Badge color={isCredit ? 'income' : 'muted'}>{transaction.category || t('an.uncategorized')}</Badge>
                     {transaction.balance != null && (
-                      <span className="text-[10px] font-mono text-txt-3 tabular">
-                        bal · {fmtTZSFull(transaction.balance)}
-                      </span>
+                      <span className="text-[10px] font-mono text-txt-3 tabular">bal · {fmtTZSFull(transaction.balance)}</span>
                     )}
                   </div>
                 </button>
@@ -279,7 +331,7 @@ const AnalysisPage = () => {
             })}
           </div>
 
-          {/* TABLET / DESKTOP — table, ≥ md */}
+          {/* DESKTOP — table */}
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -333,9 +385,7 @@ const AnalysisPage = () => {
                   >
                     {t('common.previous')}
                   </button>
-                  <span className="text-xs sm:text-sm text-txt-2 tabular">
-                    {currentPage + 1} / {totalPages}
-                  </span>
+                  <span className="text-xs sm:text-sm text-txt-2 tabular">{currentPage + 1} / {totalPages}</span>
                   <button
                     type="button"
                     onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
@@ -380,6 +430,53 @@ const AnalysisPage = () => {
                   <span className="font-medium text-txt-1 tabular">{selected.page_number ?? '—'}</span>
                 </div>
               </div>
+            </div>
+          )}
+        </Drawer>
+
+        <Drawer
+          open={catOpen}
+          onClose={() => setCatOpen(false)}
+          eyebrow={activeCat ? fmtTZSFull(activeCat.value) : ''}
+          title={activeCat?.name || t('common.category')}
+        >
+          {activeCat && (
+            <div className="space-y-4">
+              <div className="p-4 bg-surface-3 rounded-xl border border-bdr flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: activeCat.color || '#94A3B8' }} />
+                  <span className="font-semibold text-txt-1 truncate">{activeCat.name}</span>
+                </div>
+                <span className="text-[11px] font-mono uppercase tracking-ticker text-txt-3 whitespace-nowrap">
+                  {catTxns.length} {t('common.of')} {transactions.length}
+                </span>
+              </div>
+
+              {catTxns.length === 0 ? (
+                <p className="text-sm text-txt-3 py-8 text-center">{t('an.cat.empty')}</p>
+              ) : (
+                <div className="divide-y divide-bdr/40 -mx-1">
+                  {catTxns.map((transaction) => (
+                    <button
+                      key={transaction.row_index}
+                      type="button"
+                      onClick={() => { setCatOpen(false); setSelected(transaction); setDrawerOpen(true); }}
+                      className="w-full text-left px-1 py-3 hover:bg-surface-4/40 transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-3 mb-1">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-txt-1 leading-snug truncate">{transaction.description || '—'}</p>
+                          <p className="text-[11px] text-txt-3 font-mono mt-0.5 tabular">{transaction.txn_date || '—'}</p>
+                        </div>
+                        <div className="text-sm font-semibold tabular flex-shrink-0 text-exp">−{fmtTZS(transaction.debit ?? 0)}</div>
+                      </div>
+                      {transaction.balance != null && (
+                        <span className="text-[10px] font-mono text-txt-3 tabular">bal · {fmtTZSFull(transaction.balance)}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </Drawer>
