@@ -65,6 +65,9 @@ coverage/
 # --- Local samples (may contain real bank PDFs) ---
 samples pdf/
 mineru/
+# UI reference screenshots + ad-hoc test receipt — local dev scratch, never commit.
+samples for pesalens ui/
+/test-receipt1.png
 
 # --- Internal docs / agent scratch (kept local, not committed) ---
 # Markdown docs are project notes, not part of the shipped app. Keep
