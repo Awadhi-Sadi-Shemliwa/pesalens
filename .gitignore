@@ -68,6 +68,17 @@ mineru/
 # UI reference screenshots + ad-hoc test receipt — local dev scratch, never commit.
 samples for pesalens ui/
 /test-receipt1.png
+# UI "motivation" videos/screenshots + raw banknote source art (the shipped,
+# processed .webp notes live in public/notes/ and PesaLens-MobileAPP/public/notes/).
+Motivations/
+# Brand logo source exports — the shipped logos live in public/ and the app
+# bundles; this folder is unreferenced working-tree scratch.
+brand/
+# Windows folder metadata.
+desktop.ini
+**/desktop.ini
+# Local MCP / agent tooling config (per-machine, like .claude/).
+.mcp.json
 
 # --- Internal docs / agent scratch (kept local, not committed) ---
 # Markdown docs are project notes, not part of the shipped app. Keep
