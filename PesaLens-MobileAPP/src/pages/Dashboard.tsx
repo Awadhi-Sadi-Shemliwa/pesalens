@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
   AlertCircle,
   AlertTriangle,
   ArrowUpRight,
+  Check,
+  ChevronDown,
   FileText,
   Info,
   Plus,
@@ -11,12 +14,25 @@ import {
   Sparkles,
   Upload as UploadIcon,
 } from "lucide-react";
-import { Badge, Bento, CardSoft, Divider, Eyebrow, Section } from "@/components/pl/primitives";
+import { Badge, Bento, CardSoft, EmptyState, ErrorState, Eyebrow, InfoHint, Section, Skeleton } from "@/components/pl/primitives";
 import { KpiTile, Sparkline } from "@/components/pl/KpiTile";
 import { IncomeExpenseChart } from "@/components/pl/IncomeExpenseChart";
 import { SpendingBreakdown } from "@/components/pl/SpendingBreakdown";
 // @ts-ignore — JS modules
-import { fetchDashboardSummary, fmtTZS } from "@/data/api";
+import { fetchDashboardSummary, fetchStatementIndex, fetchBankIntel, fmtTZS } from "@/data/api";
+// @ts-ignore — JS module
+import { setActiveStatement } from "@/data/activeStatementStore";
+import { bankLabel as sharedBankLabel } from "@/data/bankLabels";
+
+// Shared label map (src/data/bankLabels.ts); Dashboard shows "Statement" when
+// the bank is unknown.
+const bankLabel = (b?: string | null): string => sharedBankLabel(b, "Statement") as string;
+const fmtDay = (iso?: string | null): string => {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { day: "2-digit", month: "short", year: "numeric" });
+  } catch { return String(iso).slice(0, 10); }
+};
 // @ts-ignore — JS modules
 import { buildActionPlan } from "@/data/decisions";
 
@@ -38,24 +54,212 @@ const relativeTime = (iso?: string | null) => {
   return d.toLocaleDateString();
 };
 
-const Dashboard = () => {
-  const navigate = useNavigate();
-  const { data: summary, isLoading, isError, refetch, isFetching } = useQuery({
-    queryKey: ["dashboard-summary"],
-    queryFn: fetchDashboardSummary,
-  });
+/* MoneyMap — "Where your money goes by service" (Slice 3, Part J-2c).
+   Per-service spend/fees leaderboard + deterministic suggestions + optional
+   LLM coach. Facts render even when intel.llm_status !== 'ok'. */
+const SUGGESTION_ICON: Record<string, any> = {
+  most_expensive: AlertTriangle, cheapest: Check, saving_estimate: Sparkles,
+};
+const SUGGESTION_TONE: Record<string, string> = {
+  most_expensive: "bg-exp/15 text-exp", cheapest: "bg-inc/15 text-inc", saving_estimate: "bg-accent/15 text-accent",
+};
 
-  if (isLoading) {
-    return (
-      <div className="px-5 py-6 space-y-4">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="ios-group">
-            <div className="px-5 py-4">
-              <div className="h-4 bg-surface-3 rounded-full w-24 animate-pulse mb-3" />
-              <div className="h-8 bg-surface-3 rounded-full w-48 animate-pulse" />
+const MoneyMap = ({ intel, focus, onFocus }: { intel: any; focus: string; onFocus: (b: string) => void }) => {
+  const banks: any[] = intel?.banks || [];
+  if (banks.length === 0) return null;
+  const totals = intel.totals || {};
+  const maxCharges = Math.max(...banks.map((b: any) => b.charges || 0), 1);
+  const shown = focus === "all" ? banks : banks.filter((b: any) => b.bank === focus);
+  const coach = intel.llm_status === "ok" && intel.overall_summary ? intel.overall_summary : null;
+
+  return (
+    <div className="ios-group p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <Eyebrow>Money map</Eyebrow>
+          <h3 className="text-[15px] font-bold tracking-tight mt-0.5">Money by service</h3>
+        </div>
+        <div className="text-right">
+          <div className="text-[9px] text-txt-3 uppercase tracking-wider font-mono-tab">Fees · {totals.bank_count || banks.length} services</div>
+          <div className="text-[15px] font-bold tabular text-exp">{fmtTZS(totals.total_charges || 0)}</div>
+        </div>
+      </div>
+
+      {/* Service selector — single scrolling line of pills */}
+      <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none -mx-1 px-1">
+        {[{ bank: "all", label: "All" }, ...banks].map((b: any) => {
+          const active = focus === b.bank;
+          return (
+            <button
+              key={b.bank}
+              type="button"
+              onClick={() => onFocus(b.bank)}
+              className={`press shrink-0 rounded-full border px-3 min-h-[32px] text-[12px] font-medium ${
+                active ? "bg-accent border-accent text-primary-foreground font-semibold" : "bg-surface-2 border-border text-txt-2"
+              }`}
+            >
+              {b.bank === "all" ? "All" : bankLabel(b.bank)}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Per-service cards */}
+      <div className="space-y-2">
+        {shown.map((b: any) => (
+          <div key={b.bank} className="bg-surface-2 rounded-2xl p-3 border border-border">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Badge tone="net">{bankLabel(b.bank)}</Badge>
+                <span className="text-[10px] text-txt-3 font-mono-tab">{b.txn_count} txns</span>
+              </div>
+              {b.charges > 0 && (
+                <span className="text-[10px] font-mono-tab uppercase tracking-wider text-exp">{((b.fee_rate || 0) * 100).toFixed(1)}% fees</span>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-[9px] text-txt-3 uppercase tracking-wider">Spent</div>
+                <div className="text-[14px] font-bold tabular">{fmtTZS(b.spend || 0)}</div>
+              </div>
+              <div>
+                <div className="text-[9px] text-txt-3 uppercase tracking-wider">Fees</div>
+                <div className={`text-[14px] font-bold tabular ${b.charges > 0 ? "text-exp" : "text-txt-2"}`}>{fmtTZS(b.charges || 0)}</div>
+              </div>
+            </div>
+            <div className="mt-2 h-1.5 rounded-full bg-surface-4 overflow-hidden">
+              <div className="h-full rounded-full bg-exp/70" style={{ width: `${Math.min(100, ((b.charges || 0) / maxCharges) * 100)}%` }} />
+            </div>
+            <div className="mt-1 text-[10px] text-txt-3 font-mono-tab">
+              {b.avg_fee_per_txn > 0 ? `~${fmtTZS(b.avg_fee_per_txn)} per transaction` : "No fees detected"}
             </div>
           </div>
         ))}
+      </div>
+
+      {/* Deterministic suggestions */}
+      {(intel.suggestions || []).map((s: any, i: number) => {
+        const SIcon = SUGGESTION_ICON[s.kind] || Sparkles;
+        return (
+          <div key={i} className="flex items-start gap-3 bg-surface-2 rounded-2xl p-3">
+            <span className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${SUGGESTION_TONE[s.kind] || SUGGESTION_TONE.saving_estimate}`}>
+              <SIcon className="w-4 h-4" />
+            </span>
+            <div className="min-w-0">
+              <div className="text-[13px] font-semibold">{s.title}</div>
+              <p className="text-[12px] text-txt-3 leading-relaxed">{s.detail}</p>
+            </div>
+          </div>
+        );
+      })}
+
+      {coach && (
+        <div className="flex items-start gap-2.5 bg-surface-2 rounded-2xl p-3 border-l-2 border-accent/50">
+          <Sparkles className="w-4 h-4 text-accent mt-0.5 shrink-0" />
+          <p className="text-[12.5px] text-txt-2 leading-relaxed">{coach}</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* StatementTimeline — upload history grouped Recent vs Past (Slice 3, Part K).
+   Tapping focuses the statement and opens Analysis. */
+const StatementTimeline = ({ statements, onOpen }: { statements: any[]; onOpen: (jobId: string) => void }) => {
+  if (!statements || statements.length === 0) return null;
+  const groups = [
+    { key: "recent", label: "Recent", rows: statements.filter((s) => s.recency === "recent") },
+    { key: "past", label: "Past", rows: statements.filter((s) => s.recency !== "recent") },
+  ].filter((g) => g.rows.length > 0);
+
+  return (
+    <div className="ios-group p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <Eyebrow>Statements</Eyebrow>
+          <h3 className="text-[15px] font-bold tracking-tight mt-0.5">Upload history</h3>
+        </div>
+        <span className="text-[10px] text-txt-3 font-mono-tab uppercase tracking-wider">{statements.length} uploaded</span>
+      </div>
+      <div className="space-y-3">
+        {groups.map((g) => (
+          <div key={g.key}>
+            <div className="text-[10px] text-txt-3 font-mono-tab uppercase tracking-wider mb-1.5">{g.label}</div>
+            <div className="space-y-2">
+              {g.rows.map((s) => (
+                <button
+                  key={s.job_id}
+                  type="button"
+                  onClick={() => onOpen(s.job_id)}
+                  className="press w-full text-left flex items-center gap-3 bg-surface-2 rounded-2xl p-3"
+                >
+                  <Badge tone={g.key === "recent" ? "accent" : "muted"}>{bankLabel(s.bank)}</Badge>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-medium truncate">
+                      {s.period_start ? `${s.period_start} → ${s.period_end || "—"}` : (s.filename || "Statement")}
+                    </div>
+                    <div className="text-[10px] text-txt-3 font-mono-tab">{s.txn_count || 0} txns · {fmtDay(s.created_at)}</div>
+                  </div>
+                  <ArrowUpRight className="w-4 h-4 text-txt-4 shrink-0" />
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const Dashboard = () => {
+  const navigate = useNavigate();
+  // Statement selector: null selection = latest upload (default).
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const selectStatement = (jobId: string) => {
+    setSelectedJobId(jobId);
+    setActiveStatement(jobId || null);
+    setSelectorOpen(false);
+  };
+  const { data: summary, isLoading, isError, refetch, isFetching } = useQuery({
+    queryKey: ["dashboard-summary", selectedJobId],
+    // A scoped request can fail if that statement is now gone or still
+    // processing (backend 409/404). Fall back to the latest statement and drop
+    // the stale selection rather than stranding the dashboard.
+    queryFn: async () => {
+      try {
+        return await fetchDashboardSummary(selectedJobId);
+      } catch (err: any) {
+        if (selectedJobId && (err?.status === 409 || err?.status === 404)) {
+          setSelectedJobId(null);
+          setActiveStatement(null);
+          return await fetchDashboardSummary(null);
+        }
+        throw err;
+      }
+    },
+  });
+  const { data: statements = [] } = useQuery<any[]>({
+    queryKey: ["statements-index"],
+    queryFn: fetchStatementIndex,
+  });
+  // Per-bank money map (Slice 3). `bankFocus` = focused service ('all' = all).
+  const { data: bankIntel } = useQuery({ queryKey: ["bank-intel"], queryFn: fetchBankIntel });
+  const [bankFocus, setBankFocus] = useState<string>("all");
+
+  /* Skeleton mirrors the real layout below: net-flow hero, 2×2 KPI grid,
+     income/expense chart, then the breakdown section (§81–83). */
+  if (isLoading) {
+    return (
+      <div className="px-4 py-6 space-y-4">
+        <Skeleton className="h-40 rounded-[22px]" />
+        <div className="grid grid-cols-2 gap-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <Skeleton key={i} className="h-24 rounded-2xl" />
+          ))}
+        </div>
+        <Skeleton className="h-56 rounded-2xl" />
+        <Skeleton className="h-40 rounded-2xl" />
       </div>
     );
   }
@@ -63,17 +267,14 @@ const Dashboard = () => {
   if (isError || !summary) {
     return (
       <div className="px-4 py-6">
-        <CardSoft className="text-center !py-8">
-          <Eyebrow>Backend</Eyebrow>
-          <h2 className="text-[18px] font-bold mt-1">Couldn't reach PesaLens</h2>
-          <p className="text-[12px] text-txt-3 mt-2">Check connectivity and try again. Tap Refresh to retry.</p>
-          <button
-            onClick={() => refetch()}
-            className="mt-4 inline-flex items-center gap-2 bg-foreground text-background rounded-full px-3.5 py-2 text-[12px] font-semibold"
-          >
-            <RefreshCw className="w-3.5 h-3.5" /> Refresh
-          </button>
-        </CardSoft>
+        <ErrorState
+          title="Couldn't reach PesaLens"
+          cause="We couldn't load your dashboard. Check your connection, then retry."
+          timestamp={Date.now()}
+          onRetry={() => refetch()}
+          retryLabel="Retry"
+          retryDisabled={isFetching}
+        />
       </div>
     );
   }
@@ -82,22 +283,19 @@ const Dashboard = () => {
   if (!upload) {
     return (
       <div className="px-4 py-6">
-        <CardSoft className="text-center !py-8">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-accent mx-auto flex items-center justify-center mb-3">
-            <UploadIcon className="w-6 h-6 text-white" />
-          </div>
-          <Eyebrow>Your first upload</Eyebrow>
-          <h2 className="text-[20px] font-bold mt-2">Upload a statement to begin</h2>
-          <p className="text-[13px] text-txt-3 mt-2 max-w-xs mx-auto">
-            PesaLens needs at least one bank or mobile-money PDF before it can compute your KPIs.
-          </p>
-          <button
-            onClick={() => navigate("/upload")}
-            className="mt-5 inline-flex items-center gap-2 bg-gradient-accent text-white rounded-full px-4 py-2.5 text-[13px] font-semibold"
-          >
-            <UploadIcon className="w-4 h-4" /> Upload statement
-          </button>
-        </CardSoft>
+        <EmptyState
+          kind="first-run"
+          title="Upload a statement to begin"
+          desc="PesaLens needs at least one bank or mobile-money PDF before it can compute your KPIs."
+          action={
+            <button
+              onClick={() => navigate("/upload")}
+              className="inline-flex items-center gap-2 bg-gradient-accent text-primary-foreground rounded-full px-4 py-2.5 text-[13px] font-semibold press"
+            >
+              <UploadIcon className="w-4 h-4" /> Upload statement
+            </button>
+          }
+        />
       </div>
     );
   }
@@ -131,15 +329,76 @@ const Dashboard = () => {
           <div className="w-11 h-11 rounded-xl bg-accent/15 text-accent flex items-center justify-center shrink-0">
             <FileText className="w-5.5 h-5.5" />
           </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-[14px] font-semibold truncate">{upload.filename || "Latest upload"}</span>
-              {upload.bank && <Badge tone="accent">{String(upload.bank).toUpperCase()}</Badge>}
-            </div>
-            <div className="text-[12px] text-txt-3 font-mono-tab mt-0.5">
+          <div className="flex-1 min-w-0 relative">
+            <button
+              type="button"
+              onClick={() => statements.length > 0 && setSelectorOpen((v: boolean) => !v)}
+              className="flex items-center gap-2 text-left max-w-full"
+              aria-haspopup="listbox"
+              aria-expanded={selectorOpen}
+            >
+              <span className="text-[14px] font-semibold truncate">{bankLabel(upload.bank)}</span>
+              {statements.length > 0 && <ChevronDown className="w-3.5 h-3.5 text-txt-3 shrink-0" />}
+            </button>
+            <div className="text-[12px] text-txt-3 font-mono-tab mt-0.5 truncate">
               {upload.total_transactions ?? upload.transaction_count ?? 0} txns ·{" "}
               {relativeTime(upload.created_at || upload.uploaded_at)}
             </div>
+
+            {/* Same-day siblings — "you also uploaded NMB today". */}
+            {(summary as any)?.same_day_siblings?.length > 0 && (
+              <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+                <span className="text-[9px] text-txt-4 font-mono-tab uppercase tracking-wider">
+                  Also {fmtDay((summary as any).same_day_siblings[0].created_at)}:
+                </span>
+                {(summary as any).same_day_siblings.map((s: any) => (
+                  <button
+                    key={s.job_id}
+                    type="button"
+                    onClick={() => selectStatement(s.job_id)}
+                    className="text-[10px] px-2 py-0.5 rounded-md bg-accent/12 text-accent press"
+                  >
+                    {bankLabel(s.bank)}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {selectorOpen && statements.length > 0 && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setSelectorOpen(false)} aria-hidden />
+                <div className="absolute left-0 top-full mt-2 z-50 w-[min(88vw,320px)] max-h-[56vh] overflow-y-auto rounded-2xl border border-border bg-surface-2 shadow-2xl">
+                  {(["recent", "past"] as const).map((rec) => {
+                    const items = statements.filter((s: any) => (rec === "recent" ? s.recency === "recent" : s.recency !== "recent"));
+                    if (!items.length) return null;
+                    const activeId = selectedJobId || statements[0]?.job_id;
+                    return (
+                      <div key={rec} className="py-1">
+                        <div className="px-3 py-1 text-[9px] font-mono-tab uppercase tracking-wider text-txt-4">
+                          {rec === "recent" ? "Recent" : "Past"}
+                        </div>
+                        {items.map((s: any) => (
+                          <button
+                            key={s.job_id}
+                            type="button"
+                            onClick={() => selectStatement(s.job_id)}
+                            className={`w-full px-3 py-2 flex items-center gap-2 text-left active:bg-surface-3 ${s.job_id === activeId ? "bg-accent/10" : ""}`}
+                          >
+                            <span className="flex-1 min-w-0">
+                              <span className="block text-[12.5px] font-semibold text-txt-1 truncate">{bankLabel(s.bank)}</span>
+                              <span className="block text-[10px] text-txt-3 truncate">
+                                {s.txn_count || 0} txns · uploaded {fmtDay(s.created_at)}
+                              </span>
+                            </span>
+                            {s.job_id === activeId && <Check className="w-3.5 h-3.5 text-accent shrink-0" />}
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
           <button
             onClick={() => refetch()}
@@ -156,7 +415,10 @@ const Dashboard = () => {
       <Bento className="!p-0 overflow-hidden">
         <div className="p-4 bg-gradient-to-br from-accent/20 via-net/10 to-transparent">
           <div className="flex items-center justify-between gap-2">
-            <Eyebrow>Net flow · this period</Eyebrow>
+            <span className="inline-flex items-center gap-1.5">
+              <Eyebrow>Net flow · this period</Eyebrow>
+              <InfoHint content="Money in minus money out for this period. It excludes your opening balance." side="bottom" />
+            </span>
             {trends.net_pct !== undefined && (
               <span className={`inline-flex items-center gap-0.5 text-[11px] font-mono-tab font-bold px-2 py-0.5 rounded-full ${Number(trends.net_pct) >= 0 ? "bg-inc/15 text-inc" : "bg-dng/15 text-dng"}`}>
                 {Number(trends.net_pct) >= 0 ? "+" : ""}{Math.abs(Number(trends.net_pct) || 0).toFixed(1)}%
@@ -270,6 +532,15 @@ const Dashboard = () => {
       <IncomeExpenseChart data={time} />
       <SpendingBreakdown data={categories} title="Top categories" />
 
+      {/* Money map — per-service fees (Slice 3) */}
+      <MoneyMap intel={bankIntel} focus={bankFocus} onFocus={setBankFocus} />
+
+      {/* Statement history timeline (Slice 3) */}
+      <StatementTimeline
+        statements={statements}
+        onOpen={(jobId: string) => { setActiveStatement(jobId); navigate(`/analysis?job_id=${encodeURIComponent(jobId)}`); }}
+      />
+
       {/* Action Plan — Chase-style gradient card */}
       {(action?.mistakes?.length > 0 || action?.opportunities?.length > 0) && (
         <Link to="/action-plan" className="block ios-press">
@@ -299,7 +570,7 @@ const Dashboard = () => {
       {/* Floating Action Button — iOS style */}
       <button
         onClick={() => navigate("/upload")}
-        className="fixed md:absolute bottom-24 right-5 w-16 h-16 rounded-2xl bg-gradient-accent shadow-lg flex items-center justify-center text-white z-10 active:scale-95 transition-transform ios-press"
+        className="fixed md:absolute bottom-24 right-5 w-16 h-16 rounded-2xl bg-gradient-accent shadow-lg flex items-center justify-center text-primary-foreground z-10 press"
         aria-label="New upload"
       >
         <Plus className="w-7 h-7" strokeWidth={2.5} />

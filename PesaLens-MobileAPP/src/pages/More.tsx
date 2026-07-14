@@ -18,6 +18,7 @@ import {
   Scale,
   ScrollText,
   ShieldCheck,
+  ShieldAlert,
 } from "lucide-react";
 // @ts-ignore — JS modules
 import { useAuth, clearSession } from "@/data/authStore";
@@ -36,6 +37,11 @@ const More = () => {
   const { t, lang } = useT();
 
   const isBusiness = (user?.account_type || accountType) === "business";
+
+  // Owner-console visibility comes from the server-provided is_admin flag on
+  // /auth/me — no probe. Probing an admin endpoint hid the console on any
+  // transient failure and ran COUNT queries just for nav visibility.
+  const isAdmin = Boolean(user?.is_admin);
 
   const workspaceItems = [
     {
@@ -160,8 +166,19 @@ const More = () => {
     },
   ];
 
+  const ownerItems = [
+    {
+      icon: ShieldAlert,
+      title: "Owner console",
+      sub: "Users, errors & activity across the system",
+      tone: "accent" as const,
+      onClick: () => navigate("/admin"),
+    },
+  ];
+
   const groups = [
     { label: "Workspace", items: workspaceItems },
+    ...(isAdmin ? [{ label: "Owner", items: ownerItems }] : []),
     { label: "Account", items: accountItems },
     { label: "Legal", items: legalItems },
   ];

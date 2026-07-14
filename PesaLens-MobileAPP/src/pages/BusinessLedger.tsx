@@ -1,7 +1,8 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, FileText, Plus, Trash2 } from "lucide-react";
-import { Badge, CardSoft, Eyebrow, Pill, Section } from "@/components/pl/primitives";
+import { toast } from "sonner";
+import { Badge, Button, CardSoft, ChipRow, EmptyState, Eyebrow, Pill, Section, Skeleton } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
 import {
   createBusinessEntry,
@@ -80,19 +81,35 @@ const BusinessLedger = () => {
       });
       setNotice("Entry saved.");
       setError(null);
+      toast.success("Entry saved");
     },
-    onError: (err: any) => setError(err?.message || "Could not save entry."),
+    onError: (err: any) => {
+      setError(err?.message || "Could not save entry.");
+      toast.error("Could not save entry", { description: err?.message });
+    },
   });
 
   const remove = useMutation({
     mutationFn: (id: number) => deleteBusinessEntry(id),
+    /* Deleting used to succeed and fail in total silence — the row vanished (or
+       didn't) with no acknowledgement either way (§65). */
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["business-entries"] });
       queryClient.invalidateQueries({ queryKey: ["business-summary"] });
+      toast.success("Entry deleted");
     },
+    onError: (err: any) => toast.error("Could not delete entry", { description: err?.message }),
   });
 
   const filtered = filter ? entries.filter((e) => e.account_class === filter) : entries;
+
+  /* An account class with no entries renders disabled rather than being dropped,
+     so the chip row does not reshuffle under the thumb (filter-chips.md #1). */
+  const classCounts = useMemo(() => {
+    const by: Record<string, number> = {};
+    for (const e of entries) by[e.account_class] = (by[e.account_class] || 0) + 1;
+    return by;
+  }, [entries]);
 
   const totals = useMemo(() => {
     const t = { revenue: 0, expense: 0, asset: 0, liability: 0, equity: 0 } as Record<string, number>;
@@ -110,8 +127,10 @@ const BusinessLedger = () => {
     try {
       await downloadBusinessReport(reportMonth);
       setNotice(`Report downloaded for ${reportMonth}.`);
+      toast.success("Report downloaded", { description: reportMonth });
     } catch (err: any) {
       setError(err?.message || "Could not download report.");
+      toast.error("Could not download report", { description: err?.message });
     } finally {
       setDownloading(false);
     }
@@ -149,7 +168,7 @@ const BusinessLedger = () => {
         </div>
         <button
           onClick={() => setShowForm((v) => !v)}
-          className="w-10 h-10 rounded-full bg-gradient-accent flex items-center justify-center text-white"
+          className="w-10 h-10 rounded-full bg-gradient-accent flex items-center justify-center text-primary-foreground"
           aria-label="Add entry"
         >
           <Plus className="w-4 h-4" />
@@ -166,19 +185,9 @@ const BusinessLedger = () => {
               onChange={(e) => setReportMonth(e.target.value || currentMonth())}
               className="bg-surface-3 border border-border rounded-lg px-3 py-2 text-[13px] flex-1"
             />
-            <button
-              onClick={handleDownload}
-              disabled={downloading}
-              className="bg-gradient-accent text-white py-2 px-3 rounded-lg text-[13px] font-semibold flex items-center gap-1.5 disabled:opacity-60"
-            >
-              {downloading ? (
-                "Generating…"
-              ) : (
-                <>
-                  <Download className="w-3.5 h-3.5" /> PDF
-                </>
-              )}
-            </button>
+            <Button size="sm" icon={Download} loading={downloading} loadingLabel="Generating…" onClick={handleDownload}>
+              PDF
+            </Button>
           </div>
           {summary && (
             <div className="grid grid-cols-3 gap-2 text-center">
@@ -282,7 +291,10 @@ const BusinessLedger = () => {
               placeholder="Amount (TZS)"
               className="w-full bg-surface-3 border border-border rounded-lg px-3 py-2 text-[13px]"
             />
-            <button
+            <Button
+              block
+              loading={create.isPending}
+              loadingLabel="Saving…"
               onClick={() => {
                 const amount = Number(form.amount);
                 if (!Number.isFinite(amount) || amount <= 0) {
@@ -299,36 +311,74 @@ const BusinessLedger = () => {
                   account_class: form.account_class,
                 });
               }}
-              disabled={create.isPending}
-              className="w-full bg-gradient-accent text-white py-2.5 rounded-lg text-[13px] font-semibold disabled:opacity-60"
             >
-              {create.isPending ? "Saving…" : "Save entry"}
-            </button>
+              Save entry
+            </Button>
           </div>
         </CardSoft>
       )}
 
-      <div className="flex gap-2 overflow-x-auto scroll-hide -mx-1 px-1">
+      <ChipRow
+        className="-mx-1 px-1"
+        activeCount={filter ? 1 : 0}
+        onClear={() => setFilter(null)}
+        resultCount={filtered.length}
+        resultNoun={filtered.length === 1 ? "entry" : "entries"}
+      >
         <Pill active={filter === null} onClick={() => setFilter(null)}>
           All
         </Pill>
         {ACCOUNT_CLASSES.map((c) => (
-          <Pill key={c.id} active={filter === c.id} onClick={() => setFilter(c.id as AccountClass)}>
+          <Pill
+            key={c.id}
+            active={filter === c.id}
+            disabled={!classCounts[c.id]}
+            count={classCounts[c.id] || 0}
+            onClick={() => setFilter(c.id as AccountClass)}
+          >
             {c.label}
           </Pill>
         ))}
-      </div>
+      </ChipRow>
 
       {entriesQuery.isLoading ? (
         <div className="space-y-2">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="card-soft h-14 animate-pulse" />
+            <Skeleton key={i} className="h-14 rounded-2xl" />
           ))}
         </div>
       ) : filtered.length === 0 ? (
-        <CardSoft className="text-center !py-6">
-          <p className="text-[12px] text-txt-3">No entries yet. Tap + to record one.</p>
-        </CardSoft>
+        /* A list emptied by a filter is not the same screen as one that never had
+           data — different cause, different recovery verb (empty-states.md #7, #9). */
+        entries.length > 0 ? (
+          <EmptyState
+            kind="filtered"
+            title="Hidden by filters"
+            hiddenCount={entries.length}
+            action={
+              <button
+                onClick={() => setFilter(null)}
+                className="rounded-full border border-border px-4 py-2 text-[13px] font-semibold text-txt-1 press"
+              >
+                Reset filters
+              </button>
+            }
+          />
+        ) : (
+          <EmptyState
+            kind="first-run"
+            title="Your ledger is empty"
+            desc="Record your first entry and PesaLens will start tracking your business books."
+            action={
+              <button
+                onClick={() => setShowForm(true)}
+                className="inline-flex items-center gap-2 bg-gradient-accent text-primary-foreground rounded-full px-4 py-2.5 text-[13px] font-semibold press"
+              >
+                <Plus className="w-4 h-4" /> Record an entry
+              </button>
+            }
+          />
+        )
       ) : (
         <div className="space-y-2">
           {filtered.map((e: any) => {

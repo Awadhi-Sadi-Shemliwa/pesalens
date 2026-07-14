@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { TickerStrip } from "./TickerStrip";
 import { NotificationsSheet } from "./NotificationsSheet";
+import AnimatedBackground from "./AnimatedBackground";
 import { setNotificationsUser, useNotifications } from "@/data/notifications";
 import { cn } from "@/lib/utils";
 // @ts-ignore — JS module
@@ -86,6 +87,7 @@ export const MobileShell = () => {
     "/action-plan": "Action Plan",
     "/upgrade": "Upgrade",
     "/profile": "Profile",
+    "/admin": "Owner console",
     "/more": "More",
   };
   const title = titleMap[loc.pathname] ?? "PesaLens";
@@ -101,6 +103,12 @@ export const MobileShell = () => {
   return (
     <div className="h-shell bg-deep flex justify-center overflow-hidden">
       <div className="w-full max-w-[440px] h-full bg-deep flex flex-col relative shadow-lift md:my-4 md:rounded-[32px] md:overflow-hidden md:border md:border-border">
+        {/* Animated brand background — the mobile-cheap Hyperspeed / Light
+            Pillar. Absolute, behind everything; the content wrapper below is
+            relative z-10 so chrome and pages paint on top. */}
+        <AnimatedBackground variant="inner" />
+
+        <div className="relative z-10 flex flex-1 flex-col min-h-0">
         {/* Top safe area — keeps content below the OS status bar */}
         <div className="pt-safe bg-surface-1" />
 
@@ -108,7 +116,7 @@ export const MobileShell = () => {
         <header className="ios-header px-5 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-9 h-9 rounded-xl overflow-hidden bg-surface-2 border border-border/60 shadow-sm shrink-0 flex items-center justify-center">
-              <img src="/logo.svg" alt="PesaLens" width={36} height={36} className="w-full h-full object-contain p-[2px]" />
+              <img src="/logo.png" alt="PesaLens" width={36} height={36} className="w-full h-full object-cover" />
             </div>
             <div className="min-w-0">
               <h1 className="text-[20px] font-bold leading-tight truncate">{title}</h1>
@@ -231,6 +239,7 @@ export const MobileShell = () => {
             );
           })}
         </nav>
+        </div>
 
         <NotificationsSheet open={notifOpen} onClose={() => setNotifOpen(false)} />
       </div>

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, AlertTriangle, ArrowRight, CheckCircle2, Sparkles } from "lucide-react";
-import { Badge, CardSoft, Eyebrow, Section } from "@/components/pl/primitives";
+import { Badge, CardSoft, Eyebrow, Section, Skeleton } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
 import { fetchDashboardSummary, fmtTZS } from "@/data/api";
 // @ts-ignore — JS modules
@@ -22,7 +22,7 @@ const ActionPlan = () => {
     return (
       <div className="px-4 py-6 space-y-3">
         {Array.from({ length: 5 }).map((_, i) => (
-          <div key={i} className="card-soft h-20 animate-pulse" />
+          <Skeleton key={i} className="h-20 rounded-2xl" />
         ))}
       </div>
     );

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -9,7 +9,7 @@ import {
   Upload as UploadIcon,
   X,
 } from "lucide-react";
-import { Badge, Bento, CardSoft, Eyebrow, Pill, Tilt } from "@/components/pl/primitives";
+import { Badge, Bento, CardSoft, ChipRow, EmptyState, ErrorState, Eyebrow, Pill, Sheet, Skeleton, Tilt } from "@/components/pl/primitives";
 import { SpendingBreakdown } from "@/components/pl/SpendingBreakdown";
 // @ts-ignore — JS modules
 import { fetchAnalysis, fetchUploads, fmtTZS, fmtTZSFull } from "@/data/api";
@@ -65,46 +65,34 @@ const TxnDetailDrawer = ({
   txn: any | null;
   onClose: () => void;
 }) => {
-  if (!txn) return null;
-  const credit = Number(txn.credit) || 0;
-  const debit = Number(txn.debit) || 0;
+  /* Retain the last txn so the sheet still has content to render while it
+     animates out — clearing it on close would make the panel blank mid-exit. */
+  const lastRef = useRef<any>(txn);
+  if (txn) lastRef.current = txn;
+  const d = lastRef.current;
+
+  if (!d) return null;
+  const credit = Number(d.credit) || 0;
+  const debit = Number(d.debit) || 0;
   const isInc = credit > 0;
   const amount = isInc ? credit : debit;
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 ios-press"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[440px] bg-surface-2 rounded-t-3xl border-t border-border max-h-[85vh] overflow-y-auto pb-safe shadow-2xl"
-      >
-        <div className="sticky top-0 bg-surface-2 px-5 pt-4 pb-3 flex items-center justify-between border-b border-border/50">
-          <div className="text-[13px] font-semibold text-txt-3 uppercase tracking-wide">Transaction Detail</div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="w-9 h-9 rounded-full bg-surface-3 flex items-center justify-center text-txt-2 active:bg-surface-4 ios-press"
-          >
-            <X className="w-4.5 h-4.5" />
-          </button>
-        </div>
-
-        <div className="px-5 py-5 space-y-5">
+    <Sheet open={!!txn} onClose={onClose} eyebrow="Transaction detail">
+        <div className="space-y-5">
           {/* Headline — full description, no truncation. */}
           <div className="bg-surface-3/50 rounded-2xl p-4">
             <div className="text-[12px] font-mono-tab text-txt-3 tabular tracking-wider mb-2">
-              {formatDateLong(txn.txn_date)}
+              {formatDateLong(d.txn_date)}
             </div>
             <div className="text-[18px] font-semibold mt-1.5 break-words leading-snug">
-              {txn.description || "—"}
+              {d.description || "—"}
             </div>
             <div className="mt-3 flex items-center gap-2.5 flex-wrap">
               <Badge tone={isInc ? "inc" : "exp"}>
                 {isInc ? "Income" : "Expense"}
               </Badge>
-              {txn.category && <Badge tone="muted">{txn.category}</Badge>}
-              {txn.needs_review && <Badge tone="dng">Needs review</Badge>}
+              {d.category && <Badge tone="muted">{d.category}</Badge>}
+              {d.needs_review && <Badge tone="dng">Needs review</Badge>}
             </div>
           </div>
 
@@ -121,46 +109,45 @@ const TxnDetailDrawer = ({
               <div className="flex items-center justify-between">
                 <span className="text-[14px] text-txt-3">Balance after</span>
                 <span className="font-mono-tab tabular text-[16px]">
-                  {txn.balance != null ? fmtTZSFull(Number(txn.balance)) : "—"}
+                  {d.balance != null ? fmtTZSFull(Number(d.balance)) : "—"}
                 </span>
               </div>
             </div>
-            {txn.reference && (
+            {d.reference && (
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-start justify-between gap-3">
                   <span className="text-[14px] text-txt-3">Reference</span>
-                  <span className="font-mono-tab text-[14px] text-right">{txn.reference}</span>
+                  <span className="font-mono-tab text-[14px] text-right">{d.reference}</span>
                 </div>
               </div>
             )}
-            {txn.method && (
+            {d.method && (
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-center justify-between">
                   <span className="text-[14px] text-txt-3">Method</span>
-                  <span className="text-[14px]">{txn.method}</span>
+                  <span className="text-[14px]">{d.method}</span>
                 </div>
               </div>
             )}
-            {txn.vendor && (
+            {d.vendor && (
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-center justify-between">
                   <span className="text-[14px] text-txt-3">Vendor</span>
-                  <span className="text-[14px]">{txn.vendor}</span>
+                  <span className="text-[14px]">{d.vendor}</span>
                 </div>
               </div>
             )}
-            {txn.page_number != null && (
+            {d.page_number != null && (
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-center justify-between">
                   <span className="text-[14px] text-txt-3">Page</span>
-                  <span className="text-[14px]">{String(txn.page_number)}</span>
+                  <span className="text-[14px]">{String(d.page_number)}</span>
                 </div>
               </div>
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </Sheet>
   );
 };
 
@@ -180,38 +167,25 @@ const CategoryDrawer = ({
   onClose: () => void;
   onPick: (txn: any) => void;
 }) => {
-  if (!category) return null;
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 ios-press"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[440px] bg-surface-2 rounded-t-3xl border-t border-border max-h-[85vh] overflow-y-auto pb-safe shadow-2xl"
-      >
-        <div className="sticky top-0 bg-surface-2 px-5 pt-4 pb-3 flex items-center justify-between border-b border-border/50">
-          <div className="min-w-0">
-            <div className="text-[12px] font-mono-tab text-txt-3 tabular tracking-wider">
-              {fmtTZSFull(Number(category.value) || 0)}
-            </div>
-            <div className="text-[16px] font-semibold truncate">{category.name}</div>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="w-9 h-9 rounded-full bg-surface-3 flex items-center justify-center text-txt-2 active:bg-surface-4 ios-press shrink-0"
-          >
-            <X className="w-4.5 h-4.5" />
-          </button>
-        </div>
+  /* Retain the last category so the sheet still has content while it animates out. */
+  const lastRef = useRef<any>(category);
+  if (category) lastRef.current = category;
+  const c = lastRef.current;
 
-        <div className="px-5 py-4">
+  if (!c) return null;
+  return (
+    <Sheet
+      open={!!category}
+      onClose={onClose}
+      eyebrow={fmtTZSFull(Number(c.value) || 0)}
+      title={c.name}
+    >
+        <div>
           <div className="text-[12px] font-mono-tab text-txt-3 mb-3">
             {txns.length} of {totalCount} transactions
           </div>
           {txns.length === 0 ? (
-            <p className="text-[13px] text-txt-3 py-6 text-center">No transactions in this category.</p>
+            <EmptyState kind="first-run" title="No transactions here" desc="Nothing was categorised under this heading in the selected statement." />
           ) : (
             <div className="space-y-2.5">
               {txns.map((t: any, i: number) => (
@@ -235,8 +209,7 @@ const CategoryDrawer = ({
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Sheet>
   );
 };
 
@@ -261,15 +234,22 @@ const Analysis = () => {
   );
   const [sort, setSort] = useState<Sort>("date_desc");
   const [q, setQ] = useState("");
-  const [page, setPage] = useState(1);
+  // Page lives in the URL so a deep position survives a reload or a shared link
+  // and a back-navigation from a txn detail returns to the same page (pagination.md #7).
+  const page = Math.max(1, Number(params.get("page")) || 1);
+  const setPage = (p: number) => setParams((prev) => { prev.set("page", String(p)); return prev; }, { replace: true });
+  const listTopRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<any | null>(null);
   const [activeCat, setActiveCat] = useState<any | null>(null);
 
   const jobIdParam = params.get("job_id");
 
+  // Only EXTRACTED statements can be analysed — a failed/queued upload row has
+  // no result JSON and would 404 on /analysis. Ask the backend for done rows so
+  // the default `activeJobId` never lands on a failed upload.
   const uploadsQuery = useQuery({
-    queryKey: ["uploads"],
-    queryFn: fetchUploads,
+    queryKey: ["uploads", "done"],
+    queryFn: () => fetchUploads("done"),
   });
 
   const uploads: any[] = (uploadsQuery.data as any)?.uploads || (uploadsQuery.data as any) || [];
@@ -281,7 +261,7 @@ const Analysis = () => {
     }
   }, [jobIdParam, uploads, setParams]);
 
-  const { data: analysis, isLoading, isError } = useQuery({
+  const { data: analysis, isLoading, isError, refetch } = useQuery({
     queryKey: ["analysis", activeJobId],
     queryFn: () => fetchAnalysis(activeJobId),
     enabled: Boolean(activeJobId),
@@ -335,51 +315,74 @@ const Analysis = () => {
   const start = (page - 1) * PAGE_SIZE;
   const visible = filtered.slice(start, start + PAGE_SIZE);
 
+  /* Per-chip counts, measured against the SEARCH-filtered set rather than the
+     whole statement — otherwise a chip promises rows the active query has
+     already excluded, and tapping it lands on an empty list. */
+  const filterCounts = useMemo(() => {
+    const debounced = q.trim().toLowerCase();
+    const searched = transactions.filter((t: any) => {
+      if (!debounced) return true;
+      const amt = Number(t.credit) || -Number(t.debit) || Number(t.amount) || 0;
+      return `${t.description || ""} ${t.reference || ""} ${amt}`.toLowerCase().includes(debounced);
+    });
+    const amtOf = (t: any) => Number(t.credit) || -Number(t.debit) || Number(t.amount) || 0;
+    return {
+      All: searched.length,
+      Income: searched.filter((t: any) => amtOf(t) > 0).length,
+      Expense: searched.filter((t: any) => amtOf(t) < 0).length,
+      Review: searched.filter((t: any) => t.needs_review).length,
+    } as Record<Filter, number>;
+  }, [transactions, q]);
+
+  /* Skeleton mirrors the real layout below: KPI hero row, then the txn list (§81–83). */
   if (uploadsQuery.isLoading || isLoading) {
     return (
-      <div className="px-5 py-6 space-y-4">
-        {Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="ios-group">
-            <div className="px-5 py-4">
-              <div className="h-4 bg-surface-3 rounded-full w-32 animate-pulse mb-2" />
-              <div className="h-5 bg-surface-3 rounded-full w-48 animate-pulse" />
-            </div>
-          </div>
-        ))}
+      <div className="px-4 py-6 space-y-4">
+        <div className="grid grid-cols-3 gap-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-20 rounded-2xl" />
+          ))}
+        </div>
+        <Skeleton className="h-10 rounded-xl" />
+        <div className="space-y-2">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Skeleton key={i} className="h-14 rounded-xl" />
+          ))}
+        </div>
       </div>
     );
   }
 
   if (uploads.length === 0) {
     return (
-      <div className="px-5 py-6">
-        <div className="ios-group">
-          <div className="px-5 py-8 text-center">
-            <div className="text-[13px] font-semibold text-txt-3 uppercase tracking-wide mb-2">No Uploads Yet</div>
-            <h2 className="text-[20px] font-bold mt-1">Nothing to analyse yet</h2>
-            <p className="text-[13px] text-txt-3 mt-3">Upload a statement to populate the explorer.</p>
+      <div className="px-4 py-6">
+        <EmptyState
+          kind="first-run"
+          title="Nothing to analyse yet"
+          desc="Upload a statement and PesaLens will break down every transaction for you."
+          action={
             <button
               onClick={() => navigate("/upload")}
-              className="mt-5 inline-flex items-center gap-2 bg-gradient-accent text-white rounded-full px-5 py-2.5 text-[13px] font-semibold ios-press"
+              className="inline-flex items-center gap-2 bg-gradient-accent text-primary-foreground rounded-full px-5 py-2.5 text-[13px] font-semibold ios-press"
             >
               <UploadIcon className="w-4 h-4" /> Upload statement
             </button>
-          </div>
-        </div>
+          }
+        />
       </div>
     );
   }
 
   if (isError || !analysis) {
     return (
-      <div className="px-5 py-6">
-        <div className="ios-group">
-          <div className="px-5 py-8 text-center">
-            <div className="text-[13px] font-semibold text-txt-3 uppercase tracking-wide mb-2">Backend</div>
-            <h2 className="text-[20px] font-bold mt-1">Couldn't load analysis</h2>
-            <p className="text-[13px] text-txt-3 mt-3">Try reloading or pick a different upload.</p>
-          </div>
-        </div>
+      <div className="px-4 py-6">
+        <ErrorState
+          title="Couldn't load analysis"
+          cause="We couldn't fetch the breakdown for this statement. Retry, or pick a different upload."
+          timestamp={Date.now()}
+          onRetry={() => refetch()}
+          retryLabel="Retry"
+        />
       </div>
     );
   }
@@ -404,7 +407,7 @@ const Analysis = () => {
       </div>
 
       {uploads.length > 1 && (
-        <div className="ios-group">
+        <div className="ios-group focus-ring-within rounded-xl">
           <select
             value={activeJobId || ""}
             onChange={(e) => {
@@ -422,7 +425,7 @@ const Analysis = () => {
         </div>
       )}
 
-      <div className="ios-group flex items-center gap-3 px-4 py-2">
+      <div className="ios-group flex items-center gap-3 px-4 py-2 focus-ring-within rounded-xl">
         <Search className="w-4.5 h-4.5 text-txt-3 shrink-0" />
         <input
           value={q}
@@ -448,11 +451,19 @@ const Analysis = () => {
         </button>
       </div>
 
-      <div className="flex gap-2.5 overflow-x-auto scroll-hide -mx-1 px-1">
+      <ChipRow
+        className="-mx-1 px-1"
+        activeCount={filter === "All" ? 0 : 1}
+        onClear={() => { setFilter("All"); setPage(1); }}
+        resultCount={total}
+        resultNoun={total === 1 ? "transaction" : "transactions"}
+      >
         {filters.map((f) => (
           <Pill
             key={f}
             active={filter === f}
+            disabled={f !== "All" && !filterCounts[f]}
+            count={f === "All" ? null : filterCounts[f]}
             onClick={() => {
               setFilter(f);
               setPage(1);
@@ -461,7 +472,7 @@ const Analysis = () => {
             {f}
           </Pill>
         ))}
-      </div>
+      </ChipRow>
 
       {categories.length > 0 && (
         <SpendingBreakdown
@@ -471,7 +482,9 @@ const Analysis = () => {
         />
       )}
 
-      <div className="text-[12px] font-mono-tab text-txt-3 px-1">
+      {/* Anchor so paging returns the reader to the top of the list, not wherever
+          they had scrolled the previous page to (pagination.md #6). */}
+      <div ref={listTopRef} className="text-[12px] font-mono-tab text-txt-3 px-1 scroll-mt-24">
         Showing {Math.min(total, start + 1)}–{Math.min(total, start + visible.length)} of {total}
       </div>
 
@@ -519,8 +532,8 @@ const Analysis = () => {
         <div className="flex items-center justify-between pt-2">
           <button
             disabled={page <= 1}
-            onClick={() => setPage(page - 1)}
-            className="text-[12px] font-semibold text-txt-2 disabled:opacity-30"
+            onClick={() => { setPage(page - 1); listTopRef.current?.scrollIntoView({ block: "start" }); }}
+            className="press min-h-[44px] px-3 inline-flex items-center gap-1 rounded-xl border border-border bg-surface-2 text-[12px] font-semibold text-txt-2 disabled:opacity-30"
           >
             ← Prev
           </button>
@@ -529,8 +542,8 @@ const Analysis = () => {
           </span>
           <button
             disabled={start + visible.length >= total}
-            onClick={() => setPage(page + 1)}
-            className="text-[12px] font-semibold text-txt-2 disabled:opacity-30"
+            onClick={() => { setPage(page + 1); listTopRef.current?.scrollIntoView({ block: "start" }); }}
+            className="press min-h-[44px] px-3 inline-flex items-center gap-1 rounded-xl border border-border bg-surface-2 text-[12px] font-semibold text-txt-2 disabled:opacity-30"
           >
             Next →
           </button>

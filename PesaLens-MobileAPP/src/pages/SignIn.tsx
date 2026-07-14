@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Eyebrow } from "@/components/pl/primitives";
+import { Button, Eyebrow, OtpInput, PasswordField, useCooldown } from "@/components/pl/primitives";
 import { CheckCircle2 } from "lucide-react";
+import { passwordRulesMet } from "@/data/password";
 // @ts-ignore — JS modules
 import { signIn, forgotPassword, resetPassword } from "@/data/api";
 // @ts-ignore — JS modules
@@ -19,6 +20,8 @@ const SignIn = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [reset, setReset] = useState({ code: "", next: "", confirm: "" });
+  const [codeError, setCodeError] = useState(false);
+  const [resendLeft, startResendCooldown] = useCooldown(30);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -45,6 +48,7 @@ const SignIn = () => {
     try {
       await forgotPassword(email.trim());
       setMode("forgot-reset");
+      startResendCooldown(); // throttle resend from the moment the code is sent (#7)
     } catch (err: any) {
       setError(err?.message || "Could not send reset code.");
     } finally {
@@ -52,13 +56,29 @@ const SignIn = () => {
     }
   };
 
+  const resendCode = async () => {
+    if (resendLeft > 0 || busy) return;
+    setError("");
+    try {
+      await forgotPassword(email.trim());
+      startResendCooldown();
+    } catch (err: any) {
+      setError(err?.message || "Could not resend the code.");
+    }
+  };
+
+  // Same predicate the PasswordField checklist renders, so the button and the
+  // checklist can never disagree (password-field.md #4).
+  const resetMatch = reset.confirm.length > 0 && reset.next === reset.confirm;
+  const resetAllOk = passwordRulesMet(reset.next) && resetMatch && reset.code.trim().length > 0;
+
   const handleReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setCodeError(false);
     if (!reset.code) return setError("Enter the 6-digit code from your email.");
-    if (reset.next.length < 8) return setError("New password must be at least 8 characters.");
-    if (!/[A-Za-z]/.test(reset.next) || !/\d/.test(reset.next))
-      return setError("New password must contain a letter and a number.");
+    if (!passwordRulesMet(reset.next))
+      return setError("New password must be 8+ characters and contain a letter and a number.");
     if (reset.next !== reset.confirm) return setError("Passwords do not match.");
     setBusy(true);
     try {
@@ -69,7 +89,10 @@ const SignIn = () => {
       });
       setMode("forgot-done");
     } catch (err: any) {
-      setError(err?.message || "Could not reset password.");
+      const msg = err?.message || "Could not reset password.";
+      setError(msg);
+      // A rejected code shakes, clears and refocuses box one (otp-input.md #8).
+      if (/code|otp|invalid|expired/i.test(msg)) { setCodeError(true); window.setTimeout(() => setCodeError(false), 500); }
     } finally {
       setBusy(false);
     }
@@ -85,7 +108,7 @@ const SignIn = () => {
         }}
       >
         <div className="flex items-center gap-2.5 mb-12">
-          <div className="w-9 h-9 rounded-lg bg-gradient-accent flex items-center justify-center font-mono-tab text-[15px] font-bold text-white">
+          <div className="w-9 h-9 rounded-lg bg-gradient-accent flex items-center justify-center font-mono-tab text-[15px] font-bold text-primary-foreground">
             P
           </div>
           <div>
@@ -110,12 +133,14 @@ const SignIn = () => {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
-                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px] text-txt-1 placeholder:text-txt-4 focus:border-accent/50 outline-none"
+                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px] text-txt-1 placeholder:text-txt-4 focus-ring"
                 />
               </div>
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-[12px] font-medium text-txt-2">Password</label>
+              {/* An existing password gets the reveal toggle but no meter or checklist —
+                  scoring a secret the user already owns would only nag (#8). */}
+              <PasswordField
+                label="Password"
+                labelAction={
                   <button
                     type="button"
                     onClick={() => { setError(""); setMode("forgot-email"); }}
@@ -123,30 +148,21 @@ const SignIn = () => {
                   >
                     Forgot password?
                   </button>
-                </div>
-                <input
-                  type="password"
-                  autoComplete="current-password"
-                  required
-                  minLength={8}
-                  value={pass}
-                  onChange={(e) => setPass(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px] text-txt-1 placeholder:text-txt-4 focus:border-accent/50 outline-none"
-                />
-              </div>
+                }
+                autoComplete="current-password"
+                value={pass}
+                onChange={setPass}
+                placeholder="••••••••"
+                disabled={busy}
+              />
               {error && (
                 <div role="alert" className="text-[12px] text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2">
                   {error}
                 </div>
               )}
-              <button
-                type="submit"
-                disabled={busy}
-                className="w-full bg-gradient-accent text-white py-3 rounded-xl font-semibold text-[14px] disabled:opacity-60"
-              >
-                {busy ? "Signing in…" : "Sign in"}
-              </button>
+              <Button type="submit" block size="lg" disabled={!email.trim() || !pass} loading={busy} loadingLabel="Signing in…">
+                Sign in
+              </Button>
             </form>
 
             <p className="text-center text-[13px] text-txt-2 mt-6">
@@ -185,14 +201,12 @@ const SignIn = () => {
                 />
               </div>
               {error && <div role="alert" className="text-[12px] text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2">{error}</div>}
-              <button type="submit" disabled={busy}
-                      className="w-full bg-gradient-accent text-white py-3 rounded-xl font-semibold text-[14px] disabled:opacity-60">
-                {busy ? "Sending…" : "Send reset code"}
-              </button>
-              <button type="button" onClick={() => { setError(""); setMode("signin"); }}
-                      className="w-full text-[13px] text-txt-3 py-2">
+              <Button type="submit" block size="lg" loading={busy} loadingLabel="Sending…">
+                Send reset code
+              </Button>
+              <Button variant="ghost" block onClick={() => { setError(""); setMode("signin"); }}>
                 Back to sign in
-              </button>
+              </Button>
             </form>
           </>
         )}
@@ -206,48 +220,51 @@ const SignIn = () => {
             </p>
             <form onSubmit={handleReset} className="space-y-4">
               <div>
-                <label className="block text-[12px] font-medium text-txt-2 mb-1.5">6-digit code</label>
-                <input
-                  inputMode="numeric"
-                  maxLength={8}
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-[12px] font-medium text-txt-2">6-digit code</label>
+                  <button
+                    type="button"
+                    onClick={resendCode}
+                    disabled={resendLeft > 0 || busy}
+                    className="focus-ring rounded text-[12px] font-semibold text-accent disabled:text-txt-3"
+                  >
+                    {resendLeft > 0 ? `Resend in ${resendLeft}s` : "Resend code"}
+                  </button>
+                </div>
+                <OtpInput
                   value={reset.code}
-                  onChange={(e) => setReset((p) => ({ ...p, code: e.target.value }))}
-                  placeholder="123456"
-                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px] font-mono-tab tracking-widest"
+                  onChange={(v) => setReset((p) => ({ ...p, code: v }))}
+                  error={codeError}
+                  disabled={busy}
+                  autoFocus
                 />
               </div>
-              <div>
-                <label className="block text-[12px] font-medium text-txt-2 mb-1.5">New password</label>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  required minLength={8}
-                  value={reset.next}
-                  onChange={(e) => setReset((p) => ({ ...p, next: e.target.value }))}
-                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px]"
-                />
-                <p className="text-[10px] text-txt-3 mt-1">8+ chars · letter + number.</p>
-              </div>
-              <div>
-                <label className="block text-[12px] font-medium text-txt-2 mb-1.5">Confirm new password</label>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  required minLength={8}
-                  value={reset.confirm}
-                  onChange={(e) => setReset((p) => ({ ...p, confirm: e.target.value }))}
-                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px]"
-                />
-              </div>
+              <PasswordField
+                label="New password"
+                value={reset.next}
+                onChange={(v) => setReset((p) => ({ ...p, next: v }))}
+                helper="Length beats symbols — a few unrelated words is stronger than one decorated one."
+                showStrength
+                showRules
+                disabled={busy}
+              />
+              <PasswordField
+                label="Confirm new password"
+                value={reset.confirm}
+                onChange={(v) => setReset((p) => ({ ...p, confirm: v }))}
+                success={resetMatch}
+                successMessage="Passwords match."
+                error={reset.confirm.length > 0 && !resetMatch ? "Passwords don't match yet." : null}
+                disabled={busy}
+              />
               {error && <div role="alert" className="text-[12px] text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2">{error}</div>}
-              <button type="submit" disabled={busy}
-                      className="w-full bg-gradient-accent text-white py-3 rounded-xl font-semibold text-[14px] disabled:opacity-60">
-                {busy ? "Resetting…" : "Reset password"}
-              </button>
-              <button type="button" onClick={() => { setError(""); setMode("forgot-email"); }}
-                      className="w-full text-[13px] text-txt-3 py-2">
+              {/* Submit stays inert until every rule has flipped (password-field.md #4). */}
+              <Button type="submit" block size="lg" disabled={!resetAllOk} loading={busy} loadingLabel="Resetting…">
+                Reset password
+              </Button>
+              <Button variant="ghost" block onClick={() => { setError(""); setMode("forgot-email"); }}>
                 Use a different email
-              </button>
+              </Button>
             </form>
           </>
         )}
@@ -261,10 +278,9 @@ const SignIn = () => {
             <p className="text-[13px] text-txt-2 leading-relaxed">
               Your password has been updated. Sign in with the new one.
             </p>
-            <button onClick={() => { setMode("signin"); setPass(""); setError(""); }}
-                    className="w-full bg-gradient-accent text-white py-3 rounded-xl font-semibold text-[14px]">
+            <Button block size="lg" onClick={() => { setMode("signin"); setPass(""); setError(""); }}>
               Continue to sign in
-            </button>
+            </Button>
           </div>
         )}
       </div>

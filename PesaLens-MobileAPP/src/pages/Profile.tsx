@@ -4,7 +4,9 @@ import {
   Globe, LogOut, Mail, Moon, Sun, ShieldCheck, ShieldAlert,
   Lock, Download, Trash2, User as UserIcon, KeyRound,
 } from "lucide-react";
-import { Badge, CardSoft, Eyebrow, Section } from "@/components/pl/primitives";
+import { toast } from "sonner";
+import { Badge, Button, CardSoft, Eyebrow, PasswordField, Section } from "@/components/pl/primitives";
+import { passwordRulesMet } from "@/data/password";
 // @ts-ignore — JS modules
 import { useAuth } from "@/data/authStore";
 // @ts-ignore — JS modules
@@ -32,6 +34,7 @@ const Profile = () => {
 
   const handleSignOut = async () => {
     await signOut();
+    toast.success("Signed out");
     navigate("/signin", { replace: true });
   };
 
@@ -70,12 +73,17 @@ const Profile = () => {
   const [pw, setPw] = useState({ current: "", next: "", confirm: "" });
   const [pwBusy, setPwBusy] = useState(false);
   const [pwMsg, setPwMsg] = useState({ tone: "", text: "" });
+
+  // Same predicate the PasswordField checklist renders, so the button and the
+  // checklist can never disagree (password-field.md #4).
+  const pwMatch = pw.confirm.length > 0 && pw.next === pw.confirm;
+  const pwAllOk = passwordRulesMet(pw.next) && pwMatch && pw.current.length > 0;
+
   const submitPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setPwMsg({ tone: "", text: "" });
-    if (pw.next.length < 8) return setPwMsg({ tone: "dng", text: "New password must be at least 8 characters." });
-    if (!/[A-Za-z]/.test(pw.next) || !/\d/.test(pw.next))
-      return setPwMsg({ tone: "dng", text: "New password must contain a letter and a number." });
+    if (!passwordRulesMet(pw.next))
+      return setPwMsg({ tone: "dng", text: "New password must be 8+ characters and contain a letter and a number." });
     if (pw.next !== pw.confirm) return setPwMsg({ tone: "dng", text: "New passwords do not match." });
     setPwBusy(true);
     try {
@@ -105,8 +113,11 @@ const Profile = () => {
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1500);
-    } catch {
-      /* surface in UI later if needed */
+      /* The download lands outside the control the user pressed, so the
+         confirmation belongs in a toast rather than in the field (§65). */
+      toast.success("Data exported", { description: "Your JSON download has started." });
+    } catch (err: any) {
+      toast.error("Export failed", { description: err?.message || "We couldn't build your data export." });
     } finally {
       setExportBusy(false);
     }
@@ -123,9 +134,11 @@ const Profile = () => {
     setDelBusy(true);
     try {
       await deleteMyAccount();
+      toast.success("Account deleted");
       navigate("/signin", { replace: true });
     } catch (err: any) {
       setDelErr(err?.message || "Could not delete account.");
+      toast.error("Could not delete account", { description: err?.message });
     } finally {
       setDelBusy(false);
     }
@@ -171,12 +184,7 @@ const Profile = () => {
                 <p className="text-[12px] text-txt-3 mb-3">
                   Required for password-reset emails and to enable payments.
                 </p>
-                <button
-                  onClick={startVerify}
-                  className="w-full bg-gradient-accent text-white py-2.5 rounded-lg text-[13px] font-semibold"
-                >
-                  Send verification code
-                </button>
+                <Button block onClick={startVerify}>Send verification code</Button>
                 {verify.msg && <p className="text-[11px] text-dng mt-2">{verify.msg}</p>}
               </>
             ) : verify.phase === "sending" ? (
@@ -199,14 +207,12 @@ const Profile = () => {
                   </p>
                 )}
                 <div className="flex gap-2">
-                  <button type="submit" disabled={verify.phase === "submitting"}
-                          className="flex-1 bg-gradient-accent text-white py-2.5 rounded-lg text-[13px] font-semibold disabled:opacity-60">
-                    {verify.phase === "submitting" ? "Verifying…" : "Verify"}
-                  </button>
-                  <button type="button" onClick={startVerify}
-                          className="flex-1 bg-surface-3 border border-border text-txt-2 py-2.5 rounded-lg text-[13px]">
+                  <Button type="submit" className="flex-1" loading={verify.phase === "submitting"} loadingLabel="Verifying…">
+                    Verify
+                  </Button>
+                  <Button type="button" variant="secondary" className="flex-1" onClick={startVerify}>
                     Resend
-                  </button>
+                  </Button>
                 </div>
               </form>
             )}
@@ -292,42 +298,42 @@ const Profile = () => {
             </button>
           ) : (
             <form onSubmit={submitPassword} className="space-y-3">
-              <input
-                type="password"
-                placeholder="Current password"
+              <PasswordField
+                label="Current password"
                 autoComplete="current-password"
                 value={pw.current}
-                onChange={(e) => setPw((p) => ({ ...p, current: e.target.value }))}
-                className="w-full bg-surface-3 border border-border rounded-lg px-3 py-2.5 text-[14px]"
+                onChange={(v) => setPw((p) => ({ ...p, current: v }))}
+                disabled={pwBusy}
               />
-              <input
-                type="password"
-                placeholder="New password (8+, letter + number)"
-                autoComplete="new-password"
+              <PasswordField
+                label="New password"
                 value={pw.next}
-                onChange={(e) => setPw((p) => ({ ...p, next: e.target.value }))}
-                className="w-full bg-surface-3 border border-border rounded-lg px-3 py-2.5 text-[14px]"
+                onChange={(v) => setPw((p) => ({ ...p, next: v }))}
+                helper="Length beats symbols — a few unrelated words is stronger than one decorated one."
+                showStrength
+                showRules
+                disabled={pwBusy}
               />
-              <input
-                type="password"
-                placeholder="Confirm new password"
-                autoComplete="new-password"
+              <PasswordField
+                label="Confirm new password"
                 value={pw.confirm}
-                onChange={(e) => setPw((p) => ({ ...p, confirm: e.target.value }))}
-                className="w-full bg-surface-3 border border-border rounded-lg px-3 py-2.5 text-[14px]"
+                onChange={(v) => setPw((p) => ({ ...p, confirm: v }))}
+                success={pwMatch}
+                successMessage="Passwords match."
+                error={pw.confirm.length > 0 && !pwMatch ? "Passwords don't match yet." : null}
+                disabled={pwBusy}
               />
               {pwMsg.text && (
                 <p className={`text-[11px] ${pwMsg.tone === "dng" ? "text-dng" : "text-inc"}`}>{pwMsg.text}</p>
               )}
               <div className="flex gap-2">
-                <button type="submit" disabled={pwBusy}
-                        className="flex-1 bg-gradient-accent text-white py-2.5 rounded-lg text-[13px] font-semibold disabled:opacity-60">
-                  {pwBusy ? "Updating…" : "Update password"}
-                </button>
-                <button type="button" onClick={() => { setPwOpen(false); setPwMsg({ tone: "", text: "" }); }}
-                        className="flex-1 bg-surface-3 border border-border text-txt-2 py-2.5 rounded-lg text-[13px]">
+                {/* Submit stays inert until every rule has flipped (password-field.md #4). */}
+                <Button type="submit" className="flex-1" disabled={!pwAllOk} loading={pwBusy} loadingLabel="Updating…">
+                  Update password
+                </Button>
+                <Button type="button" variant="secondary" className="flex-1" onClick={() => { setPwOpen(false); setPwMsg({ tone: "", text: "" }); }}>
                   Cancel
-                </button>
+                </Button>
               </div>
             </form>
           )}

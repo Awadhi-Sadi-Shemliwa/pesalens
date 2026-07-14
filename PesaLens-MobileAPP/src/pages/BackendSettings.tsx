@@ -94,7 +94,7 @@ const BackendSettings = () => {
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
-          className="mt-2 w-full bg-surface-3 border border-border rounded-md px-3 py-2 font-mono-tab text-[13px] focus:outline-none focus:ring-2 focus:ring-accent"
+          className="mt-2 w-full bg-surface-3 border border-border rounded-md px-3 py-2 font-mono-tab text-[13px] focus-ring"
         />
 
         <div className="grid grid-cols-2 gap-2 mt-3">

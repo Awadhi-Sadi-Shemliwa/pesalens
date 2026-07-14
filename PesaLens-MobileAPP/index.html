@@ -8,6 +8,26 @@
     <meta name="description" content="Upload your Tanzanian bank or mobile-money statement. PesaLens reads it, organises it, and tells you what to fix and where to invest." />
     <meta name="author" content="PesaLens" />
 
+    <!-- Icons + PWA manifest — mirrors the web client (index.html) so the
+         mobile web layer shows the brand emblem in the tab and can install. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="PesaLens" />
+
+    <!-- Fonts loaded via <link>+preconnect (mirrors web) instead of a
+         render-blocking @import in index.css. Inter / JetBrains Mono / Fraunces. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Fraunces:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+
     <meta property="og:title" content="PesaLens — Money, mapped to the market." />
     <meta property="og:description" content="Financial intelligence for Tanzania. Statements, insights, markets, and an AI assistant in one mobile app." />
     <meta property="og:type" content="website" />

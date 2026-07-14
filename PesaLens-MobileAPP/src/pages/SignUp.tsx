@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Eyebrow } from "@/components/pl/primitives";
-import { ArrowLeft, Wallet, Briefcase, MailCheck } from "lucide-react";
+import { Button, Eyebrow } from "@/components/pl/primitives";
+import { ArrowLeft, Wallet, Briefcase, MailCheck, AlertTriangle, Check } from "lucide-react";
+import { cn } from "@/lib/utils";
 // @ts-ignore — JS modules
 import { signUp } from "@/data/api";
 // @ts-ignore — JS modules
@@ -23,10 +24,18 @@ const SignUp = () => {
 
   const set = (k: keyof typeof form, v: any) => setForm((p) => ({ ...p, [k]: v }));
 
+  /* Validate on BLUR, not per keystroke (§71): the error only appears once the
+     user has finished the field and got it wrong (§74). Submit is gated so they
+     reach an all-clear state before they ever commit (password-field.md #4). */
+  const [emailTouched, setEmailTouched] = useState(false);
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim());
+  const showEmailError = emailTouched && form.email.trim().length > 0 && !emailValid;
+  const canSubmit = emailValid && form.terms && !busy;
+
   const handle = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
-    if (!form.email) return setError("Email is required.");
+    if (!emailValid) return setError("Enter a valid email address.");
     if (!form.terms) return setError("Please accept the Terms to continue.");
 
     setBusy(true);
@@ -70,7 +79,7 @@ const SignUp = () => {
 
         <div className="flex items-center gap-2.5 mb-10">
           <div className="w-9 h-9 rounded-lg overflow-hidden bg-surface-2 border border-border/60 flex items-center justify-center">
-            <img src="/logo.svg" alt="PesaLens" width={36} height={36} className="w-full h-full object-contain p-[2px]" />
+            <img src="/logo.png" alt="PesaLens" width={36} height={36} className="w-full h-full object-cover" />
           </div>
           <div>
             <div className="text-[16px] font-bold leading-tight" data-no-translate>PesaLens</div>
@@ -94,18 +103,12 @@ const SignUp = () => {
               <li>Email can take up to a minute. Check Spam / Promotions if it's missing.</li>
               <li>Lost the email? Use "Forgot password" on the sign-in screen.</li>
             </ul>
-            <button
-              onClick={() => navigate("/signin", { replace: true })}
-              className="w-full bg-gradient-accent text-white py-3 rounded-xl font-semibold text-[14px]"
-            >
+            <Button block size="lg" onClick={() => navigate("/signin", { replace: true })}>
               Continue to sign in
-            </button>
-            <button
-              onClick={() => { setSentTo(""); setForm((p) => ({ ...p, email: "" })); }}
-              className="w-full text-[13px] text-txt-3 py-2"
-            >
+            </Button>
+            <Button variant="ghost" block onClick={() => { setSentTo(""); setForm((p) => ({ ...p, email: "" })); }}>
               Wrong email? Start over
-            </button>
+            </Button>
           </div>
         ) : (
           <>
@@ -125,20 +128,37 @@ const SignUp = () => {
                   autoComplete="name"
                   maxLength={120}
                   placeholder="Your name"
-                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px] text-txt-1 placeholder:text-txt-4 outline-none"
+                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px] text-txt-1 placeholder:text-txt-4 focus-ring"
                 />
               </div>
               <div>
-                <label className="block text-[12px] font-medium text-txt-2 mb-1.5">Email</label>
-                <input
-                  type="email"
-                  autoComplete="email"
-                  required
-                  value={form.email}
-                  onChange={(e) => set("email", e.target.value)}
-                  placeholder="you@example.com"
-                  className="w-full bg-surface-3 border border-border rounded-xl px-4 py-3 text-[14px] text-txt-1 placeholder:text-txt-4 outline-none"
-                />
+                <label htmlFor="signup-email" className="block text-[12px] font-medium text-txt-2 mb-1.5">Email</label>
+                <div className="relative">
+                  <input
+                    id="signup-email"
+                    type="email"
+                    autoComplete="email"
+                    required
+                    value={form.email}
+                    onChange={(e) => set("email", e.target.value)}
+                    onBlur={() => setEmailTouched(true)}
+                    aria-invalid={showEmailError}
+                    placeholder="you@example.com"
+                    className={cn(
+                      "w-full bg-surface-3 border rounded-xl px-4 py-3 pr-10 text-[14px] text-txt-1 placeholder:text-txt-4 focus-ring transition-colors",
+                      showEmailError ? "border-dng/60" : emailValid && form.email ? "border-inc/50" : "border-border"
+                    )}
+                  />
+                  {/* Colour alone is invisible to ~12% of users — pair it with an icon
+                      and a message (form-fields.md #4–5). */}
+                  <span className="absolute inset-y-0 right-3 flex items-center">
+                    {showEmailError && <AlertTriangle className="w-4 h-4 text-dng" />}
+                    {!showEmailError && emailValid && form.email && <Check className="w-4 h-4 text-inc" />}
+                  </span>
+                </div>
+                {showEmailError && (
+                  <p className="mt-1.5 text-[11px] text-dng">Enter a valid email address (name@example.com).</p>
+                )}
               </div>
 
               <div>
@@ -194,13 +214,9 @@ const SignUp = () => {
                 </div>
               )}
 
-              <button
-                type="submit"
-                disabled={busy}
-                className="w-full bg-gradient-accent text-white py-3 rounded-xl font-semibold text-[14px] disabled:opacity-60"
-              >
-                {busy ? "Sending email…" : "Email me a sign-in password"}
-              </button>
+              <Button type="submit" block size="lg" disabled={!canSubmit} loading={busy} loadingLabel="Sending email…">
+                Email me a sign-in password
+              </Button>
             </form>
 
             <p className="text-center text-[13px] text-txt-2 mt-6">

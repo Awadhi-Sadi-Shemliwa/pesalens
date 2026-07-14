@@ -13,7 +13,7 @@ import {
   Zap,
   ArrowRight,
 } from "lucide-react";
-import { Badge, Bento, CardSoft, Eyebrow, GlassCard, Section } from "@/components/pl/primitives";
+import { Badge, Bento, CardSoft, EmptyState, Eyebrow, GlassCard, Section, Skeleton } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
 import { askMarketInsight, fetchMarketSnapshot, fmtTZS } from "@/data/api";
 
@@ -187,7 +187,7 @@ const MarketAdvisor = ({ snapshot }: { snapshot: any }) => {
           onChange={(e) => setDraft(e.target.value)}
           disabled={pending}
           placeholder="Ask about DSE, crypto, FX…"
-          className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-surface-2 border border-border text-[13px] outline-none focus:border-accent/40"
+          className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-surface-2 border border-border text-[13px] focus-ring"
         />
         <button type="submit" disabled={pending || !draft.trim()} className="w-10 h-10 rounded-xl bg-accent text-white flex items-center justify-center disabled:opacity-50 ios-press shrink-0">
           <Send className="w-4 h-4" />
@@ -262,7 +262,11 @@ const MarketExplorer = ({ universe }: { universe: ReturnType<typeof buildUnivers
           <span className="text-[10px] text-txt-3 font-mono-tab uppercase tracking-wider">top · 24h</span>
         </div>
         {leaders.length === 0 ? (
-          <CardSoft className="text-center text-[12px] text-txt-3 !py-6">No {active.label} data cached yet — the bot will retry.</CardSoft>
+          <EmptyState
+            kind="first-run"
+            title={`No ${active.label} prices yet`}
+            desc="Nothing is cached for this category right now. The market bot retries automatically."
+          />
         ) : (
           <div className="grid grid-cols-1 gap-2">
             {leaders.map((p, i) => (
@@ -360,10 +364,18 @@ const Markets = () => {
 
       {/* Global indices — the "other form of investment" grid */}
       <Section eyebrow="Global" title="World indices" action={<Badge tone="net">{indices.length}</Badge>}>
-        {indices.length === 0 ? (
-          <CardSoft className="text-center text-[12px] text-txt-3 !py-6">
-            {marketsQuery.isLoading ? "Loading indices…" : "Equity indices feed warming up."}
-          </CardSoft>
+        {marketsQuery.isLoading ? (
+          <div className="grid grid-cols-2 gap-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-20 rounded-2xl" />
+            ))}
+          </div>
+        ) : indices.length === 0 ? (
+          <EmptyState
+            kind="first-run"
+            title="Equity indices are warming up"
+            desc="Our market bot refreshes world indices every few minutes. They'll appear here shortly."
+          />
         ) : (
           <div className="grid grid-cols-2 gap-2">
             {indices.map((i: any) => {
@@ -410,10 +422,19 @@ const Markets = () => {
               </div>
             </div>
           ))}
-          {dse.length === 0 && (
-            <div className="px-4 py-6 text-[12px] text-txt-3 text-center">
-              {marketsQuery.isLoading ? "Loading DSE…" : "DSE feed warming up."}
+          {marketsQuery.isLoading && (
+            <div className="p-2 space-y-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 rounded-xl" />
+              ))}
             </div>
+          )}
+          {!marketsQuery.isLoading && dse.length === 0 && (
+            <EmptyState
+              kind="first-run"
+              title="DSE feed is warming up"
+              desc="Dar es Salaam Stock Exchange prices land here as soon as the bot's next sweep completes."
+            />
           )}
         </div>
       </Section>

@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpRight, BookOpen, Camera, Receipt as ReceiptIcon, RefreshCw, X } from "lucide-react";
-import { Badge, CardSoft, Eyebrow, Section } from "@/components/pl/primitives";
+import { ArrowUpRight, BookOpen, Camera, Receipt as ReceiptIcon, RefreshCw } from "lucide-react";
+import { toast } from "sonner";
+import { Badge, CardSoft, EmptyState, Eyebrow, Section, Sheet, Skeleton } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
 import { fetchReceiptPatterns, fetchReceipts, scanReceipt, fmtTZSFull } from "@/data/api";
 
@@ -29,44 +30,30 @@ const ReceiptDetailDrawer = ({
   receipt: any | null;
   onClose: () => void;
 }) => {
-  if (!receipt) return null;
-  const items: any[] = Array.isArray(receipt.items) ? receipt.items : [];
-  const total = Number(receipt.total) || Number(receipt.amount) || 0;
-  const subtotal = Number(receipt.subtotal) || 0;
-  const tax = Number(receipt.tax) || 0;
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 ios-press"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[440px] bg-surface-2 rounded-t-3xl border-t border-border max-h-[85vh] overflow-y-auto pb-safe shadow-2xl"
-      >
-        <div className="sticky top-0 bg-surface-2 px-5 pt-4 pb-3 flex items-center justify-between border-b border-border/50">
-          <div className="text-[13px] font-semibold text-txt-3 uppercase tracking-wide">Receipt Detail</div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="w-9 h-9 rounded-full bg-surface-3 flex items-center justify-center text-txt-2 active:bg-surface-4 ios-press"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+  /* Retain the last receipt so the sheet still has content to render while it
+     animates out — clearing it on close would make the panel blank mid-exit. */
+  const lastRef = useRef<any>(receipt);
+  if (receipt) lastRef.current = receipt;
+  const r = lastRef.current;
 
-        <div className="px-5 py-5 space-y-5">
+  const items: any[] = Array.isArray(r?.items) ? r.items : [];
+  const total = Number(r?.total) || Number(r?.amount) || 0;
+  const subtotal = Number(r?.subtotal) || 0;
+  const tax = Number(r?.tax) || 0;
+
+  if (!r) return null;
+  return (
+    <Sheet open={!!receipt} onClose={onClose} eyebrow="Receipt detail" title={r.vendor || "Receipt"}>
+        <div className="space-y-5">
           <div className="bg-surface-3/50 rounded-2xl p-4">
             <div className="text-[12px] font-mono-tab text-txt-3 tabular tracking-wider mb-2">
-              {formatReceiptDate(receipt.date || receipt.scanned_at)}
-            </div>
-            <div className="text-[18px] font-semibold mt-1.5 break-words leading-snug">
-              {receipt.vendor || "Receipt"}
+              {formatReceiptDate(r.date || r.scanned_at)}
             </div>
             <div className="mt-3 flex items-center gap-2.5 flex-wrap">
               <Badge tone="exp">Expense</Badge>
-              {receipt.category && <Badge tone="muted">{receipt.category}</Badge>}
-              {receipt.efd_compliant === true && <Badge tone="inc">EFD ok</Badge>}
-              {receipt.efd_compliant === false && <Badge tone="dng">EFD missing</Badge>}
+              {r.category && <Badge tone="muted">{r.category}</Badge>}
+              {r.efd_compliant === true && <Badge tone="inc">EFD ok</Badge>}
+              {r.efd_compliant === false && <Badge tone="dng">EFD missing</Badge>}
             </div>
           </div>
 
@@ -95,19 +82,19 @@ const ReceiptDetailDrawer = ({
                 </div>
               </div>
             )}
-            {receipt.currency && (
+            {r.currency && (
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-center justify-between">
                   <span className="text-[14px] text-txt-3">Currency</span>
-                  <span className="text-[14px]">{receipt.currency}</span>
+                  <span className="text-[14px]">{r.currency}</span>
                 </div>
               </div>
             )}
-            {receipt.tax_code && (
+            {r.tax_code && (
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-center justify-between">
                   <span className="text-[14px] text-txt-3">Tax code</span>
-                  <span className="font-mono-tab text-[13px] text-right">{receipt.tax_code}</span>
+                  <span className="font-mono-tab text-[13px] text-right">{r.tax_code}</span>
                 </div>
               </div>
             )}
@@ -150,8 +137,7 @@ const ReceiptDetailDrawer = ({
             )}
           </div>
         </div>
-      </div>
-    </div>
+    </Sheet>
   );
 };
 
@@ -173,14 +159,18 @@ const Bookkeeping = () => {
     try {
       const data = await scanReceipt(file);
       if (data?.is_receipt === false) {
-        setError(data.message || "That image is not a receipt.");
+        const message = data.message || "That image is not a receipt.";
+        setError(message);
+        toast.warning("Not a receipt", { description: message });
         return;
       }
       setLatest(data);
       queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
       queryClient.invalidateQueries({ queryKey: ["receipts"] });
+      toast.success("Receipt captured", { description: data?.vendor || undefined });
     } catch (err: any) {
       setError(err?.message || "Receipt scan failed.");
+      toast.error("Receipt scan failed", { description: err?.message });
     } finally {
       setScanning(false);
     }
@@ -300,16 +290,41 @@ const Bookkeeping = () => {
 
       <ReceiptDetailDrawer receipt={selected} onClose={() => setSelected(null)} />
 
-      {receipts.length > 0 && (
-        <Section
-          eyebrow="Gallery"
-          title="Recent captures"
-          action={
+      {/* Always render the section. Hiding it when empty is the "void reads as
+          breakage" failure (empty-states.md #1) — the user can't tell the feature
+          exists, let alone that it's waiting on them. */}
+      <Section
+        eyebrow="Gallery"
+        title="Recent captures"
+        action={
+          receipts.length > 0 ? (
             <button onClick={() => receiptsQuery.refetch()} className="text-[11px] text-accent flex items-center gap-1">
               <RefreshCw className="w-3 h-3" /> Refresh
             </button>
-          }
-        >
+          ) : undefined
+        }
+      >
+        {receiptsQuery.isLoading ? (
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-16 rounded-2xl" />
+            ))}
+          </div>
+        ) : receipts.length === 0 ? (
+          <EmptyState
+            kind="first-run"
+            title="No receipts captured yet"
+            desc="Scan a receipt and PesaLens reads the vendor, amount and category straight off the photo."
+            action={
+              <button
+                onClick={() => fileRef.current?.click()}
+                className="inline-flex items-center gap-2 bg-gradient-accent text-primary-foreground rounded-full px-4 py-2.5 text-[13px] font-semibold press"
+              >
+                <Camera className="w-4 h-4" /> Scan a receipt
+              </button>
+            }
+          />
+        ) : (
           <div className="space-y-2">
             {receipts.slice(0, 12).map((r: any) => (
               <button
@@ -333,8 +348,8 @@ const Bookkeeping = () => {
               </button>
             ))}
           </div>
-        </Section>
-      )}
+        )}
+      </Section>
     </div>
   );
 };

@@ -21,6 +21,7 @@ import Upgrade from "@/pages/Upgrade";
 import ActionPlan from "@/pages/ActionPlan";
 import Profile from "@/pages/Profile";
 import Upload from "@/pages/Upload";
+import Admin from "@/pages/Admin";
 import Reconciliation from "@/pages/Reconciliation";
 import BackendSettings from "@/pages/BackendSettings";
 import Landing from "@/pages/Landing";
@@ -167,6 +168,7 @@ const App = () => {
             <Route path="/action-plan" element={<ActionPlan />} />
             <Route path="/upgrade" element={<Upgrade />} />
             <Route path="/profile" element={<Profile />} />
+            <Route path="/admin" element={<Admin />} />
             <Route path="/more" element={<More />} />
           </Route>
 

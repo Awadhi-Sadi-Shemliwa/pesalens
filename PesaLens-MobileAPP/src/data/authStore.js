@@ -21,6 +21,7 @@
 
 import { useEffect, useState } from 'react';
 import { Preferences } from '@capacitor/preferences';
+import { setActiveStatement } from './activeStatementStore';
 
 const REFRESH_KEY = 'pesalens.refresh';
 const LEGACY_ACCESS_KEY = 'pesalens.accessToken';
@@ -118,6 +119,9 @@ export const clearSession = () => {
   Preferences.remove({ key: REFRESH_KEY }).catch(() => {});
   Preferences.remove({ key: LAST_ACTIVE_KEY }).catch(() => {});
   safeWrite(USER_KEY, null);
+  // Drop the per-user active statement so a NEXT user in this WebView can't
+  // inherit a foreign job_id (which would 404 owner-checked endpoints).
+  setActiveStatement(null);
   broadcast();
 };
 

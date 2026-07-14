@@ -9,9 +9,14 @@ import {
   Lightbulb,
   Wallet,
 } from "lucide-react";
-import { CardSoft, Eyebrow, Section, Badge, Pill } from "@/components/pl/primitives";
+import { CardSoft, EmptyState, ErrorState, Eyebrow, Section, Badge, Segmented, Skeleton } from "@/components/pl/primitives";
 // @ts-ignore — JS module
-import { fetchReconciliation, fmtTZS, fmtTZSFull } from "@/data/api";
+import { fetchReconciliation, fetchStatementIndex, fmtTZS, fmtTZSFull } from "@/data/api";
+// @ts-ignore — JS module
+import { useActiveStatement } from "@/data/activeStatementStore";
+import { bankLabel } from "@/data/bankLabels";
+
+type ViewMode = "statement" | "general";
 
 /* ----------------------------------------------------------------------
    Reconciliation — mobile view of the cross-source reconciliation
@@ -41,6 +46,11 @@ type Group = {
   explained_amount: number;
   status: "fully_explained" | "partial" | "blind_spot";
   candidates: Candidate[];
+  // Provider + time-of-day of the statement debit, and why it was attributed
+  // to this service over a competing one.
+  bank?: string | null;
+  time?: string | null;
+  attribution_note?: string | null;
   insight?: string | null;
 };
 
@@ -76,6 +86,7 @@ type ReconcileData = {
   scope: Scope;
   kpis: Kpis;
   groups: Group[];
+  unmatched_candidates?: Candidate[];
   patterns?: Patterns | null;
   charges_summary?: ChargesSummary | null;
   overall_summary?: string | null;
@@ -103,6 +114,10 @@ const SOURCE_LABEL: Record<Candidate["source"], string> = {
   business: "Business",
 };
 
+// "NMB · 13:40", "NMB", "13:40", or null.
+const bankTimeLabel = (bank?: string | null, time?: string | null): string | null =>
+  [bankLabel(bank), time].filter(Boolean).join(" · ") || null;
+
 // Preset → first-of-month / last-of-month bounds.
 const presetRange = (preset: Preset): { start: string; end: string } => {
   const now = new Date();
@@ -124,15 +139,40 @@ const Reconciliation = () => {
   const [scope, setScope] = useState<Scope>("personal");
   const [openIdx, setOpenIdx] = useState<number | null>(null);
 
+  // ── Per-statement scoping (Epic-2) ────────────────────────────────────────
+  const [activeJobId] = useActiveStatement();
+  const [viewMode, setViewMode] = useState<ViewMode>("statement");
+  const statementsQuery = useQuery<any[]>({ queryKey: ["statements-index"], queryFn: fetchStatementIndex });
+  const statements: any[] = (statementsQuery.data as any[]) || [];
+  const showScope = statements.length > 0;
+  // Only trust the active statement if it's one of THIS user's statements (a
+  // stale id would 404 the owner-checked statement-mode reconcile). Fall back
+  // to the newest.
+  const effectiveJobId: string | null =
+    (activeJobId && statements.some((s) => s.job_id === activeJobId))
+      ? activeJobId
+      : (statements[0]?.job_id || null);
+  const activeStatement = statements.find((s) => s.job_id === effectiveJobId) || null;
+  const statementMode = showScope && viewMode === "statement" && !!effectiveJobId;
+
   const { start, end } = useMemo(() => presetRange(preset), [preset]);
 
   const query = useQuery({
-    queryKey: ["reconciliation", start, end, scope],
-    queryFn: () => fetchReconciliation(start, end, scope),
+    queryKey: ["reconciliation", start, end, scope, statementMode ? effectiveJobId : "general"],
+    queryFn: () => (statementMode
+      ? fetchReconciliation(start, end, scope, { mode: "statement", jobId: effectiveJobId })
+      : fetchReconciliation(start, end, scope, { mode: "general" })),
     staleTime: 60_000,
+    // Wait for the statement index so the first (LLM-backed) reconcile fires
+    // ONCE in the right mode, not general-then-statement.
+    enabled: statementsQuery.isFetched,
   });
 
   const data = (query.data as ReconcileData | undefined) || null;
+  // The reconcile query is disabled until the statement index resolves, so
+  // treat "not yet fetched" as busy — otherwise the empty state would flash
+  // before the first (correct-mode) reconcile fires.
+  const busy = query.isLoading || !statementsQuery.isFetched;
   const kpis = data?.kpis;
   const groups = data?.groups || [];
   const patterns = data?.patterns || null;
@@ -146,8 +186,22 @@ const Reconciliation = () => {
       .sort((a, b) => (b.date || "").localeCompare(a.date || "")),
     [groups],
   );
-  const receiptTotal = candidates.filter((c) => c.source === "receipt").reduce((s, c) => s + (Number(c.amount) || 0), 0);
-  const entryTotal = candidates.filter((c) => c.source !== "receipt").reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  // Receipts / entries with no statement debit to pair against — still shown in
+  // the ledger (tagged unmatched) so a scanned receipt is always visible here.
+  const unmatched = data?.unmatched_candidates || [];
+  const ledgerItems = useMemo(
+    () => [
+      ...candidates.map((c) => ({ ...c, matched: true })),
+      ...unmatched.map((c) => ({ ...c, matched: false })),
+    ].sort((a, b) => (b.date || "").localeCompare(a.date || "")),
+    [candidates, unmatched],
+  );
+  // "Your records" must equal the ledger rows shown below — sum over
+  // ledgerItems (matched + unmatched), not just matched candidates, so the
+  // Recorded figure never contradicts the visible receipts. Blind-spot math
+  // uses kpis.total_explained and is unaffected.
+  const receiptTotal = ledgerItems.filter((c) => c.source === "receipt").reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const entryTotal = ledgerItems.filter((c) => c.source !== "receipt").reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const recorded = receiptTotal + entryTotal;
   const moneyOut = kpis?.total_money_out || 0;
   const explained = kpis?.total_explained || 0;
@@ -164,16 +218,52 @@ const Reconciliation = () => {
         </p>
       </div>
 
-      {/* Preset chips + scope toggle ---------------------------------- */}
-      <div className="flex items-center gap-1.5 overflow-x-auto -mx-1 px-1">
-        <Pill active={preset === "this"} onClick={() => setPreset("this")}>This month</Pill>
-        <Pill active={preset === "last"} onClick={() => setPreset("last")}>Last month</Pill>
-        <Pill active={preset === "3mo"}  onClick={() => setPreset("3mo")}>Last 3 months</Pill>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <Pill active={scope === "personal"} onClick={() => setScope("personal")}>Personal</Pill>
-        <Pill active={scope === "business"} onClick={() => setScope("business")}>Business</Pill>
-      </div>
+      {/* View: a single statement (its own period) vs a general date range. */}
+      {showScope && (
+        <Segmented<ViewMode>
+          label="Reconciliation view"
+          value={viewMode}
+          onChange={setViewMode}
+          className="w-full"
+          options={[
+            { key: "statement", label: "This statement" },
+            { key: "general", label: "General" },
+          ]}
+        />
+      )}
+      {statementMode ? (
+        <div className="flex items-center gap-2">
+          <Badge tone="net">{bankLabel(activeStatement?.bank) || "Statement"}</Badge>
+          {activeStatement?.period_end && (
+            <span className="text-[11px] text-txt-3 font-mono-tab truncate">
+              {activeStatement.period_start || "—"} → {activeStatement.period_end}
+            </span>
+          )}
+        </div>
+      ) : (
+        /* Both are exclusive facets under five options, so each collapses into a
+           segmented control rather than a chip row (tabs.md #10). */
+        <Segmented<Preset>
+          label="Date range"
+          value={preset}
+          onChange={setPreset}
+          className="w-full"
+          options={[
+            { key: "this", label: "This month" },
+            { key: "last", label: "Last month" },
+            { key: "3mo", label: "Last 3 months" },
+          ]}
+        />
+      )}
+      <Segmented<Scope>
+        label="Ledger scope"
+        value={scope}
+        onChange={setScope}
+        options={[
+          { key: "personal", label: "Personal" },
+          { key: "business", label: "Business" },
+        ]}
+      />
 
       {/* Notes / LLM banner ------------------------------------------ */}
       {data?.notes?.length ? (
@@ -195,9 +285,14 @@ const Reconciliation = () => {
       )}
 
       {query.isError && (
-        <div className="rounded-xl border border-dng/30 bg-dng/10 text-dng px-3 py-2 text-[12px]">
-          Could not load reconciliation. Pull to retry.
-        </div>
+        <ErrorState
+          title="Couldn't load reconciliation"
+          cause="We couldn't match your statement against your ledger. Retry, or widen the date range."
+          timestamp={Date.now()}
+          onRetry={() => query.refetch()}
+          retryLabel="Retry"
+          retryDisabled={query.isFetching}
+        />
       )}
 
       {/* Balance equations — Ledger vs Statement --------------------- */}
@@ -262,13 +357,31 @@ const Reconciliation = () => {
 
       {/* Statement — money out (tap to see what explains it) --------- */}
       <Section eyebrow="Statement · money out" title="Tap a row to see its matches">
-        {query.isLoading && (
-          <CardSoft className="!p-4 text-center text-[12px] text-txt-3">Loading…</CardSoft>
+        {busy && (
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-16 rounded-2xl" />
+            ))}
+          </div>
         )}
-        {!query.isLoading && groups.length === 0 && (
-          <CardSoft className="!p-4 text-center text-[12px] text-txt-3">
-            No outflows in this range. Upload a statement that covers it, or pick a wider range.
-          </CardSoft>
+        {/* A date range that matched nothing must hand back an exit, not strand the
+           user in their own dead-end query (empty-states.md #8). */}
+        {!busy && !query.isError && groups.length === 0 && (
+          <EmptyState
+            kind="no-results"
+            title="No outflows in this range"
+            desc="Nothing was paid out between these dates. Widen the range, or upload a statement that covers it."
+            action={
+              preset !== "3mo" ? (
+                <button
+                  onClick={() => setPreset("3mo")}
+                  className="rounded-full border border-border px-4 py-2 text-[13px] font-semibold text-txt-1 press"
+                >
+                  Widen to 3 months
+                </button>
+              ) : undefined
+            }
+          />
         )}
         <div className="space-y-2">
           {groups.map((g, idx) => (
@@ -283,11 +396,11 @@ const Reconciliation = () => {
       </Section>
 
       {/* Ledger — receipts & entries --------------------------------- */}
-      {candidates.length > 0 && (
-        <Section eyebrow="Ledger · receipts & entries" title={`${candidates.length} backing items`}>
+      {ledgerItems.length > 0 && (
+        <Section eyebrow="Ledger · receipts & entries" title={`${ledgerItems.length} backing items`}>
           <div className="card-soft !p-0 overflow-hidden">
-            {candidates.map((c, i) => (
-              <div key={`${c.source}-${c.ref_id || i}`} className="flex items-center gap-3 px-4 py-2.5 border-b border-border/30 last:border-0">
+            {ledgerItems.map((c, i) => (
+              <div key={`${c.source}-${c.ref_id || i}-${c.matched ? "m" : "u"}`} className="flex items-center gap-3 px-4 py-2.5 border-b border-border/30 last:border-0">
                 <span className="text-[10px] font-mono-tab uppercase tracking-wider text-txt-3 w-12 shrink-0">
                   {(c.date || "—").slice(5) || "—"}
                 </span>
@@ -298,6 +411,9 @@ const Reconciliation = () => {
                     {SOURCE_LABEL[c.source]}{c.date_inferred ? " · scan date" : ""}
                   </div>
                 </div>
+                <span className={`text-[8.5px] font-mono-tab uppercase tracking-wider px-1.5 py-0.5 rounded-full shrink-0 ${c.matched ? "bg-inc/12 text-inc" : "bg-txt-4/12 text-txt-3"}`}>
+                  {c.matched ? "Matched" : "Unmatched"}
+                </span>
                 <span className="text-[12.5px] font-semibold tabular text-txt-1 shrink-0">{fmtTZS(c.amount)}</span>
               </div>
             ))}
@@ -368,7 +484,14 @@ const GroupCard = ({ g, open, onToggle }: { g: Group; open: boolean; onToggle: (
           <div className="text-[12.5px] font-semibold truncate">
             {KIND_LABEL[g.kind]} · {fmtTZS(g.debit_amount)}
           </div>
-          <div className="text-[10.5px] text-txt-3 truncate">{g.description}</div>
+          <div className="text-[10.5px] text-txt-3 truncate">
+            {bankTimeLabel(g.bank, g.time) && (
+              <span className="text-accent font-mono-tab uppercase tracking-wider mr-1.5">
+                {bankTimeLabel(g.bank, g.time)}
+              </span>
+            )}
+            {g.description}
+          </div>
         </div>
         <Badge tone={status.tone}>{status.label}</Badge>
         {open ? <ChevronDown className="w-3.5 h-3.5 text-txt-3 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-txt-3 shrink-0" />}
@@ -404,6 +527,11 @@ const GroupCard = ({ g, open, onToggle }: { g: Group; open: boolean; onToggle: (
                 </li>
               ))}
             </ul>
+          )}
+          {g.attribution_note && (
+            <div className="text-[11.5px] text-txt-2 border-l-2 border-net/40 pl-2.5 py-0.5">
+              {g.attribution_note}
+            </div>
           )}
           {g.insight && (
             <div className="text-[11.5px] italic text-txt-1 border-l-2 border-accent/40 pl-2.5 py-0.5">
@@ -448,13 +576,16 @@ const ChargesCard = ({ summary }: { summary: ChargesSummary }) => {
 
       {hasAny ? (
         <>
-          <div className="flex gap-1.5 px-3 pt-2.5">
-            <Pill active={tab === "charges"} onClick={() => setTab("charges")}>
-              Charges ({summary.charges?.length || 0})
-            </Pill>
-            <Pill active={tab === "interest"} onClick={() => setTab("interest")}>
-              Interest ({summary.interest?.length || 0})
-            </Pill>
+          <div className="px-3 pt-2.5">
+            <Segmented<"charges" | "interest">
+              label="Charges or interest"
+              value={tab}
+              onChange={setTab}
+              options={[
+                { key: "charges", label: `Charges (${summary.charges?.length || 0})` },
+                { key: "interest", label: `Interest (${summary.interest?.length || 0})` },
+              ]}
+            />
           </div>
           {items.length === 0 ? (
             <div className="px-4 py-5 text-center text-[11.5px] text-txt-3">None in this range.</div>

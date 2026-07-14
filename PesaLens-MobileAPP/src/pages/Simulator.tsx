@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Shield, TrendingUp, Zap, Wallet, LineChart as LineIcon } from "lucide-react";
 import {
@@ -11,7 +12,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Badge, Bento, CardSoft, Eyebrow, GlassCard, Pill, Section, Tilt } from "@/components/pl/primitives";
+import { Badge, Bento, CardSoft, Eyebrow, GlassCard, Pill, Section, Skeleton, Tilt } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
 import { fetchDashboardSummary, fetchMarketSnapshot, fmtTZS, fmtTZSFull } from "@/data/api";
 // @ts-ignore — JS modules
@@ -82,7 +83,7 @@ const ProjectionChart = ({ monthly, annual, drawdown }: { monthly: number; annua
   const compact = (n: number) => (Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : Math.abs(n) >= 1e3 ? `${Math.round(n / 1e3)}K` : String(Math.round(n)));
 
   return (
-    <div className="h-52 -mx-1">
+    <div className="h-52 -mx-1" role="img" aria-label="Projected investment value versus money invested over time">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={rows} margin={{ top: 6, right: 6, bottom: 0, left: 0 }}>
           <defs>
@@ -120,8 +121,9 @@ const ProjectionChart = ({ monthly, annual, drawdown }: { monthly: number; annua
 };
 
 const Simulator = () => {
-  const summaryQuery = useQuery({ queryKey: ["dashboard-summary"], queryFn: fetchDashboardSummary });
-  const marketsQuery = useQuery({ queryKey: ["markets-all"], queryFn: fetchMarketSnapshot, refetchInterval: 5 * 60 * 1000 });
+  const navigate = useNavigate();
+  const summaryQuery = useQuery({ queryKey: ["dashboard-summary"], queryFn: () => fetchDashboardSummary() });
+  const marketsQuery = useQuery({ queryKey: ["markets-all"], queryFn: () => fetchMarketSnapshot(), refetchInterval: 5 * 60 * 1000 });
 
   const summary = summaryQuery.data || null;
   const snapshot = marketsQuery.data || null;
@@ -133,6 +135,15 @@ const Simulator = () => {
   const [tierId, setTierId] = useState<TierId>(recommended.id);
   const [categoryId, setCategoryId] = useState<CategoryId>("stocks");
   const [assetId, setAssetId] = useState<string | null>(null);
+
+  // The initial recommendation is computed from an empty summary (still loading)
+  // and always resolves to "safe". Once the real summary arrives, re-sync the
+  // pre-selected tier to the fresh recommendation — but never override a tier the
+  // user has actively chosen.
+  const tierTouched = useRef(false);
+  useEffect(() => {
+    if (!tierTouched.current) setTierId(recommended.id);
+  }, [recommended.id]);
 
   const monthly = cap.capacity[tierId] || 0;
   const surplus = cap.flow.monthlySurplus || 0;
@@ -159,7 +170,7 @@ const Simulator = () => {
   );
   const sim = useMemo(() => (activeAsset ? simulateInvestment({ summary, asset: activeAsset, monthly }) : null), [summary, activeAsset, monthly]);
 
-  const hasStatement = !!summary && !!(summary as any).upload_count;
+  const hasStatement = !!summary && (!!(summary as any).latest_upload || !!(summary as any).upload_count);
 
   return (
     <div className="px-4 py-4 space-y-5">
@@ -181,7 +192,7 @@ const Simulator = () => {
               The simulator reads your real cash flow to work out what you can safely invest. Add a statement and it lights up.
             </p>
             <button
-              onClick={() => { window.location.hash = "#/upload"; }}
+              onClick={() => navigate("/upload")}
               className="mt-4 bg-accent text-white px-4 py-2.5 rounded-xl text-[13px] font-semibold ios-press"
             >
               Upload statement
@@ -224,7 +235,7 @@ const Simulator = () => {
                 return (
                   <Tilt key={id} max={5}>
                     <button
-                      onClick={() => setTierId(id)}
+                      onClick={() => { tierTouched.current = true; setTierId(id); }}
                       className={`w-full card-soft !p-3.5 flex items-center gap-3 text-left transition-colors ${active ? "border-accent/50 bg-accent/5" : ""}`}
                     >
                       <div className={`w-10 h-10 rounded-md flex items-center justify-center font-mono-tab text-[10px] font-bold ${active ? "bg-accent/15 text-accent" : "bg-surface-3 text-txt-3"}`}>
@@ -265,9 +276,12 @@ const Simulator = () => {
               })}
             </div>
             <div className="flex gap-2 overflow-x-auto scroll-hide -mx-1 px-1 mt-3">
-              {assetsForCat.length === 0 && (
+              {/* Inline strip: skeleton pills match the shape of the real pills (§81). */}
+              {marketsQuery.isLoading &&
+                Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-8 w-24 shrink-0 rounded-full" />)}
+              {!marketsQuery.isLoading && assetsForCat.length === 0 && (
                 <span className="text-[11px] font-mono-tab text-txt-3 px-1">
-                  {marketsQuery.isLoading ? "Loading assets…" : "No assets in this category yet."}
+                  No assets cached in this category yet.
                 </span>
               )}
               {assetsForCat.map((a: any) => (

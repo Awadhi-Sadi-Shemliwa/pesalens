@@ -1,21 +1,33 @@
 import { useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Camera, Plus, Trash2, X, Wallet, Receipt as ReceiptIcon, ArrowDownRight,
   ShoppingCart, Car, UtensilsCrossed, Zap, HeartPulse, Home, Clapperboard, ChevronRight,
+  ScanLine, CheckCircle2,
 } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { Badge, Bento, CardSoft, Eyebrow, Pill, Section, Tilt } from "@/components/pl/primitives";
+import { toast } from "sonner";
+import { Badge, Bento, Button, CardSoft, ChipRow, EmptyState, Eyebrow, Pill, Section, Segmented, Sheet, Skeleton, Tilt, ProgressBar, ErrorState } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
 import {
   createPersonalEntry,
   deletePersonalEntry,
   fetchPersonalEntries,
   fetchReceipts,
+  fetchStatementIndex,
   fmtTZS,
   fmtTZSFull,
   scanReceipt,
 } from "@/data/api";
+// @ts-ignore — JS module
+import { useActiveStatement } from "@/data/activeStatementStore";
+import { bankLabel as sharedBankLabel } from "@/data/bankLabels";
+
+const bankLabel = (b?: string | null): string => sharedBankLabel(b, "Statement") as string;
+const isoDaysAgo = (n: number): string => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+const todayIso = (): string => new Date().toISOString().slice(0, 10);
+type ViewMode = "statement" | "general";
 
 const CATEGORIES = [
   "Groceries",
@@ -86,6 +98,11 @@ const formatEntryDate = (raw: any) => {
 
 type Direction = "income" | "expense";
 
+type ScanFailure = { message: string; code?: string; timestamp?: number };
+type ScanJob =
+  | { phase: "scanning" | "done" | "failed"; file?: File | null; vendor?: string; total?: number; failure?: ScanFailure }
+  | null;
+
 // Bottom-sheet detail drawer for a personal-spending row. Mirrors the
 // TxnDetailDrawer in Analysis.tsx so the interaction feels identical. When
 // the row comes from a scanned receipt (source === "receipt") the drawer
@@ -97,49 +114,34 @@ const EntryDetailDrawer = ({
   entry: any | null;
   onClose: () => void;
 }) => {
-  if (!entry) return null;
-  const isInc = entry.direction === "income";
-  const isReceipt = entry.source === "receipt";
-  const items: any[] = isReceipt && Array.isArray(entry.receipt?.items) ? entry.receipt.items : [];
-  const amount = Number(entry.amount) || 0;
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 ios-press"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-[440px] bg-surface-2 rounded-t-3xl border-t border-border max-h-[85vh] overflow-y-auto pb-safe shadow-2xl"
-      >
-        <div className="sticky top-0 bg-surface-2 px-5 pt-4 pb-3 flex items-center justify-between border-b border-border/50">
-          <div className="text-[13px] font-semibold text-txt-3 uppercase tracking-wide">
-            {isReceipt ? "Receipt Detail" : "Entry Detail"}
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close"
-            className="w-9 h-9 rounded-full bg-surface-3 flex items-center justify-center text-txt-2 active:bg-surface-4 ios-press"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+  /* Retain the last entry so the sheet still has content while it animates out. */
+  const lastRef = useRef<any>(entry);
+  if (entry) lastRef.current = entry;
+  const en = lastRef.current;
 
-        <div className="px-5 py-5 space-y-5">
+  if (!en) return null;
+  const isInc = en.direction === "income";
+  const isReceipt = en.source === "receipt";
+  const items: any[] = isReceipt && Array.isArray(en.receipt?.items) ? en.receipt.items : [];
+  const amount = Number(en.amount) || 0;
+  return (
+    <Sheet open={!!entry} onClose={onClose} eyebrow={isReceipt ? "Receipt detail" : "Entry detail"}>
+        <div className="space-y-5">
           <div className="bg-surface-3/50 rounded-2xl p-4">
             <div className="text-[12px] font-mono-tab text-txt-3 tabular tracking-wider mb-2">
-              {formatEntryDate(entry.entry_date)}
+              {formatEntryDate(en.entry_date)}
             </div>
             <div className="text-[18px] font-semibold mt-1.5 break-words leading-snug">
-              {entry.vendor || entry.category || "—"}
+              {en.vendor || en.category || "—"}
             </div>
-            {entry.description && !isReceipt && (
+            {en.description && !isReceipt && (
               <div className="text-[13px] text-txt-2 mt-1.5 break-words leading-snug">
-                {entry.description}
+                {en.description}
               </div>
             )}
             <div className="mt-3 flex items-center gap-2.5 flex-wrap">
               <Badge tone={isInc ? "inc" : "exp"}>{isInc ? "Income" : "Expense"}</Badge>
-              {entry.category && <Badge tone="muted">{entry.category}</Badge>}
+              {en.category && <Badge tone="muted">{en.category}</Badge>}
               {isReceipt && <Badge tone="accent">Receipt</Badge>}
             </div>
           </div>
@@ -195,8 +197,7 @@ const EntryDetailDrawer = ({
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Sheet>
   );
 };
 
@@ -240,7 +241,7 @@ const SegBar = ({ data, total }: { data: { name: string; value: number }[]; tota
 
 /* Daily-spend area chart (recharts, theme-aware). */
 const SpendTrend = ({ series }: { series: { key: string; value: number }[] }) => (
-  <div className="h-40 -mx-1">
+  <div className="h-40 -mx-1" role="img" aria-label="Daily spending trend">
     <ResponsiveContainer width="100%" height="100%">
       <AreaChart data={series} margin={{ top: 6, right: 6, bottom: 0, left: 0 }}>
         <defs>
@@ -282,7 +283,12 @@ const PersonalSpending = () => {
   const [showForm, setShowForm] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [scanning, setScanning] = useState(false);
+  // Honest scan job state drives a prominent overlay: scanning → done, or a
+  // classified failure with a reason + retry. `scanning` is derived so existing
+  // disabled checks keep working unchanged.
+  const [scanJob, setScanJob] = useState<ScanJob>(null);
+  const scanning = scanJob?.phase === "scanning";
+  const reduce = useReducedMotion();
   const [selected, setSelected] = useState<any | null>(null);
   const [form, setForm] = useState({
     entry_date: new Date().toISOString().slice(0, 10),
@@ -293,9 +299,36 @@ const PersonalSpending = () => {
     direction: "expense" as Direction,
   });
 
-  const entriesQuery = useQuery({ queryKey: ["personal-entries"], queryFn: fetchPersonalEntries });
+  // ── Per-statement scoping (Epic-2) ────────────────────────────────────────
+  const [activeJobId] = useActiveStatement();
+  const [viewMode, setViewMode] = useState<ViewMode>("statement");
+  const [genStart, setGenStart] = useState(isoDaysAgo(90));
+  const [genEnd, setGenEnd] = useState(todayIso());
+  const statementsQuery = useQuery<any[]>({ queryKey: ["statements-index"], queryFn: fetchStatementIndex });
+  const statements: any[] = (statementsQuery.data as any[]) || [];
+  const showScope = statements.length > 0;
+  // Only trust the active statement if it's one of THIS user's statements (a
+  // stale id would scope to a foreign job). Fall back to the newest.
+  const effectiveJobId: string | null =
+    (activeJobId && statements.some((s) => s.job_id === activeJobId))
+      ? activeJobId
+      : (statements[0]?.job_id || null);
+  const activeStatement = statements.find((s) => s.job_id === effectiveJobId) || null;
+  const scopeOpts = useMemo(() => {
+    if (!showScope) return {};
+    if (viewMode === "general") return { scope: "general", start: genStart, end: genEnd };
+    if (effectiveJobId) return { scope: "statement", jobId: effectiveJobId };
+    return {};
+  }, [showScope, viewMode, effectiveJobId, genStart, genEnd]);
+  const scopeKey = JSON.stringify(scopeOpts);
+
+  // Gate the ledger fetches until the statement index has resolved so the FIRST
+  // request already carries the right scope — otherwise we'd fetch unscoped
+  // (statements still empty) then immediately refetch scoped.
+  const scopeReady = statementsQuery.isFetched;
+  const entriesQuery = useQuery({ queryKey: ["personal-entries", scopeKey], queryFn: () => fetchPersonalEntries(scopeOpts), enabled: scopeReady });
   const entries: any[] = (entriesQuery.data as any[]) || [];
-  const receiptsQuery = useQuery({ queryKey: ["receipts"], queryFn: fetchReceipts });
+  const receiptsQuery = useQuery({ queryKey: ["receipts", scopeKey], queryFn: () => fetchReceipts(scopeOpts), enabled: scopeReady });
   const receipts: any[] = (receiptsQuery.data as any[]) || [];
 
   const create = useMutation({
@@ -304,24 +337,46 @@ const PersonalSpending = () => {
       queryClient.invalidateQueries({ queryKey: ["personal-entries"] });
       setShowForm(false);
       setForm({ ...form, vendor: "", description: "", amount: "" });
+      toast.success("Entry saved");
     },
-    onError: (err: any) => setError(err?.message || "Could not save entry."),
+    onError: (err: any) => {
+      setError(err?.message || "Could not save entry.");
+      toast.error(err?.message || "Could not save entry.");
+    },
   });
 
   const remove = useMutation({
     mutationFn: (id: number) => deletePersonalEntry(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["personal-entries"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["personal-entries"] });
+      toast.success("Entry deleted");
+    },
+    onError: (err: any) => toast.error(err?.message || "Could not delete entry."),
   });
 
   const handleScan = async (file: File | null) => {
     if (!file) return;
-    setScanning(true);
     setError(null);
     setNotice(null);
+    setScanJob({ phase: "scanning", file });
     try {
-      const data = await scanReceipt(file);
+      // Associate the receipt with the statement in focus (or newest in General).
+      const data = await scanReceipt(file, { statementJobId: effectiveJobId });
       if (data?.is_receipt === false) {
-        setError(data.message || "That image is not a receipt.");
+        // The backend returns 200 + is_receipt:false for TWO reasons: the model
+        // saw a non-receipt image (carries image_description), or every vision
+        // model was busy/failed (message only). Surface either prominently with
+        // the right next step — retrying a non-receipt is pointless.
+        const notReceipt = !!data.image_description;
+        setScanJob({
+          phase: "failed", file,
+          failure: {
+            message: data.message || "That image is not a receipt.",
+            code: notReceipt ? "not_receipt" : "vision_unavailable",
+            timestamp: Date.now(),
+          },
+        });
+        toast.warning(data.message || "That image is not a receipt.");
         return;
       }
       const amount = Number(data.total) || 0;
@@ -331,17 +386,34 @@ const PersonalSpending = () => {
       // twice. Just refresh the receipts query and let it flow through.
       queryClient.invalidateQueries({ queryKey: ["receipts"] });
       queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
-      const vendorLabel = data.vendor ? ` from ${data.vendor}` : "";
-      setNotice(
-        amount > 0
-          ? `Saved ${fmtTZSFull(amount)}${vendorLabel}.`
-          : `Saved receipt${vendorLabel} (no total detected).`
-      );
+      setScanJob({ phase: "done", file, vendor: data.vendor, total: amount });
+      toast.success("Receipt captured");
+      setTimeout(() => setScanJob((j) => (j?.phase === "done" ? null : j)), 1400);
     } catch (err: any) {
-      setError(err?.message || "Receipt scan failed.");
-    } finally {
-      setScanning(false);
+      setScanJob({
+        phase: "failed", file,
+        failure: {
+          message: err?.message || "Receipt scan failed.",
+          code: err?.code || "scan_error",
+          timestamp: Date.now(),
+        },
+      });
+      toast.error(err?.message || "Receipt scan failed.");
     }
+  };
+
+  // Retry from the failure overlay: re-scan the same image for transient
+  // failures; for a "not a receipt" verdict, re-open the picker so the user can
+  // choose a different image (re-scanning the same one would just fail again).
+  const retryScan = () => {
+    const job = scanJob;
+    if (!job?.file) { setScanJob(null); return; }
+    if (job.failure?.code === "not_receipt") {
+      setScanJob(null);
+      fileRef.current?.click();
+      return;
+    }
+    handleScan(job.file);
   };
 
   // Project scanned receipts into the same shape personal entries use so
@@ -379,6 +451,15 @@ const PersonalSpending = () => {
   }, [receiptEntries, entries]);
 
   const filtered = filter ? allEntries.filter((e: any) => e.category === filter) : allEntries;
+
+  /* How many entries sit behind each category chip. A chip with none is rendered
+     disabled rather than dropped, so the option set does not reshuffle under the
+     thumb every time the filter changes (filter-chips.md #1). */
+  const categoryCounts = useMemo(() => {
+    const by: Record<string, number> = {};
+    for (const e of allEntries) by[e.category] = (by[e.category] || 0) + 1;
+    return by;
+  }, [allEntries]);
 
   /* ---- Derived analytics (real data; expenses drive the breakdown) ---- */
   const expenses = useMemo(() => allEntries.filter((e: any) => e.direction !== "income"), [allEntries]);
@@ -437,6 +518,42 @@ const PersonalSpending = () => {
         <h1 className="text-[22px] font-bold tracking-tight mt-1">Daily ledger</h1>
         <p className="text-[13px] text-txt-3 mt-1">Track cash, daladala, tips, street vendors — anything not on a bank statement.</p>
       </div>
+
+      {/* Scope — this statement vs a general window (Epic-2) */}
+      {showScope && (
+        <div className="space-y-2.5">
+          <Segmented<ViewMode>
+            label="Ledger scope"
+            value={viewMode}
+            onChange={setViewMode}
+            className="w-full"
+            options={[
+              { key: "statement", label: "This statement" },
+              { key: "general", label: "General" },
+            ]}
+          />
+          {viewMode === "statement" && activeStatement ? (
+            <div className="flex items-center gap-2">
+              <Badge tone="net">{bankLabel(activeStatement.bank)}</Badge>
+              {activeStatement.period_end && (
+                <span className="text-[11px] text-txt-3 font-mono-tab truncate">
+                  {activeStatement.period_start || "—"} → {activeStatement.period_end}
+                </span>
+              )}
+            </div>
+          ) : viewMode === "general" ? (
+            <div className="flex items-center gap-2">
+              <input type="date" value={genStart} max={genEnd}
+                onChange={(e) => setGenStart(e.target.value)}
+                className="flex-1 bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-[12px] text-txt-1" />
+              <span className="text-[11px] text-txt-3">to</span>
+              <input type="date" value={genEnd} min={genStart} max={todayIso()}
+                onChange={(e) => setGenEnd(e.target.value)}
+                className="flex-1 bg-surface-2 border border-border rounded-lg px-2.5 py-1.5 text-[12px] text-txt-1" />
+            </div>
+          ) : null}
+        </div>
+      )}
 
       {/* Overview — gradient headline tiles */}
       <div className="grid grid-cols-3 gap-2.5">
@@ -553,11 +670,6 @@ const PersonalSpending = () => {
         </Bento>
       )}
 
-      {scanning && (
-        <div className="text-[12px] text-txt-2 bg-surface-3 border border-border rounded-lg px-3 py-2">
-          Scanning receipt…
-        </div>
-      )}
       {notice && !scanning && (
         <div className="text-[12px] text-inc bg-inc/10 border border-inc/30 rounded-lg px-3 py-2">{notice}</div>
       )}
@@ -617,7 +729,10 @@ const PersonalSpending = () => {
                 <option value="income">Income</option>
               </select>
             </div>
-            <button
+            <Button
+              block
+              loading={create.isPending}
+              loadingLabel="Saving…"
               onClick={() => {
                 const amount = Number(form.amount);
                 if (!Number.isFinite(amount) || amount <= 0) {
@@ -632,36 +747,83 @@ const PersonalSpending = () => {
                   description: form.description || null,
                   amount,
                   direction: form.direction,
+                  statement_job_id: effectiveJobId || undefined,
                 });
               }}
-              disabled={create.isPending}
-              className="w-full bg-gradient-accent text-white py-2.5 rounded-lg text-[13px] font-semibold disabled:opacity-60"
             >
-              {create.isPending ? "Saving…" : "Save entry"}
-            </button>
+              Save entry
+            </Button>
           </div>
         </CardSoft>
       )}
 
       {/* Transactions */}
       <Section eyebrow="Transactions" title={`${allEntries.length} recorded`}>
-        <div className="flex gap-2 overflow-x-auto scroll-hide -mx-1 px-1 pb-1">
+        {/* The count recomputes on the same frame as the tap, so a toggle always
+            has a visible consequence (filter-chips.md #4–#5). */}
+        <ChipRow
+          className="-mx-1 px-1 pb-1"
+          activeCount={filter ? 1 : 0}
+          onClear={() => setFilter(null)}
+          resultCount={filtered.length}
+          resultNoun={filtered.length === 1 ? "transaction" : "transactions"}
+        >
           <Pill active={filter === null} onClick={() => setFilter(null)}>All</Pill>
           {CATEGORIES.map((c) => (
-            <Pill key={c} active={filter === c} onClick={() => setFilter(c)}>{c}</Pill>
+            <Pill
+              key={c}
+              active={filter === c}
+              disabled={!categoryCounts[c]}
+              count={categoryCounts[c] || 0}
+              onClick={() => setFilter(c)}
+            >
+              {c}
+            </Pill>
           ))}
-        </div>
+        </ChipRow>
 
-        {entriesQuery.isLoading || receiptsQuery.isLoading ? (
+        {!scopeReady || entriesQuery.isLoading || receiptsQuery.isLoading ? (
           <div className="space-y-2 mt-2">
             {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="card-soft h-14 animate-pulse" />
+              <Skeleton key={i} className="h-14 rounded-2xl" />
             ))}
           </div>
         ) : dayGroups.length === 0 ? (
-          <CardSoft className="text-center !py-6 mt-2">
-            <p className="text-[12px] text-txt-3">No entries yet. Tap + to add one.</p>
-          </CardSoft>
+          /* A category filter hiding everything is a different screen from a
+             genuinely empty list (empty-states.md #7, #9). */
+          allEntries.length > 0 ? (
+            <EmptyState
+              kind="filtered"
+              title="Hidden by filters"
+              hiddenCount={allEntries.length}
+              action={
+                <button
+                  onClick={() => setFilter(null)}
+                  className="rounded-full border border-border px-4 py-2 text-[13px] font-semibold text-txt-1 press"
+                >
+                  Reset filters
+                </button>
+              }
+            />
+          ) : (
+            <EmptyState
+              kind="first-run"
+              title={showScope && viewMode === "statement" && activeStatement
+                ? "0 — nothing recorded yet for this statement"
+                : "No spending tracked yet"}
+              desc={showScope && viewMode === "statement" && activeStatement
+                ? `No receipts or entries are tagged to ${bankLabel(activeStatement.bank)} yet. Scan a receipt or add an entry — it’ll be linked to this statement.`
+                : "Add an expense or scan a receipt — PesaLens will categorise it and watch for leaks."}
+              action={
+                <button
+                  onClick={() => setShowForm(true)}
+                  className="inline-flex items-center gap-2 bg-gradient-accent text-primary-foreground rounded-full px-4 py-2.5 text-[13px] font-semibold press"
+                >
+                  <Plus className="w-4 h-4" /> Add an expense
+                </button>
+              }
+            />
+          )
         ) : (
           <div className="card-soft !p-0 overflow-hidden mt-2">
             {dayGroups.map((grp) => (
@@ -708,6 +870,82 @@ const PersonalSpending = () => {
       </Section>
 
       <EntryDetailDrawer entry={selected} onClose={() => setSelected(null)} />
+
+      {/* Receipt-scan overlay — HONEST feedback: blocks the surface so a second
+          scan can't fire, shows indeterminate progress, then a decisive result
+          or a classified failure with retry (design corpus §84–89). Only a
+          failed state is dismissable; the 90s client timeout is the escape
+          hatch while scanning, never a second upload. */}
+      <AnimatePresence>
+        {scanJob && (
+          <motion.div
+            className="fixed inset-0 z-50 flex items-center justify-center px-6"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+          >
+            <div
+              className="absolute inset-0 bg-deep/85 backdrop-blur-2xl"
+              onClick={() => { if (scanJob.phase === "failed") setScanJob(null); }}
+            />
+            <motion.div
+              className="relative w-full max-w-[360px] rounded-3xl glass-pane p-6 grain-bg overflow-hidden"
+              initial={{ scale: 0.92, opacity: 0, y: 12 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.94, opacity: 0 }}
+              transition={{ type: "spring", stiffness: 280, damping: 26 }}
+            >
+              {scanJob.phase === "failed" ? (
+                <ErrorState
+                  title={scanJob.failure?.code === "not_receipt" ? "That’s not a receipt" : "Scan didn’t finish"}
+                  cause={scanJob.failure?.message}
+                  code={scanJob.failure?.code}
+                  timestamp={scanJob.failure?.timestamp}
+                  onRetry={retryScan}
+                  retryLabel={scanJob.failure?.code === "not_receipt" ? "Choose another image" : "Try again"}
+                />
+              ) : scanJob.phase === "done" ? (
+                <div className="flex flex-col items-center text-center py-2">
+                  <div className="p-3 rounded-2xl bg-inc/15 mb-3">
+                    <CheckCircle2 className="w-8 h-8 text-inc" />
+                  </div>
+                  <div className="text-[15px] font-semibold text-txt-1">Receipt captured</div>
+                  <div className="text-[12px] text-txt-3 mt-1">
+                    {scanJob.vendor || "Saved"}{scanJob.total ? ` · ${fmtTZSFull(scanJob.total)}` : ""}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="relative mx-auto mb-5 h-32 w-24 rounded-xl border border-accent/30 bg-surface-2/60 overflow-hidden">
+                    <div className="absolute inset-0 flex items-center justify-center text-accent/70">
+                      <ReceiptIcon className="w-10 h-10" strokeWidth={1.5} />
+                    </div>
+                    {!reduce && <div className="scan-line" />}
+                    <div className="absolute inset-x-2 top-2 flex flex-col gap-1.5 opacity-60">
+                      <div className="h-1 rounded-full bg-accent/30" />
+                      <div className="h-1 rounded-full bg-accent/20 w-3/4" />
+                      <div className="h-1 rounded-full bg-accent/20 w-1/2" />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 justify-center mb-3">
+                    <ScanLine className="w-3.5 h-3.5 text-accent animate-pulse-dot" />
+                    <span className="text-[10px] uppercase tracking-ticker font-mono-tab text-txt-3">
+                      Pesalens · Vision AI
+                    </span>
+                  </div>
+                  <ProgressBar
+                    indeterminate
+                    tone="accent"
+                    label="Reading your receipt"
+                    sublabel="This can take a moment — free-tier models are sometimes busy. Hang tight."
+                  />
+                </>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

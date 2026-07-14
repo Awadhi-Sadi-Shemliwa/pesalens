@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, Crown, Sparkles, Upload as UploadIcon, ShieldCheck, Bot, TrendingUp, Receipt } from "lucide-react";
-import { Badge, CardSoft, Eyebrow, Section } from "@/components/pl/primitives";
+import { toast } from "sonner";
+import { Badge, CardSoft, Eyebrow, Section, Skeleton } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
 import { cancelSubscription, fetchBillingStatus, fetchMe, requestPaymentConfirmation, startCheckout } from "@/data/api";
 
@@ -75,6 +76,7 @@ const Upgrade = () => {
       statusQuery.refetch();
     } catch (err: any) {
       setError(err?.message || "Checkout failed.");
+      toast.error("Checkout failed", { description: err?.message });
     } finally {
       setBusy(false);
     }
@@ -87,8 +89,10 @@ const Upgrade = () => {
     try {
       await requestPaymentConfirmation(manualPending.payment_id);
       setConfirmed(true);
+      toast.success("Confirmation requested", { description: "We'll verify your payment and activate Pro shortly." });
     } catch (err: any) {
       setError(err?.message || "Couldn't request confirmation — please try again.");
+      toast.error("Couldn't request confirmation", { description: err?.message });
     } finally {
       setConfirming(false);
     }
@@ -101,8 +105,12 @@ const Upgrade = () => {
       await cancelSubscription();
       statusQuery.refetch();
       fetchMe().catch(() => undefined);
+      /* Cancelling used to succeed silently — the user had no confirmation that
+         a billing change had actually taken effect (§65). */
+      toast.success("Subscription cancelled", { description: "Pro stays active until the end of your billing period." });
     } catch (err: any) {
       setError(err?.message || "Cancellation failed.");
+      toast.error("Cancellation failed", { description: err?.message });
     } finally {
       setBusy(false);
     }
@@ -112,6 +120,21 @@ const Upgrade = () => {
     monthly: { price: 14900, currency: "TZS" },
     yearly: { price: 149000, currency: "TZS" },
   };
+
+  /* Skeleton mirrors the hero + two plan cards + manual-pay card below (§81–83).
+     Prices are the one thing a user must not see a placeholder value for. */
+  if (statusQuery.isLoading) {
+    return (
+      <div className="px-4 py-4 space-y-5">
+        <Skeleton className="h-40 rounded-2xl" />
+        <div className="space-y-3">
+          <Skeleton className="h-36 rounded-2xl" />
+          <Skeleton className="h-36 rounded-2xl" />
+        </div>
+        <Skeleton className="h-28 rounded-2xl" />
+      </div>
+    );
+  }
 
   return (
     <div className="px-4 py-4 space-y-5">
@@ -202,7 +225,7 @@ const Upgrade = () => {
           <button
             onClick={handleCheckout}
             disabled={busy}
-            className="w-full bg-gradient-accent text-white py-3 rounded-xl font-semibold text-[14px] disabled:opacity-60"
+            className="w-full bg-gradient-accent text-primary-foreground py-3 rounded-xl font-semibold text-[14px] disabled:opacity-60"
           >
             {busy ? "Starting checkout…" : "Continue to checkout"}
           </button>

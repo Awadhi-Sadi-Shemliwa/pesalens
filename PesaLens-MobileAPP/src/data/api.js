@@ -127,6 +127,50 @@ export const refreshAccessToken = async () => {
   return refreshInFlight;
 };
 
+// ---- Shared status-classification (used by BOTH the fetch `request()` path
+// and the XHR `uploadStatement` path, so auth/paywall/error semantics stay
+// defined once and can't drift between them) ----
+
+// Shape a failed response body into an Error. FastAPI's structured detail
+// ({code, message}) — used by the upload PDF-unlock flow and other error codes
+// the UI branches on — is preserved on `err.code`.
+const makeApiError = (status, body, fallback = 'Request failed') => {
+  const detailObj = body?.detail && typeof body.detail === 'object' ? body.detail : null;
+  const error =
+    body?.errors?.[0] ||
+    body?.message ||
+    detailObj?.message ||
+    (typeof body?.detail === 'string' ? body.detail : null) ||
+    fallback;
+  const err = new Error(typeof error === 'string' ? error : fallback);
+  err.status = status;
+  err.code = detailObj?.code || body?.errors?.[0] || null;
+  err.payload = body;
+  return err;
+};
+
+// 402 Payment Required — trial expired or Pro lapsed. Route to /upgrade and
+// return a typed error so the feature gate is unmistakable.
+const makePaywallError = (body) => {
+  const detail = body?.detail || {};
+  const err = new Error(detail.message || 'Subscription required');
+  err.status = 402;
+  err.code = detail.code || 'subscription_required';
+  err.payload = body;
+  navigate('/upgrade');
+  return err;
+};
+
+// A 401 that survived a refresh attempt: clear the session, bounce to sign-in,
+// and hand back a typed error.
+const sessionExpiredError = () => {
+  clearSession();
+  navigate('/signin');
+  const err = new Error('Your session expired. Please sign in again.');
+  err.status = 401;
+  return err;
+};
+
 const handleResponse = async (res) => {
   let data = null;
   try {
@@ -135,20 +179,7 @@ const handleResponse = async (res) => {
     /* ignore */
   }
   if (!res.ok || data?.success === false) {
-    // FastAPI's structured detail ({code, message}) — used by the upload
-    // PDF-unlock flow and other error codes that the UI branches on.
-    const detailObj = data?.detail && typeof data.detail === 'object' ? data.detail : null;
-    const error =
-      data?.errors?.[0] ||
-      data?.message ||
-      detailObj?.message ||
-      (typeof data?.detail === 'string' ? data.detail : null) ||
-      'Request failed';
-    const err = new Error(typeof error === 'string' ? error : 'Request failed');
-    err.status = res.status;
-    err.code = detailObj?.code || data?.errors?.[0] || null;
-    err.payload = data;
-    throw err;
+    throw makeApiError(res.status, data);
   }
   return data;
 };
@@ -192,13 +223,7 @@ const request = async (path, options = {}, { allowRetry = true } = {}) => {
   if (res.status === 402) {
     let body = null;
     try { body = await res.json(); } catch { /* ignore */ }
-    const detail = body?.detail || {};
-    const err = new Error(detail.message || 'Subscription required');
-    err.status = 402;
-    err.code = detail.code || 'subscription_required';
-    err.payload = body;
-    navigate('/upgrade');
-    throw err;
+    throw makePaywallError(body);
   }
 
   return handleResponse(res);
@@ -281,21 +306,101 @@ export const deleteMyAccount = async () => {
 
 // ---------- statements ----------
 
-export const fetchDashboardSummary = () => requestData('/dashboard/summary');
+// Dashboard summary. With a jobId it's scoped to that uploaded statement;
+// without, it reflects the latest upload (unchanged default).
+export const fetchDashboardSummary = (jobId) =>
+  requestData(`/dashboard/summary${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''}`);
+
+// Every uploaded statement (bank, period, recency, counts) for the statement
+// selector / history.
+export const fetchStatementIndex = async () => {
+  const data = await requestData('/statements/index');
+  return data?.statements || [];
+};
 
 export const fetchAnalysis = (jobId) =>
   requestData(`/analysis/${encodeURIComponent(jobId)}`);
 
-export const fetchUploads = () => requestData('/uploads');
+// Per-bank "money map": spend, fees, fee-rate + saving suggestions per service.
+// Deterministic facts always ship; `llm_status !== 'ok'` → hide the coach slot.
+export const fetchBankIntel = () => requestData('/banks/intel');
 
-// Encrypted PDFs are unlocked transparently by the backend (no password
-// field — the server brute-forces the 6-digit numeric keyspace used by
-// Tanzanian bank statements). Adds ~5–30s to the request when triggered.
-export const uploadStatement = (file) => {
-  const formData = new FormData();
-  formData.append('file', file);
-  return requestData('/upload', { method: 'POST', body: formData });
+// Uploads history. Rows are created at QUEUE time, so pass status='done' when
+// you need only extracted statements (a failed/queued row has no result JSON
+// and would 404 on /analysis).
+export const fetchUploads = (status) =>
+  requestData(`/uploads${status ? `?status=${encodeURIComponent(status)}` : ''}`);
+
+// Per-user activity history (timestamped): sign-ins, password changes,
+// uploads, payments. Powers the notifications bell.
+export const fetchActivity = () => requestData('/auth/me/activity');
+
+// Upload via XHR so we can report REAL byte-upload progress (fetch can't).
+// `onProgress(loaded, total)` fires as bytes leave the device. Returns the
+// UploadResponse data ({ job_id, filename, status:"processing" }); the caller
+// then polls fetchUploadStatus(job_id) for extraction progress. Encrypted PDFs
+// are unlocked transparently server-side in the background job.
+export const uploadStatement = (file, onProgress) => {
+  const base = getApiUrl();
+  if (!base) {
+    const err = new Error('Backend URL not configured. Open More → Backend to set it.');
+    err.status = 0;
+    return Promise.reject(err);
+  }
+  // Mirror requestData's auth handling: a 401 on an expired access token silently
+  // refreshes and retries ONCE; a still-401 clears the session and routes to
+  // sign-in, so a long-idle session doesn't dead-end the upload with a raw error.
+  const attempt = (token, allowRetry) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${base}/upload`);
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.upload.onprogress = (e) => {
+        if (onProgress && e.lengthComputable) onProgress(e.loaded, e.total);
+      };
+      xhr.onload = async () => {
+        let body = null;
+        try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+        // Auth/paywall/error semantics are shared with request() via the helpers
+        // above, so a change to refresh/redirect/error-shaping applies to both.
+        if (xhr.status === 401 && allowRetry) {
+          const newToken = await refreshAccessToken();
+          if (newToken) {
+            attempt(newToken, false).then(resolve, reject);
+            return;
+          }
+          return reject(sessionExpiredError());
+        }
+        if (xhr.status === 402) {
+          return reject(makePaywallError(body));
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && body?.success !== false) {
+          return resolve(body?.data);
+        }
+        reject(makeApiError(xhr.status, body, 'Upload failed'));
+      };
+      xhr.onerror = () => {
+        const err = new Error('Network error — backend unreachable.');
+        err.status = 0;
+        reject(err);
+      };
+      const formData = new FormData();
+      formData.append('file', file);
+      xhr.send(formData);
+    });
+  return attempt(getAccessToken(), true);
 };
+
+// Poll extraction progress for a job — real stage + percentage, or the
+// stage/percentage + reason it failed at.
+export const fetchUploadStatus = (jobId) =>
+  requestData(`/upload/status/${encodeURIComponent(jobId)}`);
+
+// ---------- admin / owner (allowlisted emails only; 404 otherwise) ----------
+export const fetchAdminStats = () => requestData('/admin/stats');
+export const fetchAdminUsers = () => requestData('/admin/users');
+export const fetchAdminErrors = () => requestData('/admin/errors');
+export const fetchAdminActivity = () => requestData('/admin/activity');
 
 // ---------- assistant ----------
 
@@ -309,14 +414,57 @@ export const sendAssistantMessage = async (message, history = []) => {
 
 // ---------- receipts ----------
 
-export const scanReceipt = (file) => {
+// The scan is a single blocking vision-AI call that can stall for a while when
+// the free-tier models are busy (upstream 429/503 + retries). The backend now
+// caps its whole vision cascade at a 75s wall-clock budget (SCAN_BUDGET_SEC) and
+// runs it off the event loop, so it ALWAYS returns a decisive answer within
+// ~80s. This abort is deliberately set above that budget so the backend wins the
+// race — the client only aborts if the request truly hangs (dead network), and
+// the caller shows the classified failure with a retry.
+export const scanReceipt = async (file, { timeoutMs = 110000, statementJobId } = {}) => {
   const formData = new FormData();
   formData.append('file', file);
-  return requestData('/receipts/scan', { method: 'POST', body: formData });
+  // Associate the scanned receipt with the statement the user is focused on
+  // (Epic-2 per-statement scoping). Omitted → backend resolves to newest.
+  if (statementJobId) formData.append('statement_job_id', statementJobId);
+  const controller = new AbortController();
+  const timedOut = { v: false };
+  const timer = setTimeout(() => { timedOut.v = true; controller.abort(); }, timeoutMs);
+  try {
+    return await requestData('/receipts/scan', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (timedOut.v) {
+      const e = new Error('The scan is taking longer than expected — the vision AI may be busy. Please try again in a moment.');
+      e.code = 'scan_timeout';
+      e.status = 0;
+      throw e;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
-export const fetchReceipts = async () => {
-  const data = await requestData('/receipts');
+// Scope opts (all optional): { scope:'statement'|'general', jobId, day, start, end }.
+// No opts → the full gallery (unchanged default). See backend list_receipts.
+const scopeQuery = (opts = {}) => {
+  const { scope, jobId, day, start, end } = opts;
+  const p = new URLSearchParams();
+  if (scope) p.set('scope', scope);
+  if (jobId) p.set('job_id', jobId);
+  if (day) p.set('day', day);
+  if (start) p.set('start', start);
+  if (end) p.set('end', end);
+  const qs = p.toString();
+  return qs ? `?${qs}` : '';
+};
+
+export const fetchReceipts = async (opts = {}) => {
+  const data = await requestData(`/receipts${scopeQuery(opts)}`);
   return data?.receipts || [];
 };
 
@@ -330,8 +478,8 @@ export const parseReceiptText = (text, { save = false } = {}) =>
 
 // ---------- personal entries ----------
 
-export const fetchPersonalEntries = async () => {
-  const data = await requestData('/personal/entries');
+export const fetchPersonalEntries = async (opts = {}) => {
+  const data = await requestData(`/personal/entries${scopeQuery(opts)}`);
   return data?.entries || [];
 };
 
@@ -371,10 +519,19 @@ export const fetchBusinessSummary = (month) => {
 // manual entries that plausibly explain it for [start_date, end_date].
 // Backend caps the range at 365 days; LLM coaching is best-effort and
 // the deterministic shape always ships even when llm_status !== 'ok'.
-export const fetchReconciliation = (start_date, end_date, scope = 'personal') =>
+// `opts` (optional): { mode:'statement'|'general', jobId }. Statement mode
+// scopes to a single upload over its own period (the date range is then only a
+// hint — the backend derives the real period). Default general = today.
+export const fetchReconciliation = (start_date, end_date, scope = 'personal', opts = {}) =>
   requestData('/reconcile', {
     method: 'POST',
-    body: JSON.stringify({ start_date, end_date, scope }),
+    body: JSON.stringify({
+      start_date,
+      end_date,
+      scope,
+      mode: opts.mode || 'general',
+      ...(opts.jobId ? { job_id: opts.jobId } : {}),
+    }),
   });
 
 // Streams the PDF and triggers a download in the WebView/browser.

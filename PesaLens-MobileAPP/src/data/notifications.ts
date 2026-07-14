@@ -93,6 +93,55 @@ export const addNotification = (input: {
   return note;
 };
 
+/* Map server AuditLog event codes → local notification kinds (icon/tone). */
+const EVENT_KIND: Record<string, NotificationKind> = {
+  signin_success: "login",
+  email_verified_via_signin: "security",
+  email_verified: "security",
+  signup: "info",
+  logout: "login",
+  password_changed: "password_change",
+  password_change_revoked: "password_revoke",
+  password_reset: "password_change",
+  data_export: "info",
+  upload_succeeded: "info",
+  upload_failed: "security",
+  manual_payment_confirmed: "subscription",
+  manual_payment_confirm_requested: "subscription",
+};
+
+/* Merge server-side activity (the timestamped audit trail from
+   GET /auth/me/activity) into the local store. Server rows are keyed by a
+   stable `srv-<id>` id so repeated syncs don't duplicate, and arrive
+   pre-read (they're history, not fresh alerts). */
+export const syncServerActivity = (
+  activity: Array<{ id: number; event: string; title: string; created_at: string | null }>,
+): void => {
+  if (!Array.isArray(activity) || activity.length === 0) return;
+  const key = userKey(activeUserId);
+  const existing = safeRead(key);
+  const existingIds = new Set(existing.map((n) => n.id));
+  const now = Date.now();
+  const mapped: Notification[] = [];
+  for (const a of activity) {
+    const id = `srv-${a.id}`;
+    if (existingIds.has(id)) continue;
+    const parsed = a.created_at ? Date.parse(a.created_at) : now;
+    mapped.push({
+      id,
+      kind: EVENT_KIND[a.event] || "info",
+      title: a.title || a.event,
+      createdAt: Number.isNaN(parsed) ? now : parsed,
+      readAt: now,
+    });
+  }
+  if (!mapped.length) return;
+  const merged = [...mapped, ...existing]
+    .sort((x, y) => y.createdAt - x.createdAt)
+    .slice(0, MAX_KEEP);
+  safeWrite(key, merged);
+};
+
 export const markAllRead = () => {
   const key = userKey(activeUserId);
   const at = Date.now();

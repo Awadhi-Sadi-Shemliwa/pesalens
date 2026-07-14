@@ -10,13 +10,21 @@ import {
   UserCog,
   X,
 } from "lucide-react";
+import { useEffect } from "react";
+import { useDialogA11y } from "./primitives";
 import {
   type Notification,
   clearAllNotifications,
   dismissNotification,
   markAllRead,
+  setNotificationsUser,
+  syncServerActivity,
   useNotifications,
 } from "@/data/notifications";
+// @ts-ignore — JS modules
+import { fetchActivity } from "@/data/api";
+// @ts-ignore — JS modules
+import { getCurrentUser } from "@/data/authStore";
 
 /* --------------------------------------------------------------------------
    NotificationsSheet — bottom-sheet panel anchored to the bell icon.
@@ -59,6 +67,30 @@ export const NotificationsSheet = ({
 }) => {
   const reduce = useReducedMotion();
   const { items } = useNotifications();
+  /* This sheet owns its motion (framer spring + symmetric exit), but the
+     accessibility behaviour is shared with Sheet/Modal (modals.md). */
+  const panelRef = useDialogA11y(open, onClose);
+
+  // On open, hydrate the bell from the server's timestamped activity trail
+  // (sign-ins, uploads, password changes, payments). Best-effort — offline
+  // just shows whatever is already cached locally.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const user = getCurrentUser();
+        setNotificationsUser(user?.id ?? null);
+        const data = await fetchActivity();
+        if (!cancelled && data?.activity) syncServerActivity(data.activity);
+      } catch {
+        /* offline / unauthorised — keep local cache */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   return (
     <AnimatePresence>
@@ -71,8 +103,13 @@ export const NotificationsSheet = ({
           transition={{ duration: 0.18 }}
           onClick={onClose}
         >
-          <div className="absolute inset-0 bg-black/55 backdrop-blur-sm" />
+          {/* Blur pushes the page back in space so the sheet floats (modals.md #5). */}
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-md" />
           <motion.div
+            ref={panelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Notifications"
             onClick={(e) => e.stopPropagation()}
             className="relative w-full max-w-[440px] glass-pane rounded-t-3xl border-t max-h-[85vh] overflow-hidden flex flex-col pb-safe shadow-2xl"
             initial={reduce ? { y: 0 } : { y: "100%" }}

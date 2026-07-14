@@ -111,7 +111,7 @@ const Assistant = () => {
             <div
               className={`max-w-[82%] rounded-2xl px-3.5 py-2.5 text-[13px] leading-snug ${
                 m.role === "user"
-                  ? "bg-gradient-accent text-white rounded-br-md whitespace-pre-wrap"
+                  ? "bg-gradient-accent text-primary-foreground rounded-br-md whitespace-pre-wrap"
                   : "bg-surface-3 text-txt-1 rounded-bl-md border border-border"
               }`}
             >
@@ -151,7 +151,7 @@ const Assistant = () => {
       )}
 
       <div className="px-4 pb-4 pt-2">
-        <div className="card-soft !p-1.5 flex items-center gap-1.5">
+        <div className="card-soft !p-1.5 flex items-center gap-1.5 focus-ring-within">
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -162,7 +162,7 @@ const Assistant = () => {
           <button
             onClick={() => send(input)}
             disabled={!input.trim() || busy}
-            className="w-9 h-9 rounded-full bg-gradient-accent text-white flex items-center justify-center disabled:opacity-40 active:scale-95 transition-transform"
+            className="w-9 h-9 rounded-full bg-gradient-accent text-primary-foreground flex items-center justify-center disabled:opacity-40 press"
             aria-label="Send"
           >
             <Send className="w-4 h-4" />

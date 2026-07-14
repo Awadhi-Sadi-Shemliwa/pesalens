@@ -61,7 +61,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
             </button>
             <button
               onClick={this.handleReload}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] rounded-xl bg-gradient-accent text-white"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] rounded-xl bg-gradient-accent text-primary-foreground"
             >
               <RefreshCw className="w-3.5 h-3.5" /> Reload
             </button>

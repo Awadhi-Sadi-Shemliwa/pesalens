@@ -1,5 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Fraunces:wght@600;700;800&display=swap');
-
+/* Fonts are loaded via <link>+preconnect in index.html (mirrors the web
+   client) instead of a render-blocking @import here. */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -35,6 +35,8 @@
     --muted-foreground: 156 8% 39%;
 
     --accent: 149 71% 53%;         /* brand green (pages use text-accent) */
+    --accent-h: 148 80% 61%;       /* hover/light stop — matches --gradient-accent */
+    --accent-d: 149 71% 40%;       /* deep stop — banknote glows & bar gradients */
     --accent-foreground: 160 30% 6%;
 
     --inc: 160 84% 39%;            /* income emerald — cooler than accent */
@@ -96,6 +98,8 @@
     --muted: 228 27% 96%;
     --muted-foreground: 224 10% 52%;
     --accent: 228 69% 55%;
+    --accent-h: 228 89% 63%;
+    --accent-d: 228 69% 44%;
     --accent-foreground: 0 0% 100%;
     --inc: 161 88% 30%;
     --exp: 32 90% 44%;
@@ -296,6 +300,66 @@
     opacity: 0.85;
   }
 
+  /* ----------------------------------------------------------------
+     Buttons — press feedback (buttons.md). Mirrors `src/index.css` on web.
+     `.press` is the pure-CSS tier for icon/chip controls; the `<Button>` in
+     components/pl/primitives.tsx adds the ripple and the 1.05 release
+     overshoot, which CSS cannot reach because it never sees the pointerup.
+     `.ios-press` is the older, gentler variant and is kept for list rows,
+     where a 0.95 squash on a full-width row reads as the row collapsing.
+     ---------------------------------------------------------------- */
+  .press {
+    transition: transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1),
+                box-shadow 0.2s ease,
+                background 0.2s ease,
+                border-color 0.2s ease,
+                color 0.2s ease;
+  }
+  .press:active:not(:disabled) {
+    transform: scale(0.95);
+    transition-duration: 0.09s;
+    transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+  }
+  .press:disabled { transform: none; }
+
+  .btn-primary {
+    background: var(--gradient-accent);
+    color: hsl(var(--primary-foreground));
+    border: 1px solid hsl(var(--primary) / 0.6);
+    box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.28), 0 6px 20px -8px hsl(var(--primary) / 0.5);
+  }
+  .btn-primary:active:not(:disabled) {
+    box-shadow: inset 0 1px 0 hsl(0 0% 100% / 0.28), 0 2px 10px -6px hsl(var(--primary) / 0.5);
+  }
+
+  .btn-secondary {
+    background: hsl(var(--primary) / 0.08);
+    color: hsl(var(--primary));
+    border: 1px solid hsl(var(--primary) / 0.22);
+  }
+
+  .btn-ghost {
+    background: transparent;
+    color: hsl(var(--txt-2));
+  }
+
+  .btn-danger {
+    background: hsl(var(--dng) / 0.1);
+    color: hsl(var(--dng));
+    border: 1px solid hsl(var(--dng) / 0.28);
+  }
+
+  /* Disabled must not squash — an inert control that still reacts to the
+     finger promises an action it will not perform. */
+  .btn-primary:disabled,
+  .btn-secondary:disabled,
+  .btn-ghost:disabled,
+  .btn-danger:disabled {
+    transform: none;
+    box-shadow: none;
+    opacity: 0.55;
+  }
+
   /* Heavy glass for tab bar / header — Dark Editorial aesthetic */
   .glass-pane {
     background: hsl(var(--surface-1) / 0.55);
@@ -354,6 +418,171 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+  /* Zeroing the duration turns a scale animation into a scale *jump*, which is
+     the vestibular trigger the query exists to avoid. Drop the geometry; the
+     colour and shadow changes still confirm the press. */
+  .press:active:not(:disabled),
+  .ios-press:active { transform: none; }
+  .btn-ripple { display: none; }
+}
+
+/* A rejected one-time code shakes, clears and refocuses (otp-input.md #8). */
+@keyframes shake-x {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+.shake-x { animation: shake-x 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+
+/* Indeterminate progress — a segment that sweeps across the track for work with
+   no honest percentage (e.g. a single blocking vision-AI call). */
+@keyframes progressIndeterminate {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(360%); }
+}
+.anim-progress-indeterminate { animation: progressIndeterminate 1.25s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .anim-progress-indeterminate { animation: none; transform: translateX(90%); }
+}
+
+/* Release: 0.95 → past 1 → settle (buttons.md #6). Applied by <Button> on pointerup. */
+@keyframes btn-release {
+  0%   { transform: scale(0.95); }
+  55%  { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+.btn-release { animation: btn-release 0.34s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Ripple: anchored to the contact point via --rx/--ry set on pointerdown (#7). */
+@keyframes btn-ripple {
+  from { transform: scale(0); opacity: 0.45; }
+  to   { transform: scale(1); opacity: 0; }
+}
+.btn-ripple {
+  position: absolute;
+  left: var(--rx);
+  top: var(--ry);
+  width: var(--rd);
+  height: var(--rd);
+  margin-left: calc(var(--rd) / -2);
+  margin-top: calc(var(--rd) / -2);
+  border-radius: 9999px;
+  background: currentColor;
+  pointer-events: none;
+  animation: btn-ripple 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* ================================================================
+   Dialogs — spring entrance, staggered content, symmetric exit (modals.md)
+   Mirrors the web `src/index.css` dialog block. Bottom-sheet variant for the
+   phone form factor; centred variant for confirmations.
+   ================================================================ */
+@keyframes sheet-in  { from { opacity: 0; transform: translateY(100%); } to { opacity: 1; transform: none; } }
+@keyframes sheet-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(100%); } }
+@keyframes dialog-in {
+  from { opacity: 0; transform: scale(0.95) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes dialog-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to   { opacity: 0; transform: scale(0.95) translateY(8px); }
+}
+@keyframes backdrop-in  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes backdrop-out { from { opacity: 1; } to { opacity: 0; } }
+
+.sheet-in     { animation: sheet-in  0.30s cubic-bezier(0.32, 0.72, 0, 1) both; }
+.sheet-out    { animation: sheet-out 0.20s cubic-bezier(0.4, 0, 1, 1) both; }
+.dialog-in    { animation: dialog-in  0.26s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.dialog-out   { animation: dialog-out 0.18s cubic-bezier(0.4, 0, 1, 1) both; }
+.backdrop-in  { animation: backdrop-in 0.22s ease-out both; }
+.backdrop-out { animation: backdrop-out 0.18s ease-out both; }
+
+/* Inner elements enter on a short offset so the eye is walked down the hierarchy
+   rather than hit with everything at once (modals.md #3). */
+@keyframes dialog-stagger {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.dialog-stagger > * { animation: dialog-stagger 0.32s cubic-bezier(0.4, 0, 0.2, 1) both; }
+.dialog-stagger > *:nth-child(1) { animation-delay: 0.04s; }
+.dialog-stagger > *:nth-child(2) { animation-delay: 0.08s; }
+.dialog-stagger > *:nth-child(3) { animation-delay: 0.12s; }
+.dialog-stagger > *:nth-child(4) { animation-delay: 0.16s; }
+.dialog-stagger > *:nth-child(n + 5) { animation-delay: 0.2s; }
+
+/* ---- Focus (mirrors the web `.focus-ring` + global rules) ----
+   Mobile ships to a browser and a WebView, both of which get keyboard/switch-control
+   focus. Ring clears 3:1 against every surface token in both themes. */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--accent) / 0.55), 0 0 0 4px hsl(var(--accent) / 0.12);
+  border-color: hsl(var(--accent) / 0.6);
+}
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--accent) / 0.5);
+}
+/* Opt-in for elements that override the rules above. */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--accent) / 0.55), 0 0 0 4px hsl(var(--accent) / 0.12);
+  border-color: hsl(var(--accent) / 0.6);
+}
+
+/* Inside a tab list the accent already means "selected". Reusing it for the focus
+   ring makes the two indistinguishable, and after an arrow press they sit on
+   different tabs (tabs.md #6, #8). Mirrors web `src/index.css`. */
+.focus-ring-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--net) / 0.75), 0 0 0 4px hsl(var(--net) / 0.15);
+  border-radius: 0.5rem;
+}
+
+/* Edge fades on a scrolling tab / chip row: the row must advertise that it
+   continues past the viewport, or the off-screen items are never discovered
+   (tabs.md #4, filter-chips.md #9). */
+.edge-fade-l,
+.edge-fade-r {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 1;
+}
+.edge-fade-l { left: 0;  background: linear-gradient(90deg, hsl(var(--background)) 10%, transparent); }
+.edge-fade-r { right: 0; background: linear-gradient(270deg, hsl(var(--background)) 10%, transparent); }
+.edge-fade-on { opacity: 1; }
+
+/* For a bare input nested in a styled wrapper (chat pills, search bars): ring the
+   wrapper, since the input itself is transparent and has no edge to draw on. */
+.focus-ring-within:focus-within {
+  outline: none;
+  box-shadow: 0 0 0 2px hsl(var(--accent) / 0.55), 0 0 0 4px hsl(var(--accent) / 0.12);
+  border-color: hsl(var(--accent) / 0.6);
+}
+/* ...and suppress the inner control's own ring so only one is drawn. */
+.focus-ring-within :is(input, select, textarea):focus-visible {
+  box-shadow: none;
+}
+
+/* ---- Shimmer (mirrors web src/index.css `.shimmer`) ---- */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, hsl(var(--surface-3)) 25%, hsl(var(--surface-4)) 50%, hsl(var(--surface-3)) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
 }
 
 @keyframes ticker {
@@ -390,3 +619,456 @@
   100% { transform: scale(1); opacity: 1; }
 }
 .anim-count-pop { animation: count-pop 0.5s cubic-bezier(0.2, 0.8, 0.2, 1); }
+
+/* Self-drawing sparkline (Landing hero `Spark`) — the stroke draws itself in on
+   mount, like the web's `.draw-path`. Frozen (fully drawn) under reduced motion. */
+@keyframes pl-draw { from { stroke-dashoffset: 1000; } to { stroke-dashoffset: 0; } }
+.pl-spark-draw {
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  animation: pl-draw 1.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pl-spark-draw { animation: none; stroke-dashoffset: 0; }
+}
+
+/* StarBorder (components/pl/StarBorder.tsx) — moving-border keyframes. Mobile's
+   tailwind.config.ts doesn't define these, so they live here as plain CSS.
+   Duration is set inline per instance via animationDuration. */
+@keyframes star-movement-bottom {
+  0%   { transform: translate(0%, 0%);    opacity: 1; }
+  100% { transform: translate(-100%, 0%); opacity: 0; }
+}
+@keyframes star-movement-top {
+  0%   { transform: translate(0%, 0%);   opacity: 1; }
+  100% { transform: translate(100%, 0%); opacity: 0; }
+}
+.animate-star-movement-bottom { animation: star-movement-bottom linear infinite alternate; }
+.animate-star-movement-top    { animation: star-movement-top linear infinite alternate; }
+
+/* ================================================================
+   Banknote environment (NoteLayer / NoteImg) — ported from the web
+   src/motion/motion.css. The TZS note artwork stays authentic; every
+   rule here is the green/blue environment AROUND it: rim glow, floor
+   shadow, holographic glare sweep, and the featured-note 3D flip.
+   ================================================================ */
+.pl-note {
+  position: relative;
+  display: inline-block;
+  border-radius: 8px;
+  isolation: isolate;
+}
+.pl-note img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 8px;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+/* rim glow behind the note (environment light, never a tint on the art) */
+.pl-note::before {
+  content: '';
+  position: absolute;
+  inset: -18%;
+  z-index: -1;
+  border-radius: 50%;
+  filter: blur(18px);
+  opacity: 0.55;
+}
+.pl-note--glow-accent::before {
+  background: radial-gradient(closest-side, hsl(var(--accent) / 0.5), transparent 72%);
+}
+.pl-note--glow-net::before {
+  background: radial-gradient(closest-side, hsl(var(--net) / 0.5), transparent 72%);
+}
+.pl-note--shadow {
+  filter: drop-shadow(0 22px 22px rgb(0 0 0 / 0.45));
+}
+/* moving specular band — mimics the holographic security strip */
+.pl-note::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: linear-gradient(
+    105deg,
+    transparent 38%,
+    rgb(255 255 255 / 0.16) 48%,
+    rgb(255 255 255 / 0.30) 50%,
+    rgb(255 255 255 / 0.16) 52%,
+    transparent 62%
+  );
+  background-size: 300% 100%;
+  background-position: 120% 0;
+  animation: pl-note-glare 6.5s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes pl-note-glare {
+  0%, 55% { background-position: 130% 0; }
+  75%     { background-position: -30% 0; }
+  100%    { background-position: -30% 0; }
+}
+
+/* Featured-note flip (Markets/Why reduced-motion + hero showcase) */
+.pl-flip { perspective: 1100px; margin: 0; }
+.pl-flip__inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  animation: pl-flip-turn 11s ease-in-out infinite;
+}
+.pl-flip__face {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.pl-flip__face--back { transform: rotateY(180deg); }
+.pl-flip__caption { margin-top: 12px; text-align: center; }
+@keyframes pl-flip-turn {
+  0%, 38%  { transform: rotateY(0deg); }
+  50%, 88% { transform: rotateY(180deg); }
+  100%     { transform: rotateY(360deg); }
+}
+
+/* Hero sparkle drift/pulse (MoneyMate decor) */
+@keyframes pl-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+@keyframes pl-pulse-soft { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+.anim-float { animation: pl-float 6s ease-in-out infinite; }
+.anim-pulse-soft { animation: pl-pulse-soft 2s ease-in-out infinite; }
+
+/* Accent→net text clip (hero headline + reduced markets). Web `.gradient-text`. */
+.gradient-text {
+  background: linear-gradient(135deg, hsl(var(--txt-1)) 0%, hsl(var(--accent-h)) 60%, hsl(var(--net)) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Faint grid / dot overlays (hero + CTA texture) */
+.grid-faint {
+  background-image:
+    linear-gradient(to right, hsl(var(--border) / 0.5) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(var(--border) / 0.5) 1px, transparent 1px);
+  background-size: 40px 40px;
+}
+.grid-dot {
+  background-image: radial-gradient(hsl(var(--txt-1) / 0.06) 1px, transparent 1px);
+  background-size: 18px 18px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pl-note::after,
+  .pl-flip__inner,
+  .anim-float,
+  .anim-pulse-soft { animation: none; }
+}
+
+/* ================================================================
+   Animated brand background (<AnimatedBackground/> — guest Landing + shell)
+
+   Pure-CSS stand-in tuned to read like the web client's WebGL Hyperspeed
+   (dark) and Light Pillar (light). Only transforms/opacity animate, so it's
+   GPU-composited and cheap enough for the Android WebView on low-end phones —
+   unlike the three.js originals, which the web itself disables on touch. Theme
+   is driven by the `.light` class on <html>; colours read the accent/net
+   tokens so they swap green→blue with the theme.
+
+   DARK  → a perspective "hyperspeed" tunnel: a synthwave grid on a floor and a
+           mirrored ceiling (static converging verticals + streaming horizontal
+           rails in green/blue) rushing into a pulsing vanishing-point bloom.
+   LIGHT → a volumetric light-blue pillar (soft outer beam + bright core +
+           floor pool) that sways and breathes.
+   ================================================================ */
+.pl-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Drifting brand glows — present in both themes (tokens supply the colour). */
+.pl-bg__glow {
+  position: absolute;
+  aspect-ratio: 1;
+  border-radius: 9999px;
+  filter: blur(64px);
+  will-change: transform;
+}
+.pl-bg__glow--a {
+  width: 65%;
+  top: -14%;
+  left: -14%;
+  background: radial-gradient(closest-side, hsl(var(--accent) / 0.42), transparent 70%);
+  animation: pl-bg-drift-a 15s ease-in-out infinite;
+}
+.pl-bg__glow--b {
+  width: 62%;
+  bottom: -16%;
+  right: -12%;
+  background: radial-gradient(closest-side, hsl(var(--net) / 0.36), transparent 70%);
+  animation: pl-bg-drift-b 19s ease-in-out infinite;
+}
+@keyframes pl-bg-drift-a {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  50%      { transform: translate3d(6%, 5%, 0) scale(1.12); }
+}
+@keyframes pl-bg-drift-b {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1.05); }
+  50%      { transform: translate3d(-6%, -4%, 0) scale(0.94); }
+}
+
+/* ---------- DARK: hyperspeed tunnel ---------- */
+.pl-bg__tunnel { position: absolute; inset: 0; overflow: hidden; }
+
+/* Vanishing-point bloom — the light everything streams into. */
+.pl-bg__core {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: 62%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(closest-side,
+    hsl(var(--accent) / 0.42) 0%,
+    hsl(var(--net) / 0.16) 42%,
+    transparent 72%);
+  filter: blur(26px);
+  animation: pl-bg-core-pulse 3.6s ease-in-out infinite;
+  will-change: opacity, transform;
+}
+@keyframes pl-bg-core-pulse {
+  0%, 100% { opacity: 0.75; transform: translate(-50%, -50%) scale(1); }
+  50%      { opacity: 1;    transform: translate(-50%, -50%) scale(1.12); }
+}
+
+/* Two perspective planes meeting at the horizon (46%): floor + ceiling. Each
+   carries a static converging vertical grid; the streaming rails are a child
+   so only the horizontals move toward the viewer. */
+.pl-bg__plane {
+  position: absolute;
+  left: 50%;
+  width: 320%;
+  height: 74%;
+  overflow: hidden;
+  /* static converging verticals (synthwave grid) */
+  background: repeating-linear-gradient(
+    to right,
+    transparent 0 46px,
+    hsl(var(--net) / 0.22) 46px 48px
+  );
+}
+.pl-bg__plane--floor {
+  top: 46%;
+  transform: translateX(-50%) perspective(360px) rotateX(78deg);
+  transform-origin: top center;
+  -webkit-mask-image: linear-gradient(to top, #000 8%, transparent 88%);
+          mask-image: linear-gradient(to top, #000 8%, transparent 88%);
+}
+.pl-bg__plane--ceil {
+  bottom: 54%;
+  transform: translateX(-50%) perspective(360px) rotateX(-78deg);
+  transform-origin: bottom center;
+  opacity: 0.6; /* keep the top (behind headline) calmer than the floor */
+  -webkit-mask-image: linear-gradient(to bottom, #000 8%, transparent 88%);
+          mask-image: linear-gradient(to bottom, #000 8%, transparent 88%);
+}
+
+/* Streaming horizontal rails. Two colours + one blurred "bloom" copy so the
+   lines read as light, not hairlines. Period 44px → translate one period. */
+.pl-bg__rails {
+  position: absolute;
+  inset: -60% 0;
+  background: repeating-linear-gradient(
+    to top,
+    transparent 0 42px,
+    hsl(var(--accent) / 0.7) 42px 44px
+  );
+  will-change: transform;
+}
+.pl-bg__plane--floor .pl-bg__rails { animation: pl-bg-warp 2.4s linear infinite; }
+.pl-bg__plane--ceil  .pl-bg__rails { animation: pl-bg-warp-rev 2.4s linear infinite; }
+.pl-bg__rails--net {
+  background: repeating-linear-gradient(
+    to top,
+    transparent 0 86px,
+    hsl(var(--net) / 0.6) 86px 90px
+  );
+  opacity: 0.85;
+}
+.pl-bg__plane--floor .pl-bg__rails--net { animation: pl-bg-warp-net 1.6s linear infinite; }
+.pl-bg__plane--ceil  .pl-bg__rails--net { animation: pl-bg-warp-net-rev 1.6s linear infinite; }
+.pl-bg__rails--bloom {
+  background: repeating-linear-gradient(
+    to top,
+    transparent 0 40px,
+    hsl(var(--accent) / 0.5) 40px 44px
+  );
+  filter: blur(4px);
+  opacity: 0.6;
+}
+.pl-bg__plane--floor .pl-bg__rails--bloom { animation: pl-bg-warp 2.4s linear infinite; }
+.pl-bg__plane--ceil  .pl-bg__rails--bloom { animation: pl-bg-warp-rev 2.4s linear infinite; }
+
+@keyframes pl-bg-warp       { from { transform: translateY(0); }    to { transform: translateY(44px); } }
+@keyframes pl-bg-warp-rev   { from { transform: translateY(0); }    to { transform: translateY(-44px); } }
+@keyframes pl-bg-warp-net   { from { transform: translateY(0); }    to { transform: translateY(90px); } }
+@keyframes pl-bg-warp-net-rev { from { transform: translateY(0); }  to { transform: translateY(-90px); } }
+
+/* ---------- LIGHT: volumetric light pillar ---------- */
+.pl-bg__pillar {
+  display: none;
+  position: absolute;
+  top: -12%;
+  left: 50%;
+  width: 52%;
+  height: 128%;
+  transform: translateX(-50%) rotate(6deg);
+  background: linear-gradient(to bottom,
+    transparent,
+    hsl(var(--net) / 0.22) 30%,
+    hsl(var(--accent) / 0.14) 74%,
+    transparent);
+  filter: blur(38px);
+  animation: pl-bg-breathe 9s ease-in-out infinite;
+}
+.pl-bg__pillar-core {
+  display: none;
+  position: absolute;
+  top: -12%;
+  left: 50%;
+  width: 20%;
+  height: 128%;
+  transform: translateX(-50%) rotate(6deg);
+  background: linear-gradient(to bottom,
+    transparent,
+    hsl(var(--net) / 0.5) 34%,
+    hsl(var(--accent) / 0.28) 78%,
+    transparent);
+  filter: blur(18px);
+  animation: pl-bg-breathe 9s ease-in-out infinite;
+}
+.pl-bg__pillar-pool {
+  display: none;
+  position: absolute;
+  left: 50%;
+  bottom: 4%;
+  width: 70%;
+  height: 26%;
+  transform: translateX(-50%);
+  background: radial-gradient(closest-side, hsl(var(--net) / 0.22), transparent 72%);
+  filter: blur(30px);
+  animation: pl-bg-core-pulse 6s ease-in-out infinite;
+}
+@keyframes pl-bg-breathe {
+  0%, 100% { transform: translateX(-50%) rotate(6deg) scaleY(1);     opacity: 0.72; }
+  50%      { transform: translateX(-50%) rotate(-3deg) scaleY(1.06); opacity: 0.98; }
+}
+
+/* Swap tunnel ↔ pillar by theme; glows stay on and recolour via tokens. */
+.pl-bg__pillar,
+.pl-bg__pillar-core,
+.pl-bg__pillar-pool { display: none; }
+:root.light .pl-bg__tunnel { display: none; }
+:root.light .pl-bg__pillar,
+:root.light .pl-bg__pillar-core,
+:root.light .pl-bg__pillar-pool { display: block; }
+
+/* Authenticated shell (inner) — data-dense screens stay calm: pillar-only (no
+   busy hyperspeed tunnel) in BOTH themes, dimmed so dashboards read clearly.
+   Landing keeps the full tunnel; only MobileShell passes variant="inner". */
+.pl-bg--inner { opacity: 0.6; }
+.pl-bg--inner .pl-bg__tunnel { display: none; }
+.pl-bg--inner .pl-bg__pillar,
+.pl-bg--inner .pl-bg__pillar-core,
+.pl-bg--inner .pl-bg__pillar-pool { display: block; }
+
+/* Reduced motion: freeze all streams/beams but keep the static composition so
+   the page still reads as designed (not dead flat). */
+@media (prefers-reduced-motion: reduce) {
+  .pl-bg__glow,
+  .pl-bg__core,
+  .pl-bg__rails,
+  .pl-bg__pillar,
+  .pl-bg__pillar-core,
+  .pl-bg__pillar-pool { animation: none; }
+}
+
+/* ================================================================
+   Landing signature components ported from the web client
+   (Markets section): OrbitRing, RotatingText, TrueFocus.
+   ================================================================ */
+
+/* ---- OrbitRing (motion/OrbitRing) — 3D coin-ring carousel ---- */
+.pl-orbit { perspective: 1300px; pointer-events: none; }
+.pl-orbit__stage { width: 100%; height: 100%; transform-style: preserve-3d; }
+.pl-orbit__ring {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  transform-style: preserve-3d;
+  animation: pl-orbit-spin var(--orbit-t, 46s) linear infinite;
+  will-change: transform;
+}
+.pl-orbit__item {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-style: preserve-3d;
+  transform: translate(-50%, -50%) rotateY(var(--i-angle)) translateZ(var(--orbit-r, 260px));
+}
+.pl-orbit__billboard {
+  animation: pl-orbit-spin-rev var(--orbit-t, 46s) linear infinite;
+  will-change: transform;
+}
+.pl-orbit--paused .pl-orbit__ring,
+.pl-orbit--paused .pl-orbit__billboard { animation-play-state: paused; }
+@keyframes pl-orbit-spin { from { transform: rotateY(0deg); } to { transform: rotateY(360deg); } }
+@keyframes pl-orbit-spin-rev {
+  from { transform: rotateY(var(--i-neg, 0deg)); }
+  to   { transform: rotateY(calc(var(--i-neg, 0deg) - 360deg)); }
+}
+
+/* ---- RotatingText (framer-motion) ---- */
+.text-rotate { display: inline-flex; flex-wrap: wrap; white-space: pre-wrap; position: relative; }
+.text-rotate-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+.text-rotate-word { display: inline-flex; }
+.text-rotate-element { display: inline-block; }
+.text-rotate-space { white-space: pre; }
+
+/* ---- TrueFocus (framer-motion) — inherits the heading's size/weight ---- */
+.focus-container {
+  position: relative;
+  display: flex;
+  gap: 0.35em;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  user-select: none;
+}
+.focus-word { position: relative; font-size: inherit; font-weight: inherit; }
+.focus-word.active { filter: blur(0); }
+.focus-frame { position: absolute; top: 0; left: 0; pointer-events: none; box-sizing: content-box; border: none; }
+.focus-frame .corner {
+  position: absolute;
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 2px solid var(--border-color, hsl(var(--accent)));
+  filter: drop-shadow(0 0 4px var(--glow-color, hsl(var(--accent) / 0.6)));
+  border-radius: 3px;
+}
+.focus-frame .top-left { top: -8px; left: -8px; border-right: none; border-bottom: none; }
+.focus-frame .top-right { top: -8px; right: -8px; border-left: none; border-bottom: none; }
+.focus-frame .bottom-left { bottom: -8px; left: -8px; border-right: none; border-top: none; }
+.focus-frame .bottom-right { bottom: -8px; right: -8px; border-left: none; border-top: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pl-orbit__ring,
+  .pl-orbit__billboard { animation: none !important; }
+}
