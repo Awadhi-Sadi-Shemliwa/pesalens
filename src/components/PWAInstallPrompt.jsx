@@ -172,7 +172,7 @@ const PWAInstallPrompt = () => {
                     type="button"
                     onClick={install}
                     disabled={installing}
-                    className="btn-primary text-xs font-semibold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5 disabled:opacity-60"
+                    className="press btn-primary text-xs font-semibold px-3 py-1.5 rounded-lg inline-flex items-center gap-1.5 disabled:opacity-60"
                   >
                     {installing ? 'Installing…' : (
                       <>Install <Icon name="arrowRight" size={12} /></>

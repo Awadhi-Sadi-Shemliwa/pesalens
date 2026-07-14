@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { Badge, Eyebrow } from '../components/common';
+import { Badge, Eyebrow, toast } from '../components/common';
 import { Markdown } from '../components/Markdown';
 import { useReducedMotion } from '../components/motion';
 import { fetchDashboardSummary, sendAssistantMessage, fmtTZS } from '../data/api';
@@ -92,7 +92,7 @@ const PromptConsole = ({ input, setInput, onSend, typing, chips = [], onChip, bi
           ))}
         </div>
       )}
-      <div className="relative flex items-center gap-2 bg-surface-3/70 border border-bdr rounded-2xl px-3 sm:px-4 py-2.5 focus-within:border-accent/50 transition">
+      <div className="relative flex items-center gap-2 bg-surface-3/70 border border-bdr rounded-2xl px-3 sm:px-4 py-2.5 focus-ring-within transition">
         <Icon name="aperture" size={16} className="text-accent flex-shrink-0" />
         <input
           value={input}
@@ -104,7 +104,7 @@ const PromptConsole = ({ input, setInput, onSend, typing, chips = [], onChip, bi
         <button
           onClick={() => onSend(input)}
           disabled={typing || !input.trim()}
-          className="btn-primary p-2.5 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
+          className="press btn-primary p-2.5 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
           aria-label={t('ai.send')}
         >
           <Icon name="send" size={14} />
@@ -177,6 +177,9 @@ const AssistantPage = () => {
         ...prev,
         { role: 'ai', text: `Sorry, I could not process that. (${err.message || 'unknown error'})` },
       ]);
+      /* The in-chat bubble alone reads like the assistant *answered*. A toast makes
+         it unambiguous that the request failed rather than being declined (§65). */
+      toast.error(err.message || 'The assistant could not be reached.', { title: 'Message failed' });
     } finally {
       setTyping(false);
     }
@@ -197,7 +200,13 @@ const AssistantPage = () => {
       await navigator.clipboard.writeText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-    } catch { /* clipboard blocked — silently ignore */ }
+    } catch {
+      /* A blocked clipboard used to fail silently, so the button simply never
+         confirmed and the user could not tell why (§65). */
+      toast.error('Your browser blocked clipboard access. Select the transcript and copy it manually.', {
+        title: 'Could not copy chat',
+      });
+    }
   };
 
   const meta = summary?.latest_upload;

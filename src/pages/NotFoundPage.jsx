@@ -20,7 +20,7 @@ const NotFoundPage = () => {
         <p className="text-txt-2 my-6 leading-relaxed">
           {t('nf.lede')}
         </p>
-        <Link to="/" className="btn-primary px-6 py-3 rounded-xl text-sm font-semibold inline-flex items-center gap-2">
+        <Link to="/" className="press btn-primary px-6 py-3 rounded-xl text-sm font-semibold inline-flex items-center gap-2">
           <Icon name="arrowRight" size={14} className="rotate-180" />
           {t('nf.back')}
         </Link>

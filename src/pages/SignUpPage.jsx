@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useRouter } from '../components/Router';
 import { Icon } from '../components/Icon';
-import { Mark, Eyebrow } from '../components/common';
+import { Mark, Eyebrow, Button } from '../components/common';
 import { setUserType } from '../data/userStore';
 import { signUp } from '../data/api';
 import { useT } from '../data/i18n';
@@ -13,8 +13,16 @@ const SignUpPage = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [sentTo, setSentTo] = useState('');
+  const [emailTouched, setEmailTouched] = useState(false);
 
   const setValue = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+
+  // Validate on BLUR, not per-keystroke (§71); the error only shows once the
+  // field is finished-and-wrong (§74), and the submit stays gated until valid
+  // + terms accepted (§8 — an invalid submission is simply unreachable).
+  const emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim());
+  const showEmailError = emailTouched && form.email.trim().length > 0 && !emailValid;
+  const canSubmit = emailValid && form.terms && !busy;
 
   const handleCreate = async (event) => {
     event.preventDefault();
@@ -106,12 +114,9 @@ const SignUpPage = () => {
               <li>Email can take up to a minute. Check your Spam / Promotions folder if it's missing.</li>
               <li>Didn't receive it? You can request a new password from the sign-in screen.</li>
             </ul>
-            <button
-              onClick={() => navigate('/signin')}
-              className="mt-7 w-full btn-primary py-3 rounded-xl font-semibold text-sm"
-            >
+            <Button block size="lg" className="mt-7" onClick={() => navigate('/signin')}>
               Continue to sign in
-            </button>
+            </Button>
             <p className="text-center text-sm text-txt-2 mt-6">
               Wrong email?{' '}
               <button
@@ -151,9 +156,16 @@ const SignUpPage = () => {
                   required
                   value={form.email}
                   onChange={(event) => setValue('email', event.target.value)}
+                  onBlur={() => setEmailTouched(true)}
                   placeholder="you@example.com"
-                  className="w-full bg-surface-3 border border-bdr rounded-xl px-4 py-3 text-sm text-txt-1 placeholder-txt-3"
+                  aria-invalid={showEmailError}
+                  className={`w-full bg-surface-3 border rounded-xl px-4 py-3 text-sm text-txt-1 placeholder-txt-3 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none ${
+                    showEmailError ? 'border-dng/60' : emailValid && form.email ? 'border-inc/50' : 'border-bdr'
+                  }`}
                 />
+                {showEmailError && (
+                  <p className="mt-1.5 text-xs text-dng">Enter a valid email address (name@example.com).</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-txt-2 mb-2">{t('auth.accountType')}</label>
@@ -193,13 +205,9 @@ const SignUpPage = () => {
                   {error}
                 </div>
               ) : null}
-              <button
-                type="submit"
-                disabled={busy}
-                className="w-full btn-primary py-3 rounded-xl font-semibold text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {busy ? 'Sending email…' : 'Email me a sign-in password'}
-              </button>
+              <Button type="submit" block size="lg" disabled={!canSubmit} loading={busy} loadingLabel="Sending email…">
+                Email me a sign-in password
+              </Button>
             </div>
             <p className="text-center text-sm text-txt-2 mt-6">
               {t('auth.haveAccount')}{' '}

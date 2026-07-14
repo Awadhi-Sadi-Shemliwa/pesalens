@@ -7,21 +7,12 @@ import { readToken } from './common';
    Portable to the Capacitor mobile app (pure CSS/SVG/canvas).
    ================================================================ */
 
-/* Reduced-motion hook — single source of truth for gating animation. */
-export const useReducedMotion = () => {
-  const [reduced, setReduced] = useState(
-    typeof window !== 'undefined' &&
-      window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  );
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia) return;
-    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
-    const on = () => setReduced(mq.matches);
-    mq.addEventListener?.('change', on);
-    return () => mq.removeEventListener?.('change', on);
-  }, []);
-  return reduced;
-};
+/* Reduced-motion hook — single source of truth for gating animation. Lives in its
+   own module so `common.jsx` can use it without importing this file (which imports
+   `readToken` from `common.jsx` and would form a cycle). Re-exported here so the
+   existing `from './motion'` import sites keep working. */
+export { useReducedMotion } from './useReducedMotion';
+import { useReducedMotion } from './useReducedMotion';
 
 /* ----------------------------------------------------------------
    TiltCard — pointer-driven 3D tilt (the "little 3D movement").

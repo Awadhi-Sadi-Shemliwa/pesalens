@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { Eyebrow, Badge } from '../components/common';
+import { Eyebrow, Badge, EmptyState, ErrorState, Skeleton, Segmented } from '../components/common';
+import { navigate, setNavIntent } from '../components/Router';
 import { TiltCard } from '../components/motion';
 import { useT } from '../data/i18n';
-import { fetchReconciliation, fmtTZS, fmtTZSFull } from '../data/api';
+import { fetchReconciliation, fetchStatementIndex, fmtTZS, fmtTZSFull } from '../data/api';
+import { useActiveStatement } from '../data/activeStatement';
+import { bankLabel } from '../data/bankLabels';
 
 /* map internal tone → Badge color name */
 const BADGE_COLOR = { inc: 'income', exp: 'expense', dng: 'danger', net: 'net' };
@@ -52,6 +55,12 @@ const SOURCE_LABEL = {
   business: 'Business entry',
 };
 
+// "NMB · 13:40", "NMB", "13:40", or null when neither is known.
+const bankTimeLabel = (bank, time) => {
+  const b = bankLabel(bank);
+  return [b, time].filter(Boolean).join(' · ') || null;
+};
+
 const ReconciliationPage = () => {
   const { t } = useT();
   const [startMonth, setStartMonth] = useState(monthsAgo(2));
@@ -60,6 +69,25 @@ const ReconciliationPage = () => {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+
+  // ── Per-statement scoping (Epic-2) ─────────────────────────────────────────
+  // "This statement" reconciles one upload over its OWN period (shared with the
+  // Dashboard selector); "General" reconciles a chosen month range. Default =
+  // statement, falling back to General when there's no upload to scope to.
+  const [activeJobId] = useActiveStatement();
+  const [statements, setStatements] = useState([]);
+  const [statementsReady, setStatementsReady] = useState(false);
+  const [viewMode, setViewMode] = useState('statement'); // 'statement' | 'general'
+  const showScope = statements.length > 0;
+  // Only trust the active statement if it belongs to THIS user's index (a stale
+  // id would otherwise 404 the owner-checked statement-mode reconcile). Fall
+  // back to the newest (index is newest-first).
+  const effectiveJobId =
+    (activeJobId && statements.some((s) => s.job_id === activeJobId))
+      ? activeJobId
+      : (statements[0]?.job_id || null);
+  const activeStatement = statements.find((s) => s.job_id === effectiveJobId) || null;
+  const statementMode = showScope && viewMode === 'statement' && !!effectiveJobId;
 
   const range = useMemo(() => {
     const { start } = monthBounds(startMonth);
@@ -71,10 +99,14 @@ const ReconciliationPage = () => {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchReconciliation(range.start, range.end, scope);
+      // In statement mode the backend derives the period from the statement, so
+      // the range args are only a fallback; job_id + mode do the scoping.
+      const result = statementMode
+        ? await fetchReconciliation(range.start, range.end, scope, { mode: 'statement', jobId: effectiveJobId })
+        : await fetchReconciliation(range.start, range.end, scope, { mode: 'general' });
       setData(result);
     } catch (err) {
-      // The 365-day cap surfaces here too — the message is server-side.
+      // The 800-day cap surfaces here too — the message is server-side.
       setError(err?.message || 'Could not run reconciliation.');
       setData(null);
     } finally {
@@ -82,7 +114,34 @@ const ReconciliationPage = () => {
     }
   };
 
-  useEffect(() => { load(); }, [range.start, range.end, scope]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    fetchStatementIndex()
+      .then((rows) => setStatements(rows || []))
+      .catch(() => { /* index non-critical — fall back to general */ })
+      .finally(() => setStatementsReady(true));
+  }, []);
+
+  // Wait for the statement index before the first (expensive, LLM-backed)
+  // reconcile so we fire ONE call in the right mode — not a general call
+  // followed by a statement call once `statementMode` flips.
+  useEffect(() => {
+    if (!statementsReady) return;
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statementsReady, range.start, range.end, scope, statementMode, effectiveJobId]);
+
+  // Route the scan / manual-entry CTAs by the ACTIVE scope so a personal
+  // reconciliation never dumps the user into the business bookkeeping page
+  // (and vice-versa). The `scan` intent tells the destination to open its
+  // gallery/camera picker on arrival.
+  const goScan = () => {
+    setNavIntent('scan');
+    navigate(scope === 'business' ? '/bookkeeping' : '/personal-spending');
+  };
+  const goAddManual = () => {
+    setNavIntent('add');
+    navigate(scope === 'business' ? '/bookkeeping' : '/personal-spending');
+  };
 
   const kpis = data?.kpis;
   const groups = data?.groups || [];
@@ -98,8 +157,25 @@ const ReconciliationPage = () => {
       .sort((a, b) => (b.date || '').localeCompare(a.date || '')),
     [groups],
   );
-  const receiptTotal = candidates.filter((c) => c.source === 'receipt').reduce((s, c) => s + (Number(c.amount) || 0), 0);
-  const entryTotal   = candidates.filter((c) => c.source !== 'receipt').reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  // Receipts / entries the matcher couldn't pair with a statement debit (or
+  // that have no statement covering their date). They still belong in the
+  // ledger so a scanned receipt is always visible here, ready to reconcile
+  // once the matching statement is uploaded.
+  const unmatched = data?.unmatched_candidates || [];
+  const ledgerItems = useMemo(
+    () => [
+      ...candidates.map((c) => ({ ...c, matched: true })),
+      ...unmatched.map((c) => ({ ...c, matched: false })),
+    ].sort((a, b) => (b.date || '').localeCompare(a.date || '')),
+    [candidates, unmatched],
+  );
+  // "Your records" must equal what the ledger below actually lists — sum over
+  // ledgerItems (matched + unmatched), not just the matched candidates, or the
+  // Recorded figure contradicts the rows on screen (e.g. "Recorded: 0" above
+  // three visible receipts). The blind-spot math on the other panel is driven
+  // by kpis.total_explained and is unaffected.
+  const receiptTotal = ledgerItems.filter((c) => c.source === 'receipt').reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const entryTotal   = ledgerItems.filter((c) => c.source !== 'receipt').reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const recorded     = receiptTotal + entryTotal;
   const moneyOut     = kpis?.total_money_out || 0;
   const explained    = kpis?.total_explained || 0;
@@ -121,26 +197,56 @@ const ReconciliationPage = () => {
             </p>
           </div>
           <div className="flex flex-wrap items-end gap-2.5">
-            <label className="text-xs">
-              <div className="text-txt-3 font-mono uppercase tracking-ticker mb-1">From</div>
-              <input
-                type="month"
-                value={startMonth}
-                max={endMonth}
-                onChange={(e) => setStartMonth(e.target.value)}
-                className="bg-surface-2 border border-bdr rounded-lg px-3 py-2 text-sm text-txt-1"
-              />
-            </label>
-            <label className="text-xs">
-              <div className="text-txt-3 font-mono uppercase tracking-ticker mb-1">To</div>
-              <input
-                type="month"
-                value={endMonth}
-                min={startMonth}
-                onChange={(e) => setEndMonth(e.target.value)}
-                className="bg-surface-2 border border-bdr rounded-lg px-3 py-2 text-sm text-txt-1"
-              />
-            </label>
+            {showScope && (
+              <label className="text-xs">
+                <div className="text-txt-3 font-mono uppercase tracking-ticker mb-1">View</div>
+                <Segmented
+                  label="Reconciliation view"
+                  value={viewMode}
+                  onChange={setViewMode}
+                  options={[
+                    { key: 'statement', label: 'This statement' },
+                    { key: 'general', label: 'General' },
+                  ]}
+                />
+              </label>
+            )}
+            {statementMode ? (
+              <div className="text-xs">
+                <div className="text-txt-3 font-mono uppercase tracking-ticker mb-1">Statement</div>
+                <div className="flex items-center gap-1.5 bg-surface-2 border border-bdr rounded-lg px-3 py-2">
+                  <Badge color="net">{bankLabel(activeStatement?.bank) || 'Statement'}</Badge>
+                  {activeStatement?.period_end && (
+                    <span className="text-[11px] text-txt-3 font-mono">
+                      {activeStatement.period_start || '—'} → {activeStatement.period_end}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <>
+                <label className="text-xs">
+                  <div className="text-txt-3 font-mono uppercase tracking-ticker mb-1">From</div>
+                  <input
+                    type="month"
+                    value={startMonth}
+                    max={endMonth}
+                    onChange={(e) => setStartMonth(e.target.value)}
+                    className="bg-surface-2 border border-bdr rounded-lg px-3 py-2 text-sm text-txt-1"
+                  />
+                </label>
+                <label className="text-xs">
+                  <div className="text-txt-3 font-mono uppercase tracking-ticker mb-1">To</div>
+                  <input
+                    type="month"
+                    value={endMonth}
+                    min={startMonth}
+                    onChange={(e) => setEndMonth(e.target.value)}
+                    className="bg-surface-2 border border-bdr rounded-lg px-3 py-2 text-sm text-txt-1"
+                  />
+                </label>
+              </>
+            )}
             <label className="text-xs">
               <div className="text-txt-3 font-mono uppercase tracking-ticker mb-1">Scope</div>
               <select
@@ -174,10 +280,17 @@ const ReconciliationPage = () => {
           </div>
         )}
 
+        {/* A read that fails gets a persistent ErrorState with a retry, not a toast
+            that expires before it can be acted on (error-states.md #3). */}
         {error && (
-          <div className="rounded-xl border border-dng/30 bg-dng/8 text-dng px-3 py-2 text-sm">
-            {error}
-          </div>
+          <ErrorState
+            title="Couldn't run reconciliation"
+            cause={error}
+            timestamp={Date.now()}
+            onRetry={load}
+            retryLabel="Retry"
+            retryDisabled={loading}
+          />
         )}
 
         {/* Balance equations — Ledger vs Statement ---------------------- */}
@@ -258,15 +371,30 @@ const ReconciliationPage = () => {
                 <Eyebrow>Statement · money out</Eyebrow>
                 <p className="text-[11px] text-txt-3 mt-0.5">Tap a row to see what explains it.</p>
               </div>
-              {loading && <span className="text-[11px] text-txt-3">Loading…</span>}
             </div>
             <div className="grid grid-cols-[auto_1fr_auto] px-4 py-2 border-b border-bdr/60 text-[10px] font-mono uppercase tracking-ticker text-txt-3">
               <span>Date</span><span className="pl-3">Description</span><span className="text-right">Amount</span>
             </div>
-            {!loading && groups.length === 0 ? (
-              <div className="px-4 py-12 text-center text-[13px] text-txt-3">
-                No outflows found in this range. Upload a statement that covers it, or pick a wider range.
+            {loading ? (
+              <div className="p-3 space-y-2">
+                {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-11 rounded-xl" />)}
               </div>
+            ) : groups.length === 0 ? (
+              /* A range that matched nothing hands back an exit rather than
+                 stranding the user in their own query (empty-states.md #8). */
+              <EmptyState
+                kind="no-results"
+                title="No outflows in this range"
+                desc="Nothing was paid out between these months. Widen the range, or upload a statement that covers it."
+                action={
+                  <button
+                    onClick={() => setStartMonth(monthsAgo(11))}
+                    className="rounded-xl border border-bdr px-4 py-2 text-[13px] font-semibold text-txt-1 hover:bg-surface-3 transition focus-ring"
+                  >
+                    Widen to 12 months
+                  </button>
+                }
+              />
             ) : (
               <ul className="divide-y divide-bdr/50 max-h-[560px] overflow-y-auto scrollbar-none">
                 {groups.map((g, idx) => (
@@ -283,19 +411,39 @@ const ReconciliationPage = () => {
                 <Eyebrow>Ledger · receipts &amp; entries</Eyebrow>
                 <p className="text-[11px] text-txt-3 mt-0.5">Everything that could explain the money out.</p>
               </div>
-              <span className="text-[11px] text-txt-3 font-mono">{candidates.length}</span>
+              <span className="text-[11px] text-txt-3 font-mono">{ledgerItems.length}</span>
             </div>
             <div className="grid grid-cols-[auto_1fr_auto] px-4 py-2 border-b border-bdr/60 text-[10px] font-mono uppercase tracking-ticker text-txt-3">
               <span>Date</span><span className="pl-3">Vendor · source</span><span className="text-right">Amount</span>
             </div>
-            {candidates.length === 0 ? (
-              <div className="px-4 py-12 text-center text-[13px] text-txt-3">
-                No receipts or entries in this range. Scan a receipt or add an entry to close the gap.
+            {loading ? (
+              <div className="p-3 space-y-2">
+                {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-11 rounded-xl" />)}
               </div>
+            ) : ledgerItems.length === 0 ? (
+              /* The CTA is the user's next real step, not a refresh (#4–5). */
+              <EmptyState
+                kind="first-run"
+                title="Nothing backs these outflows yet"
+                desc="Scan a receipt or record an entry, and PesaLens will match it against your statement automatically."
+                action={
+                  <button
+                    onClick={goScan}
+                    className="press btn-primary rounded-xl px-4 py-2 text-[13px] font-semibold focus-ring"
+                  >
+                    Scan a receipt
+                  </button>
+                }
+                secondaryAction={
+                  <button onClick={goAddManual} className="underline underline-offset-2 hover:text-txt-2 transition focus-ring rounded">
+                    or add an expense manually
+                  </button>
+                }
+              />
             ) : (
               <ul className="divide-y divide-bdr/50 max-h-[560px] overflow-y-auto scrollbar-none">
-                {candidates.map((c, i) => (
-                  <LedgerRow key={`${c.source}-${c.ref_id || i}`} c={c} />
+                {ledgerItems.map((c, i) => (
+                  <LedgerRow key={`${c.source}-${c.ref_id || i}-${c.matched ? 'm' : 'u'}`} c={c} />
                 ))}
               </ul>
             )}
@@ -350,6 +498,9 @@ const BalanceEquation = ({ title, sideLabel, icon, figures }) => (
 /* A single ledger row (receipt or manual entry) in the right-hand table. */
 const LedgerRow = ({ c }) => {
   const isReceipt = c.source === 'receipt';
+  // `matched` is undefined for callers that don't tag it (treated as matched);
+  // an explicit false marks a receipt/entry not yet paired with an outflow.
+  const unmatched = c.matched === false;
   return (
     <li className="grid grid-cols-[auto_1fr_auto] items-center gap-3 px-4 py-2.5">
       <span className="text-[11px] font-mono uppercase tracking-ticker text-txt-3 w-16 flex-shrink-0">
@@ -364,7 +515,10 @@ const LedgerRow = ({ c }) => {
           </span>
         </span>
       </div>
-      <span className="text-[13px] font-semibold tabular text-txt-1 text-right flex-shrink-0">{fmtTZS(c.amount)}</span>
+      <span className="flex items-center gap-2 flex-shrink-0">
+        <Badge color={unmatched ? 'muted' : 'income'} dot>{unmatched ? 'Unmatched' : 'Matched'}</Badge>
+        <span className="text-[13px] font-semibold tabular text-txt-1 text-right">{fmtTZS(c.amount)}</span>
+      </span>
     </li>
   );
 };
@@ -386,8 +540,11 @@ const GroupRow = ({ g }) => {
           {dateLabel}
         </div>
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[13px] font-semibold text-txt-1 truncate">{KIND_LABEL[g.kind] || 'Debit'}</span>
+            {bankTimeLabel(g.bank, g.time) && (
+              <Badge color="accent">{bankTimeLabel(g.bank, g.time)}</Badge>
+            )}
             <Badge color={BADGE_COLOR[status.tone] || 'muted'} dot>{status.label}</Badge>
           </div>
           <div className="text-[11px] text-txt-3 truncate">{g.description}</div>
@@ -427,6 +584,12 @@ const GroupRow = ({ g }) => {
                 </li>
               ))}
             </ul>
+          )}
+          {g.attribution_note && (
+            <div className="flex items-start gap-2 text-[12px] text-txt-2 border-l-2 border-net/40 pl-2.5 py-1">
+              <Icon name="spark" size={12} className="text-net mt-0.5 flex-shrink-0" />
+              <span>{g.attribution_note}</span>
+            </div>
           )}
           {g.insight && (
             <div className="text-[12px] italic text-txt-1 border-l-2 border-accent/40 pl-2.5 py-1">

@@ -3,9 +3,10 @@ import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
 import { ChartJS, chartTheme } from '../components/ChartJS';
 import { TiltCard } from '../components/motion';
-import { Badge, Drawer, EmptyState, Eyebrow, Segmented } from '../components/common';
+import { Badge, Drawer, EmptyState, Eyebrow, Segmented, Pager, Skeleton, ErrorState } from '../components/common';
 import { fetchAnalysis, fetchDashboardSummary, fmtTZS, fmtTZSFull } from '../data/api';
 import { useTheme } from '../data/theme';
+import { getActiveStatement, setActiveStatement } from '../data/activeStatement';
 import { useT } from '../data/i18n';
 
 /* icon-chip tones for the KPI tiles */
@@ -33,12 +34,27 @@ const AnalysisPage = () => {
   const [theme] = useTheme();
   void theme;
 
+  const [reloadKey, setReloadKey] = useState(0);
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
+        setError(null);
         setLoading(true);
-        const summary = await fetchDashboardSummary();
+        // Honour the app-wide active statement (set by the Dashboard selector /
+        // statement timeline) so opening Analysis lands on the SAME statement
+        // the user was looking at; null → latest (unchanged default).
+        const activeJob = getActiveStatement();
+        let summary;
+        try {
+          summary = await fetchDashboardSummary(activeJob);
+        } catch (e) {
+          // A stale / foreign active statement (e.g. left in storage, or since
+          // deleted) 404s the owner-checked endpoint — clear it and fall back
+          // to the user's latest rather than dead-ending on an error screen.
+          if (activeJob) { setActiveStatement(null); summary = await fetchDashboardSummary(null); }
+          else throw e;
+        }
         if (cancelled) return;
         if (!summary?.latest_upload?.job_id) {
           setData(null);
@@ -54,7 +70,7 @@ const AnalysisPage = () => {
     };
     load();
     return () => { cancelled = true; };
-  }, []);
+  }, [reloadKey]);
 
   const transactions = data?.transactions || [];
   const categories = data?.categories || [];
@@ -101,12 +117,17 @@ const AnalysisPage = () => {
   const pageTxns = filtered.slice(pageStart, pageEnd);
 
   if (loading) {
+    // Layout-matching skeleton — KPI row + chart + transaction rows.
     return (
       <AppShell>
-        <div className="flex items-center justify-center h-full">
-          <div className="flex items-center gap-3 text-sm text-txt-2 font-mono uppercase tracking-ticker">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent anim-pulse-soft" />
-            {t('common.loading')} {t('nav.analysis').toLowerCase()}
+        <div className="space-y-5">
+          <div className="space-y-2"><Skeleton className="h-3 w-24" /><Skeleton className="h-7 w-48" /></div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-2xl" />)}
+          </div>
+          <Skeleton className="h-56 rounded-2xl" />
+          <div className="space-y-2">
+            {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-12 rounded-xl" />)}
           </div>
         </div>
       </AppShell>
@@ -116,7 +137,15 @@ const AnalysisPage = () => {
   if (error) {
     return (
       <AppShell>
-        <div className="p-4 bg-exp/10 border border-exp/30 rounded-xl text-sm text-exp">{error}</div>
+        <div className="max-w-md mx-auto mt-10">
+          <ErrorState
+            title={t('an.error.title') || 'Couldn’t load analysis'}
+            cause={error}
+            timestamp={Date.now()}
+            onRetry={() => setReloadKey((k) => k + 1)}
+            retryLabel={t('common.retry')}
+          />
+        </div>
       </AppShell>
     );
   }
@@ -133,6 +162,21 @@ const AnalysisPage = () => {
   const th = chartTheme();
   const palette = th.palette;
   const catTotal = categories.reduce((s, c) => s + (c.value || 0), 0) || 1;
+
+  // A doughnut is illegible past ~5 wedges (charts.md #3), so the chart draws the
+  // five biggest and folds the tail into one "Other" wedge. The `_tail` flag lets
+  // the click handler ignore Other, which maps to no single category.
+  const donutCategories = categories.length <= 6
+    ? categories
+    : [
+        ...categories.slice(0, 5),
+        {
+          name: `Other (${categories.length - 5})`,
+          value: categories.slice(5).reduce((s, c) => s + (c.value || 0), 0),
+          color: th.tick,
+          _tail: true,
+        },
+      ];
 
   const kpiTiles = [
     { label: t('common.totalTx'),       val: kpis.total_transactions ?? 0, icon: 'file',           tone: 'accent' },
@@ -185,19 +229,20 @@ const AnalysisPage = () => {
               <div className="relative">
                 <ChartJS
                   type="doughnut"
+                  ariaLabel={`Spending by category. Total ${fmtTZS(catTotal)}.`}
                   height={230}
                   data={{
-                    labels: categories.map((c) => c.name),
+                    labels: donutCategories.map((c) => c.name),
                     datasets: [{
-                      data: categories.map((c) => c.value),
-                      backgroundColor: categories.map((c, i) => c.color || palette[i % palette.length]),
+                      data: donutCategories.map((c) => c.value),
+                      backgroundColor: donutCategories.map((c, i) => c.color || palette[i % palette.length]),
                       borderWidth: 0,
                     }],
                   }}
                   options={{
                     cutout: '72%',
                     onHover: (evt, els) => { if (evt?.native?.target) evt.native.target.style.cursor = els.length ? 'pointer' : 'default'; },
-                    onClick: (evt, els) => { if (els && els.length) { const category = categories[els[0].index]; if (category) openCategory(category); } },
+                    onClick: (evt, els) => { if (els && els.length) { const category = donutCategories[els[0].index]; if (category && !category._tail) openCategory(category); } },
                     plugins: {
                       legend: { display: false },
                       tooltip: {
@@ -375,27 +420,8 @@ const AnalysisPage = () => {
               <p className="text-xs sm:text-sm text-txt-3 tabular">
                 {t('common.showing')} {pageStart + 1}–{pageEnd} {t('common.of')} {filtered.length}
               </p>
-              {totalPages > 1 && (
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setPage((p) => Math.max(0, p - 1))}
-                    disabled={currentPage === 0}
-                    className="px-3 py-1.5 text-xs sm:text-sm rounded-lg border border-bdr bg-surface-3 hover:bg-surface-4 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {t('common.previous')}
-                  </button>
-                  <span className="text-xs sm:text-sm text-txt-2 tabular">{currentPage + 1} / {totalPages}</span>
-                  <button
-                    type="button"
-                    onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-                    disabled={currentPage >= totalPages - 1}
-                    className="px-3 py-1.5 text-xs sm:text-sm rounded-lg border border-bdr bg-surface-3 hover:bg-surface-4 disabled:opacity-40 disabled:cursor-not-allowed"
-                  >
-                    {t('common.next')}
-                  </button>
-                </div>
-              )}
+              {/* Pager is 1-indexed; page state here is 0-indexed. */}
+              <Pager page={currentPage + 1} total={totalPages} onChange={(p) => setPage(p - 1)} />
             </div>
           )}
         </div>

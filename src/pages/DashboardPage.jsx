@@ -1,14 +1,17 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { useRouter } from '../components/Router';
 import { Icon } from '../components/Icon';
-import { EmptyState, Eyebrow, Sparkline, CountUp, Segmented } from '../components/common';
+import { Badge, EmptyState, Eyebrow, Sparkline, CountUp, Segmented, ProgressBar, ErrorState, InfoHint, Skeleton, toast } from '../components/common';
 import { ChartJS, chartTheme } from '../components/ChartJS';
 import { TiltCard } from '../components/motion';
 import ActionPlan from '../components/ActionPlan';
+import TextType from '../components/reactbits/TextType';
 import SignOutConfirm from '../components/SignOutConfirm';
-import { fetchDashboardSummary, uploadStatement, fmtTZS, fmtTZSFull } from '../data/api';
+import { fetchDashboardSummary, fetchStatementIndex, fetchBankIntel, uploadStatement, fetchUploadStatus, fmtTZS, fmtTZSFull } from '../data/api';
 import { useTheme } from '../data/theme';
+import { setActiveStatement } from '../data/activeStatement';
+import { bankLabel as sharedBankLabel } from '../data/bankLabels';
 import { useT, AutoT } from '../data/i18n';
 
 /* Brand-aligned fallback palette (green-first, no purple).
@@ -39,7 +42,7 @@ const issueAccent = (severity) => {
    Action pill — the Buy / Sell / Deposit / Withdraw row (Finvero).
    ---------------------------------------------------------------- */
 const ActionPill = ({ icon, label, onClick, primary, as = 'button', htmlFor }) => {
-  const cls = `inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-[13px] font-semibold transition-all whitespace-nowrap ${
+  const cls = `press inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-[13px] font-semibold whitespace-nowrap ${
     primary
       ? 'btn-primary'
       : 'bg-surface-3 text-txt-1 border border-bdr hover:border-accent/40 hover:bg-surface-4'
@@ -64,7 +67,7 @@ const ActionPill = ({ icon, label, onClick, primary, as = 'button', htmlFor }) =
    Mini KPI tile — colored dot + label + value + sparkline
    (TradeXpert "Invested Money" row). Locked state when Pro-gated.
    ---------------------------------------------------------------- */
-const MiniTile = ({ label, value, tone = 'accent', spark, locked, remaining }) => {
+const MiniTile = ({ label, value, tone = 'accent', spark, locked, remaining, hint }) => {
   const dot = { accent: 'bg-accent', inc: 'bg-inc', exp: 'bg-exp', net: 'bg-net' }[tone] || 'bg-accent';
   const col = { accent: 'rgb(var(--c-accent))', inc: 'rgb(var(--c-inc))', exp: 'rgb(var(--c-exp))', net: 'rgb(var(--c-net))' }[tone];
   if (locked) {
@@ -88,6 +91,7 @@ const MiniTile = ({ label, value, tone = 'accent', spark, locked, remaining }) =
       <div className="flex items-center gap-1.5 mb-1.5">
         <span className={`w-1.5 h-1.5 rounded-full ${dot}`} />
         <span className="text-[10px] uppercase tracking-ticker text-txt-3 truncate">{label}</span>
+        {hint && <InfoHint content={hint} />}
       </div>
       <div className="text-lg sm:text-xl font-bold tabular text-txt-1 truncate">{value}</div>
       {spark && (
@@ -163,7 +167,7 @@ const UploadZone = ({ onFile, busy, error }) => {
             <button
               onClick={() => onFile(file)}
               disabled={busy}
-              className="btn-primary px-7 py-3 rounded-xl text-sm font-semibold inline-flex items-center gap-2"
+              className="press btn-primary px-7 py-3 rounded-xl text-sm font-semibold inline-flex items-center gap-2"
             >
               {busy ? t('dash.upload.extracting') : (<>{t('dash.upload.extract')} <Icon name="arrowRight" size={14} /></>)}
             </button>
@@ -180,51 +184,553 @@ const UploadZone = ({ onFile, busy, error }) => {
   );
 };
 
+/* ----------------------------------------------------------------
+   Upload overlay — HONEST progress (byte upload → extraction stages) with a
+   decisive completion state and a real, timestamped failure state + retry.
+   (design corpus §84–89, error-states.md #3)
+   ---------------------------------------------------------------- */
+// Cap on how long we poll a job before calling it a (retryable) timeout, so a
+// stranded backend job can't spin the overlay forever. Extraction incl. LLM
+// repair is normally far quicker; this is a generous safety net.
+const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+
+const fmtBytes = (n) => {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const UploadOverlay = ({ job, onRetry, onClose }) => {
+  const { t } = useT();
+  if (!job || job.phase === 'idle') return null;
+  const uploading = job.phase === 'uploading';
+  const processing = job.phase === 'processing';
+  const done = job.phase === 'done';
+  const failed = job.phase === 'failed';
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-md anim-in" />
+      <div
+        className="relative w-full max-w-md bg-surface-2 border border-bdr rounded-2xl p-6 anim-up"
+        style={{ boxShadow: '0 40px 100px -20px rgba(0,0,0,0.7)' }}
+      >
+        {(uploading || processing) && (
+          <>
+            <div className="flex items-center gap-2 mb-4">
+              <span className="w-2 h-2 rounded-full bg-accent anim-pulse-soft" />
+              <span className="font-mono text-[10px] uppercase tracking-ticker text-txt-3">
+                {uploading ? t('dash.upload.uploading') : t('dash.upload.processing')}
+              </span>
+            </div>
+            <h3 className="text-lg font-semibold tracking-tight mb-1 truncate">{job.file?.name}</h3>
+            <p className="text-sm text-txt-2 mb-5">
+              {uploading ? t('dash.upload.sending') : (job.stage || t('dash.upload.working'))}
+            </p>
+            <ProgressBar
+              value={job.pct}
+              tone="accent"
+              label={uploading ? t('dash.upload.uploading') : job.stage}
+              sublabel={
+                uploading && job.rate
+                  ? `${fmtBytes(job.rate)}/s · ${job.eta != null ? `${job.eta}s ${t('dash.upload.left')}` : ''}`
+                  : t('dash.upload.keepOpen')
+              }
+            />
+          </>
+        )}
+
+        {done && (
+          <div className="flex flex-col items-center text-center py-2">
+            <div className="p-3 rounded-2xl bg-inc/10 border border-inc/25 mb-3">
+              <Icon name="check" size={28} className="text-inc" />
+            </div>
+            <h3 className="text-lg font-semibold text-txt-1">{t('dash.upload.done')}</h3>
+            <p className="text-sm text-txt-2 mt-1">
+              {job.total != null ? `${job.total} ${t('common.transactions').toLowerCase()}` : ''}
+            </p>
+          </div>
+        )}
+
+        {failed && (
+          <ErrorState
+            title={t('dash.upload.failedTitle')}
+            cause={job.failure?.message}
+            code={job.failure?.code}
+            stage={job.failure?.stage}
+            progress={job.failure?.progress}
+            timestamp={job.failure?.timestamp}
+            onRetry={job.file ? onRetry : undefined}
+            retryLabel={t('common.retry')}
+            onContactSupport={onClose}
+          />
+        )}
+
+        {(processing || failed) && (
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="absolute top-3 right-3 p-1.5 rounded-lg text-txt-3 hover:text-txt-1 hover:bg-surface-4 focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <Icon name="x" size={18} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// Shared label map (src/data/bankLabels.js); the Dashboard shows "Statement"
+// when a bank is unknown.
+const bankLabel = (b) => sharedBankLabel(b, 'Statement');
+const fmtDay = (iso) => {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' });
+  } catch { return String(iso).slice(0, 10); }
+};
+const periodLabel = (s) => {
+  const a = s.period_start ? String(s.period_start).slice(0, 10) : null;
+  const b = s.period_end ? String(s.period_end).slice(0, 10) : null;
+  return a && b ? `${a} → ${b}` : (a || b || 'Period n/a');
+};
+
+/* Premium statement selector — the "type of statement" heading becomes a
+   dropdown of every uploaded statement, grouped Recent / Past. Selecting one
+   re-scopes the whole dashboard to that upload. */
+const StatementSelector = ({ statements, selectedJobId, currentBank, onSelect }) => {
+  const [open, setOpen] = useState(false);
+  const recent = statements.filter((s) => s.recency === 'recent');
+  const past = statements.filter((s) => s.recency !== 'recent');
+  const activeId = selectedJobId || (statements[0] && statements[0].job_id);
+
+  const Group = ({ label, items }) => (items.length ? (
+    <div className="py-1">
+      <div className="px-3 py-1 text-[10px] font-mono uppercase tracking-ticker text-txt-4">{label}</div>
+      {items.map((s) => (
+        <button
+          key={s.job_id}
+          type="button"
+          onClick={() => { onSelect(s.job_id); setOpen(false); }}
+          className={`w-full px-3 py-2 flex items-center gap-2 text-left hover:bg-surface-3/60 transition ${s.job_id === activeId ? 'bg-accent/10' : ''}`}
+        >
+          <span className="flex-1 min-w-0">
+            <span className="block text-[13px] font-semibold text-txt-1 truncate">{bankLabel(s.bank)}</span>
+            <span className="block text-[10.5px] text-txt-3 truncate">
+              {periodLabel(s)} · {s.txn_count || 0} txns · uploaded {fmtDay(s.created_at)}
+            </span>
+          </span>
+          {s.job_id === activeId && <Icon name="check" size={14} className="text-accent flex-shrink-0" />}
+        </button>
+      ))}
+    </div>
+  ) : null);
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => statements.length > 0 && setOpen((v) => !v)}
+        className="group flex items-center gap-2 text-left focus-ring rounded-lg"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <h1 className="text-xl sm:text-2xl lg:text-[28px] font-semibold tracking-tight break-words">
+          {bankLabel(currentBank)}
+        </h1>
+        {statements.length > 0 && (
+          <Icon name="chevDown" size={18} className="text-txt-3 group-hover:text-txt-1 transition flex-shrink-0" />
+        )}
+      </button>
+      {open && statements.length > 0 && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
+          <div className="absolute left-0 top-full mt-2 z-50 w-[min(92vw,380px)] max-h-[60vh] overflow-y-auto scrollbar-none rounded-xl border border-bdr bg-surface-2 shadow-2xl anim-in">
+            <Group label="Recent" items={recent} />
+            <Group label="Past" items={past} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+/* ----------------------------------------------------------------
+   MoneyMap — "Where your money goes by service" (Slice 3, Part J-2)
+
+   Per-bank spend / fees / fee-rate leaderboard + deterministic saving
+   suggestions + an optional LLM coaching line. A service selector lets the
+   user focus one provider or see them all. Deterministic facts render even
+   when the LLM is unavailable (intel.llm_status !== 'ok').
+   ---------------------------------------------------------------- */
+const SUGGESTION_STYLE = {
+  most_expensive: { icon: 'alert',    ring: 'border-exp/25',    chip: 'bg-exp/15 text-exp' },
+  cheapest:       { icon: 'check',    ring: 'border-inc/25',    chip: 'bg-inc/15 text-inc' },
+  saving_estimate:{ icon: 'sparkles', ring: 'border-accent/25', chip: 'bg-accent/15 text-accent' },
+};
+
+const MoneyMap = ({ intel, focus, onFocus }) => {
+  const banks = intel?.banks || [];
+  if (banks.length === 0) return null;
+  const totals = intel.totals || {};
+  const maxCharges = Math.max(...banks.map((b) => b.charges || 0), 1);
+  const shown = focus === 'all' ? banks : banks.filter((b) => b.bank === focus);
+  const coach = intel.llm_status === 'ok' && intel.overall_summary ? intel.overall_summary : null;
+
+  return (
+    <div className="bento p-5 sm:p-6">
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <Eyebrow>Money map</Eyebrow>
+          <h3 className="mt-1.5 text-sm sm:text-base font-semibold tracking-tight">Where your money goes by service</h3>
+        </div>
+        <div className="text-right">
+          <div className="text-[10px] text-txt-3 font-mono uppercase tracking-ticker">Fees across {totals.bank_count || banks.length} services</div>
+          <div className="text-lg font-bold tabular text-exp">{fmtTZS(totals.total_charges || 0)}</div>
+        </div>
+      </div>
+
+      {/* Service selector — All + one pill per provider (single scrolling line). */}
+      <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none pb-1 mb-4">
+        {[{ bank: 'all', label: 'All services' }, ...banks].map((b) => {
+          const active = focus === b.bank;
+          return (
+            <button
+              key={b.bank}
+              type="button"
+              onClick={() => onFocus(b.bank)}
+              className={`press focus-ring shrink-0 rounded-full border px-3.5 min-h-[34px] text-xs font-medium transition ${
+                active ? 'bg-accent border-accent text-deep font-semibold' : 'bg-surface-2 border-bdr text-txt-2 hover:text-txt-1'
+              }`}
+            >
+              {b.bank === 'all' ? 'All services' : bankLabel(b.bank)}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Per-service cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {shown.map((b) => {
+          const feePct = (b.fee_rate || 0) * 100;
+          return (
+            <div key={b.bank} className="surface-inset rounded-2xl p-4 border border-bdr">
+              <div className="flex items-center justify-between mb-2.5">
+                <div className="flex items-center gap-2">
+                  <Badge color="net">{bankLabel(b.bank)}</Badge>
+                  <span className="text-[10px] text-txt-3 font-mono">{b.txn_count} txns</span>
+                </div>
+                {b.charges > 0 && (
+                  <span className="text-[10px] font-mono uppercase tracking-ticker text-exp">{feePct.toFixed(1)}% fees</span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-[10px] text-txt-3 uppercase tracking-ticker">Spent</div>
+                  <div className="text-base font-bold tabular text-txt-1">{fmtTZS(b.spend || 0)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-txt-3 uppercase tracking-ticker">Fees</div>
+                  <div className={`text-base font-bold tabular ${b.charges > 0 ? 'text-exp' : 'text-txt-2'}`}>{fmtTZS(b.charges || 0)}</div>
+                </div>
+              </div>
+              {/* Fee-leaderboard bar (relative to the priciest service). */}
+              <div className="mt-3 h-1.5 rounded-full bg-surface-4 overflow-hidden">
+                <div className="h-full rounded-full bg-exp/70" style={{ width: `${Math.min(100, ((b.charges || 0) / maxCharges) * 100)}%` }} />
+              </div>
+              <div className="mt-1.5 text-[10px] text-txt-3 font-mono">
+                {b.avg_fee_per_txn > 0 ? `~${fmtTZS(b.avg_fee_per_txn)} per transaction` : 'No fees detected'}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Deterministic suggestions */}
+      {(intel.suggestions || []).length > 0 && (
+        <div className="mt-4 space-y-2.5">
+          {intel.suggestions.map((s, i) => {
+            const st = SUGGESTION_STYLE[s.kind] || SUGGESTION_STYLE.saving_estimate;
+            return (
+              <div key={i} className={`flex items-start gap-3 surface-inset rounded-xl p-3 border ${st.ring}`}>
+                <span className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${st.chip}`}>
+                  <Icon name={st.icon} size={14} />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-semibold text-txt-1">{s.title}</div>
+                  <p className="text-xs text-txt-2 leading-relaxed break-words">{s.detail}</p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* LLM coach (optional) */}
+      {coach && (
+        <div className="mt-4 flex items-start gap-3 surface-inset rounded-lg p-3 border-l-2 border-accent/50">
+          <span className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 bg-accent/10 border border-accent/25 mt-0.5">
+            <Icon name="sparkles" size={13} className="text-accent" />
+          </span>
+          <p className="text-xs sm:text-sm text-txt-2 leading-relaxed break-words"><AutoT>{coach}</AutoT></p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ----------------------------------------------------------------
+   StatementTimeline — statement history grouped Recent vs Past, then by bank
+   (Slice 3, Part K). Tapping a row focuses that statement and opens Analysis.
+   ---------------------------------------------------------------- */
+const StatementTimeline = ({ statements, onOpen }) => {
+  if (!statements || statements.length === 0) return null;
+  const groups = [
+    { key: 'recent', label: 'Recent', rows: statements.filter((s) => s.recency === 'recent') },
+    { key: 'past',   label: 'Past',   rows: statements.filter((s) => s.recency !== 'recent') },
+  ].filter((g) => g.rows.length > 0);
+
+  return (
+    <div className="bento p-5 sm:p-6">
+      <div className="flex items-center justify-between gap-2 mb-4 flex-wrap">
+        <div>
+          <Eyebrow>Statements</Eyebrow>
+          <h3 className="mt-1.5 text-sm sm:text-base font-semibold tracking-tight">Your upload history</h3>
+        </div>
+        <span className="font-mono text-[10px] uppercase tracking-ticker text-txt-3">{statements.length} uploaded</span>
+      </div>
+      <div className="space-y-4">
+        {groups.map((g) => (
+          <div key={g.key}>
+            <div className="text-[10px] text-txt-3 font-mono uppercase tracking-ticker mb-2">{g.label}</div>
+            <div className="space-y-2">
+              {g.rows.map((s) => (
+                <button
+                  key={s.job_id}
+                  type="button"
+                  onClick={() => onOpen(s.job_id)}
+                  className="press focus-ring w-full text-left flex items-center gap-3 surface-inset rounded-xl p-3 hover:bg-surface-4/50 transition-colors"
+                >
+                  <Badge color={g.key === 'recent' ? 'accent' : 'muted'}>{bankLabel(s.bank)}</Badge>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-medium text-txt-1 truncate">
+                      {s.period_start ? `${s.period_start} → ${s.period_end || '—'}` : (s.filename || 'Statement')}
+                    </div>
+                    <div className="text-[10px] text-txt-3 font-mono">{s.txn_count || 0} transactions · {fmtDay(s.created_at)}</div>
+                  </div>
+                  <Icon name="chevRight" size={14} className="text-txt-4 flex-shrink-0" />
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const DashboardPage = () => {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [job, setJob] = useState(null); // honest upload/extraction job state
   const [error, setError] = useState(null);
+  const busy = !!job && (job.phase === 'uploading' || job.phase === 'processing');
   const [timeView, setTimeView] = useState('monthly');
+  // Statement selector / history: null selection = latest upload (default).
+  const [statements, setStatements] = useState([]);
+  const [selectedJobId, setSelectedJobId] = useState(null);
+  // Per-bank money map (Slice 3). `bankFocus` = which service the panel is
+  // focused on ('all' = the full leaderboard).
+  const [bankIntel, setBankIntel] = useState(null);
+  const [bankFocus, setBankFocus] = useState('all');
   const { t } = useT();
   const { navigate } = useRouter();
   const [theme] = useTheme(); // re-render (and recolor charts) on theme toggle
   void theme;
 
-  const refresh = async () => {
+  const refresh = async (jobId = null) => {
     try {
       setLoading(true);
-      const summary = await fetchDashboardSummary();
+      const summary = await fetchDashboardSummary(jobId);
       setData(summary);
+      setError(null);
     } catch (err) {
+      // A scoped request can fail if that statement is now gone or still
+      // processing (backend returns 409/404). Fall back to the latest statement
+      // and drop the stale selection rather than stranding the dashboard or
+      // rendering another statement's numbers under the requested id.
+      if (jobId && (err.status === 409 || err.status === 404)) {
+        setSelectedJobId(null);
+        setActiveStatement(null);
+        try {
+          setData(await fetchDashboardSummary(null));
+          setError(null);
+          return;
+        } catch (e2) {
+          setError(e2.message || 'Failed to load dashboard');
+          return;
+        }
+      }
       setError(err.message || 'Failed to load dashboard');
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { refresh(); }, []);
-
-  const handleUpload = async (file) => {
-    setBusy(true);
-    setError(null);
+  const loadStatements = async () => {
     try {
-      await uploadStatement(file);
-      await refresh();
+      setStatements(await fetchStatementIndex());
+    } catch { /* selector is non-critical — leave it empty on failure */ }
+  };
+
+  const loadBankIntel = async () => {
+    try {
+      setBankIntel(await fetchBankIntel());
+    } catch { /* money map is non-critical — leave it hidden on failure */ }
+  };
+
+  // Switch the whole dashboard to a chosen statement (or null = latest), and
+  // publish it as the app-wide active statement so Personal Spending and
+  // Reconciliation scope to the same upload.
+  const selectStatement = (jobId) => {
+    setSelectedJobId(jobId);
+    setActiveStatement(jobId || null);
+    refresh(jobId);
+  };
+
+  useEffect(() => { refresh(null); loadStatements(); loadBankIntel(); }, []);
+
+  // Poll lifecycle guard: a ref-held timer + generation token. Bumping the
+  // generation cancels any in-flight poll — on unmount, and whenever a new
+  // upload supersedes an older one — so we never leak an endless timer chain.
+  const pollRef = useRef({ timer: null, gen: 0 });
+  useEffect(() => () => {
+    pollRef.current.gen += 1;
+    if (pollRef.current.timer) clearTimeout(pollRef.current.timer);
+  }, []);
+
+  // Drive the full honest flow: byte upload → poll extraction stages →
+  // decisive done, or a timestamped classified failure with retry.
+  const startUpload = async (file) => {
+    if (!file) return;
+    setError(null);
+    const started = Date.now();
+    setJob({ phase: 'uploading', pct: 0, file, rate: 0, eta: null });
+
+    const onProgress = (loaded, total) => {
+      const pct = total ? Math.round((loaded / total) * 100) : 0;
+      const elapsed = (Date.now() - started) / 1000 || 1;
+      const rate = loaded / elapsed;
+      const eta = rate > 0 ? Math.max(0, Math.round((total - loaded) / rate)) : null;
+      setJob((j) => (j && j.phase === 'uploading' ? { ...j, pct, rate, eta } : j));
+    };
+
+    let jobId;
+    try {
+      const res = await uploadStatement(file, onProgress);
+      jobId = res?.job_id;
     } catch (err) {
-      setError(err.message || 'Upload failed');
-    } finally {
-      setBusy(false);
+      if (err?.status === 402) { setJob(null); return; } // api routed to /upgrade
+      setJob({
+        phase: 'failed', file,
+        failure: { message: err?.message || 'Upload failed', code: err?.code, timestamp: Date.now() },
+      });
+      toast.error(err?.message || 'Upload failed');
+      return;
     }
+
+    if (!jobId) { setJob(null); await refresh(null); return; }
+
+    // Phase B — poll the extraction job for real stage + percentage. The
+    // generation token invalidates this loop if the component unmounts or a
+    // newer upload starts; the deadline turns a job that never resolves into an
+    // honest, retryable failure instead of an infinite spinner.
+    const gen = ++pollRef.current.gen;
+    if (pollRef.current.timer) clearTimeout(pollRef.current.timer);
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    const schedule = (fn, ms) => { pollRef.current.timer = setTimeout(fn, ms); };
+    const alive = () => pollRef.current.gen === gen;
+
+    setJob((j) => ({ ...(j || {}), phase: 'processing', file, pct: 0, stage: 'Queued' }));
+    // Turn a job that never resolves into an honest, retryable failure. Shared so
+    // BOTH the in-progress path and the transient-error path honour the deadline
+    // — otherwise a status endpoint that keeps failing would poll forever.
+    const failTimeout = (status) => {
+      setJob((j) => ({
+        ...(j || {}), phase: 'failed',
+        failure: {
+          message: 'This is taking longer than expected. The extraction may still be running — check back shortly, or try again.',
+          code: 'timeout',
+          stage: status?.stage,
+          progress: status?.progress,
+          timestamp: Date.now(),
+        },
+      }));
+      toast.error('Extraction timed out');
+    };
+    const poll = async () => {
+      if (!alive()) return; // superseded or unmounted
+      let status;
+      try {
+        status = await fetchUploadStatus(jobId);
+      } catch {
+        if (!alive()) return;
+        // A persistently unreachable status endpoint must still time out, or the
+        // overlay spins forever on a dead network.
+        if (Date.now() > deadline) { failTimeout(null); return; }
+        schedule(poll, 1500); // transient — keep polling
+        return;
+      }
+      if (!alive()) return;
+      if (status?.status === 'done') {
+        setJob((j) => ({ ...(j || {}), phase: 'done', pct: 100, total: status.total_transactions }));
+        toast.success('Statement extracted');
+        // A fresh upload becomes the latest — snap the view back to it and
+        // refresh the selector so the new statement appears in the history.
+        setSelectedJobId(null);
+        await refresh(null);
+        await loadStatements();
+        schedule(() => setJob(null), 1400); // let the success state land (§85)
+        return;
+      }
+      if (status?.status === 'failed') {
+        setJob((j) => ({
+          ...(j || {}), phase: 'failed',
+          failure: {
+            message: status.error_message || 'Extraction failed',
+            code: status.error_code,
+            stage: status.failed_stage,
+            progress: status.failed_progress,
+            timestamp: status.finished_at,
+          },
+        }));
+        toast.error(status.error_message || 'Extraction failed');
+        return;
+      }
+      if (Date.now() > deadline) { failTimeout(status); return; }
+      setJob((j) => (j ? { ...j, phase: 'processing', pct: status?.progress ?? j.pct, stage: status?.stage || j.stage } : j));
+      schedule(poll, 1000);
+    };
+    poll();
   };
 
   if (loading && !data) {
+    // Layout-matching skeleton (design corpus §81–83) — the shape maps onto
+    // the real dashboard so the resolve is a fill-in, not a reflow.
     return (
       <AppShell>
-        <div className="flex items-center justify-center h-full">
-          <div className="flex items-center gap-3 text-sm text-txt-2 font-mono uppercase tracking-ticker">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent anim-pulse-soft" />
-            {t('common.loading')} {t('nav.dashboard').toLowerCase()}
+        <div className="space-y-4 sm:space-y-5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-2"><Skeleton className="h-3 w-20" /><Skeleton className="h-7 w-40" /></div>
+            <Skeleton className="h-4 w-24" />
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+            <Skeleton className="lg:col-span-8 h-64 rounded-[22px]" />
+            <Skeleton className="lg:col-span-4 h-64 rounded-[22px]" />
+          </div>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24 rounded-2xl" />)}
           </div>
         </div>
         <SignOutConfirm />
@@ -249,18 +755,30 @@ const DashboardPage = () => {
         <div className="space-y-7 max-w-3xl mx-auto">
           <div>
             <Eyebrow>{t('dash.eyebrow')}</Eyebrow>
-            <h1 className="mt-3 text-2xl sm:text-3xl font-semibold tracking-tight">{t('dash.welcome')}</h1>
+            <h1 className="mt-3 text-2xl sm:text-3xl font-semibold tracking-tight">
+              <TextType
+                as="span"
+                text={t('dash.welcome')}
+                typingSpeed={42}
+                loop={false}
+                showCursor
+                cursorCharacter="▌"
+                cursorClassName="text-accent"
+                startOnVisible
+              />
+            </h1>
             <p className="text-sm text-txt-2 mt-2 max-w-md">
               {t('dash.welcomeSub')}
             </p>
           </div>
-          <UploadZone onFile={handleUpload} busy={busy} error={error} />
+          <UploadZone onFile={startUpload} busy={busy} error={error} />
           <EmptyState
             icon="chart"
             title={t('dash.empty.title')}
             desc={t('dash.empty.desc')}
           />
         </div>
+        <UploadOverlay job={job} onRetry={() => startUpload(job?.file)} onClose={() => setJob(null)} />
         <SignOutConfirm />
       </AppShell>
     );
@@ -270,10 +788,20 @@ const DashboardPage = () => {
   const inSpark  = timeSeries.length > 1 ? timeSeries.map((m) => m.income  || 0) : seededSeries(k.money_in);
   const outSpark = timeSeries.length > 1 ? timeSeries.map((m) => m.expense || 0) : seededSeries(k.money_out);
 
-  const topCategories = categories.slice(0, 6);
-  const catTotal = topCategories.reduce((s, c) => s + (c.value || 0), 0) || 1;
   const th = chartTheme();          // live theme-aware chart colors
   const catPalette = th.palette;    // green-first, follows light/dark
+
+  // A doughnut stops being legible past ~5 wedges — the eye can't rank arcs
+  // beyond that (charts.md #3). Show the five biggest categories and fold the
+  // long tail into a single "Other" wedge rather than drawing every category.
+  const topCategories = (() => {
+    if (categories.length <= 6) return categories;
+    const head = categories.slice(0, 5);
+    const tail = categories.slice(5);
+    const otherValue = tail.reduce((s, c) => s + (c.value || 0), 0);
+    return [...head, { name: `Other (${tail.length})`, value: otherValue, color: th.tick }];
+  })();
+  const catTotal = topCategories.reduce((s, c) => s + (c.value || 0), 0) || 1;
 
   const netUp = (k.net_flow || 0) >= 0;
 
@@ -284,9 +812,31 @@ const DashboardPage = () => {
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="min-w-0">
             <Eyebrow>{t('dash.eyebrow')}</Eyebrow>
-            <h1 className="mt-1.5 text-xl sm:text-2xl lg:text-[28px] font-semibold tracking-tight break-words">
-              {data.latest_upload?.bank ? data.latest_upload.bank.toUpperCase() : t('common.bank')}
-            </h1>
+            <div className="mt-1.5">
+              <StatementSelector
+                statements={statements}
+                selectedJobId={selectedJobId}
+                currentBank={data.latest_upload?.bank}
+                onSelect={selectStatement}
+              />
+            </div>
+            {data.same_day_siblings?.length > 0 && (
+              <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+                <span className="text-[10px] text-txt-4 font-mono uppercase tracking-ticker">
+                  Also uploaded {fmtDay(data.same_day_siblings[0].created_at)}:
+                </span>
+                {data.same_day_siblings.map((s) => (
+                  <button
+                    key={s.job_id}
+                    type="button"
+                    onClick={() => selectStatement(s.job_id)}
+                    className="press text-[11px] px-2 py-0.5 rounded-md bg-accent/10 text-accent hover:bg-accent/20 transition focus-ring"
+                  >
+                    {bankLabel(s.bank)}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <span className="inline-flex items-center gap-2 text-[11px] text-txt-3 font-mono uppercase tracking-ticker self-start sm:self-auto">
             <span className="w-1.5 h-1.5 rounded-full bg-accent anim-pulse-soft" />
@@ -310,7 +860,10 @@ const DashboardPage = () => {
             <div className="relative">
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div>
-                  <div className="text-[11px] uppercase tracking-ticker text-txt-3 mb-1">{t('common.netFlow')}</div>
+                  <div className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-ticker text-txt-3 mb-1">
+                    {t('common.netFlow')}
+                    <InfoHint content={t('hint.netFlow')} side="bottom" />
+                  </div>
                   <div className="flex items-baseline gap-2">
                     <span className="text-txt-3 text-base font-mono">TZS</span>
                     <span className="text-3xl sm:text-4xl lg:text-5xl font-bold tabular tracking-tight text-txt-1">
@@ -336,7 +889,7 @@ const DashboardPage = () => {
               <div className="mt-5 flex items-center justify-between gap-3 flex-wrap">
                 <ActionPill icon="upload" label={t('dash.uploadAnother')} as="label" htmlFor="dash-hero-upload" />
                 <input id="dash-hero-upload" type="file" accept=".pdf" className="hidden"
-                       onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUpload(f); }} />
+                       onChange={(e) => { const f = e.target.files?.[0]; if (f) startUpload(f); }} />
                 <div className="flex gap-4 text-xs text-txt-2">
                   <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-inc" />{t('common.income')}</span>
                   <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-exp" />{t('common.expense')}</span>
@@ -348,6 +901,7 @@ const DashboardPage = () => {
                 {timeSeries.length > 0 ? (
                   <ChartJS
                     type="line"
+                    ariaLabel={`Income versus expense over ${timeSeries.length} periods`}
                     height={190}
                     data={{
                       labels: timeSeries.map((m) => m.label || m.month),
@@ -393,6 +947,7 @@ const DashboardPage = () => {
                 <div className="relative">
                   <ChartJS
                     type="doughnut"
+                    ariaLabel={`Spending by category. Total ${fmtTZS(catTotal)}.`}
                     height={180}
                     data={{
                       labels: topCategories.map((c) => c.name),
@@ -444,9 +999,9 @@ const DashboardPage = () => {
           <MiniTile label={t('common.moneyIn')}  value={fmtTZS(k.money_in || 0)}  tone="inc" spark={inSpark} />
           <MiniTile label={t('common.moneyOut')} value={fmtTZS(k.money_out || 0)} tone="exp" spark={outSpark} />
           {k.savings_rate != null
-            ? <MiniTile label={t('common.savingsRate')} value={`${Number(k.savings_rate).toFixed(1)}%`} tone="accent" spark={seededSeries(k.savings_rate * 137)} />
+            ? <MiniTile label={t('common.savingsRate')} value={`${Number(k.savings_rate).toFixed(1)}%`} tone="accent" spark={seededSeries(k.savings_rate * 137)} hint={t('hint.savingsRate')} />
             : <MiniTile label={t('common.savingsRate')} locked remaining={remaining} />}
-          <MiniTile label={t('common.balanceNow')} value={fmtTZS(k.closing_balance || 0)} tone="net" spark={seededSeries(k.closing_balance)} />
+          <MiniTile label={t('common.balanceNow')} value={fmtTZS(k.closing_balance || 0)} tone="net" spark={seededSeries(k.closing_balance)} hint={t('hint.closingBalance')} />
         </div>
 
         {/* ==================================== C · TOP SPENDING + FEE LEAKAGE */}
@@ -513,6 +1068,9 @@ const DashboardPage = () => {
             </TiltCard>
           )}
         </div>
+
+        {/* ================================ C2 · MONEY MAP (per-service fees) */}
+        <MoneyMap intel={bankIntel} focus={bankFocus} onFocus={setBankFocus} />
 
         {/* ==================================== D · BALANCE CHECK (full width) */}
         {balance && (
@@ -583,9 +1141,16 @@ const DashboardPage = () => {
           </div>
         )}
 
+        {/* ================================ E2 · STATEMENT HISTORY TIMELINE */}
+        <StatementTimeline
+          statements={statements}
+          onOpen={(jobId) => { setActiveStatement(jobId); navigate('/analysis'); }}
+        />
+
         {/* ================================================ F · ACTION ENGINE */}
         <ActionPlan summary={data} />
       </div>
+      <UploadOverlay job={job} onRetry={() => startUpload(job?.file)} onClose={() => setJob(null)} />
       <SignOutConfirm />
     </AppShell>
   );

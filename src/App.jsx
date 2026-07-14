@@ -14,8 +14,10 @@ import PersonalSpendingPage from './pages/PersonalSpendingPage';
 import ReconciliationPage from './pages/ReconciliationPage';
 import UpgradePage from './pages/UpgradePage';
 import SettingsPage from './pages/SettingsPage';
+import AdminDashboardPage from './pages/AdminDashboardPage';
 import NotFoundPage from './pages/NotFoundPage';
 import PWAInstallPrompt from './components/PWAInstallPrompt';
+import { ToastProvider } from './components/common';
 import { bootAuth, API_URL } from './data/api';
 import { subscribeUnload } from './data/authStore';
 
@@ -26,13 +28,14 @@ const App = () => {
   const [booted, setBooted] = useState(false);
 
   useEffect(() => {
-    // Initialise the hash WITHOUT pushing a history entry — otherwise
-    // the user's first browser-back press just toggles the hash off and
-    // they're stuck on the page. `replaceState` rewrites the current
-    // entry in place so back / forward behave intuitively from there on.
-    if (!window.location.hash) {
-      const next = window.location.href.replace(/#?$/, '#/');
-      window.history.replaceState({}, '', next);
+    // Migrate legacy hash-style URLs (#/dashboard, #/) to clean path URLs so old
+    // bookmarks and shared links still land correctly after the switch to path
+    // routing. The owner console is deliberately left on the fragment (#/admin),
+    // so it is the one exception we DON'T rewrite. replaceState keeps it a single
+    // history entry (no extra Back step).
+    const h = window.location.hash;
+    if (h && h.startsWith('#/') && h !== '#/admin') {
+      window.history.replaceState({}, '', h.slice(1) || '/');
     }
     // Auto sign-out on tab close. See data/authStore.js::subscribeUnload
     // for the rationale (pagehide vs beforeunload, bfcache check).
@@ -69,6 +72,9 @@ const App = () => {
         <Route path="/personal-spending" component={PersonalSpendingPage} protected />
         <Route path="/reconciliation" component={ReconciliationPage} protected />
         <Route path="/settings" component={SettingsPage} protected />
+        {/* Owner console — reachable by URL only; server-enforced by
+            require_admin, client bounces non-admins to /dashboard. */}
+        <Route path="/admin" component={AdminDashboardPage} protected />
         <Route path="*" component={NotFoundPage} />
       </Router>
       {/* Auto-rendered "Install PesaLens" banner. Self-gates on
@@ -76,6 +82,9 @@ const App = () => {
           14 days on dismiss. Lives outside <Router> so it persists across
           page changes. */}
       <PWAInstallPrompt />
+      {/* Global toast stack — severity-scaled, dismissible, capped at 3.
+          Mounted once here so any page (or the api client) can fire toasts. */}
+      <ToastProvider />
     </ErrorBoundary>
   );
 };

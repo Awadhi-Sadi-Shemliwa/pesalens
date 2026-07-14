@@ -108,7 +108,7 @@ const DownloadAPK = ({ variant = 'primary', className = '' }) => {
     <a
       href={APK_URL}
       download="pesalens.apk"
-      className={`btn-secondary px-6 py-3 rounded-xl text-[15px] font-semibold inline-flex items-center justify-center gap-2 ${className}`}
+      className={`press btn-secondary px-6 py-3 rounded-xl text-[15px] font-semibold inline-flex items-center justify-center gap-2 ${className}`}
     >
       <Icon name="arrowDownRight" size={16} />
       Download APK

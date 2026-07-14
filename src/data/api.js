@@ -69,6 +69,53 @@ const refreshAccessToken = async () => {
 // trip completes so protected routes can render with up-to-date auth.
 export const bootAuth = () => bootSession(refreshAccessToken);
 
+// ---- Shared status-classification (used by BOTH the fetch `request()` path
+// and the XHR `uploadStatement` path, so auth/paywall/error semantics are
+// defined once and can't drift between them) ----
+
+// Path-based redirect (History API). The app uses path routing, so we push a
+// real path and synthesize a popstate so the client router picks it up without
+// a full reload. No-op when already on the target path.
+const redirectTo = (path) => {
+  if (typeof window === 'undefined') return;
+  if (window.location.pathname === path) return;
+  window.history.pushState({}, '', path);
+  window.dispatchEvent(new PopStateEvent('popstate'));
+};
+
+// Shape a failed response body into an Error (matches the old handleResponse).
+const makeApiError = (status, body, fallback = 'Request failed') => {
+  const raw =
+    body?.errors?.[0] || body?.message || body?.detail?.message || body?.detail || fallback;
+  const err = new Error(typeof raw === 'string' ? raw : fallback);
+  err.status = status;
+  err.payload = body;
+  if (body?.detail?.code) err.code = body.detail.code;
+  return err;
+};
+
+// 402 Payment Required — trial expired or Pro lapsed. Route to /upgrade and
+// return a typed error so the feature gate is unmistakable.
+const makePaywallError = (body) => {
+  const detail = body?.detail || {};
+  const err = new Error(detail.message || 'Subscription required');
+  err.status = 402;
+  err.code = detail.code || 'subscription_required';
+  err.payload = body;
+  redirectTo('/upgrade');
+  return err;
+};
+
+// A 401 that survived a refresh attempt: clear the session, route to sign-in,
+// and hand back a typed error.
+const sessionExpiredError = () => {
+  clearSession();
+  redirectTo('/signin');
+  const err = new Error('Your session expired. Please sign in again.');
+  err.status = 401;
+  return err;
+};
+
 const handleResponse = async (res) => {
   let data = null;
   try {
@@ -77,11 +124,7 @@ const handleResponse = async (res) => {
     /* ignore */
   }
   if (!res.ok || data?.success === false) {
-    const error = data?.errors?.[0] || data?.message || data?.detail || 'Request failed';
-    const err = new Error(typeof error === 'string' ? error : 'Request failed');
-    err.status = res.status;
-    err.payload = data;
-    throw err;
+    throw makeApiError(res.status, data);
   }
   return data;
 };
@@ -118,26 +161,14 @@ const request = async (path, options = {}, { allowRetry = true } = {}) => {
       return request(path, options, { allowRetry: false });
     }
     clearSession();
-    if (typeof window !== 'undefined' && window.location.hash !== '#/signin') {
-      window.location.hash = '/signin';
-    }
+    redirectTo('/signin');
   }
 
-  // 402 Payment Required — trial expired or Pro lapsed. Hand the caller
-  // a typed error and route the user to the upgrade page so the feature
-  // gate is unmistakable.
+  // 402 Payment Required — trial expired or Pro lapsed.
   if (res.status === 402) {
     let body = null;
     try { body = await res.json(); } catch { /* ignore */ }
-    const detail = body?.detail || {};
-    const err = new Error(detail.message || 'Subscription required');
-    err.status = 402;
-    err.code = detail.code || 'subscription_required';
-    err.payload = body;
-    if (typeof window !== 'undefined' && !window.location.hash.includes('/upgrade')) {
-      window.location.hash = '/upgrade';
-    }
-    throw err;
+    throw makePaywallError(body);
   }
 
   return handleResponse(res);
@@ -221,18 +252,98 @@ export const deleteMyAccount = async () => {
 
 // ---------- statements ----------
 
-export const fetchDashboardSummary = () => requestData('/dashboard/summary');
+// Dashboard summary. With a jobId it's scoped to that uploaded statement;
+// without, it reflects the latest upload (unchanged default).
+export const fetchDashboardSummary = (jobId) =>
+  requestData(`/dashboard/summary${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''}`);
+
+// Every uploaded statement (bank, period, recency, counts) for the Dashboard
+// statement selector / history.
+export const fetchStatementIndex = async () => {
+  const data = await requestData('/statements/index');
+  return data?.statements || [];
+};
 
 export const fetchAnalysis = (jobId) =>
   requestData(`/analysis/${encodeURIComponent(jobId)}`);
 
-export const fetchUploads = () => requestData('/uploads');
+// Per-bank "money map": spend, fees, fee-rate + saving suggestions per service.
+// Deterministic facts always ship; `llm_status !== 'ok'` → hide the coach slot.
+export const fetchBankIntel = () => requestData('/banks/intel');
 
-export const uploadStatement = (file) => {
-  const formData = new FormData();
-  formData.append('file', file);
-  return requestData('/upload', { method: 'POST', body: formData });
+// Uploads history. Rows are created at QUEUE time, so pass status='done' when
+// you need only extracted statements (a failed/queued row has no result JSON
+// and would 404 on /analysis).
+export const fetchUploads = (status) =>
+  requestData(`/uploads${status ? `?status=${encodeURIComponent(status)}` : ''}`);
+
+// Per-user activity history (timestamped): sign-ins, password changes,
+// uploads, payments.
+export const fetchActivity = () => requestData('/auth/me/activity');
+
+// Upload via XHR so we can report REAL byte-upload progress (fetch can't
+// stream upload progress). `onProgress(loaded, total)` fires as bytes leave
+// the browser. Returns the UploadResponse data ({ job_id, filename,
+// status:"processing" }); the caller then polls fetchUploadStatus(job_id).
+//
+// Mirrors request()'s auth handling: a 401 on an expired access token silently
+// refreshes and retries ONCE, and a still-401 clears the session and routes to
+// sign-in — so a long-idle tab doesn't dead-end the upload with a raw error.
+export const uploadStatement = (file, onProgress) => {
+  const attempt = (token, allowRetry) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${API_URL}/upload`);
+      xhr.withCredentials = true;
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.upload.onprogress = (e) => {
+        if (onProgress && e.lengthComputable) onProgress(e.loaded, e.total);
+      };
+      xhr.onload = async () => {
+        let body = null;
+        try { body = JSON.parse(xhr.responseText); } catch { /* ignore */ }
+        // Auth/paywall/error semantics are shared with request() via the helpers
+        // above, so a change to refresh/redirect/error-shaping applies to both.
+        if (xhr.status === 401 && allowRetry) {
+          const newToken = await refreshAccessToken();
+          if (newToken) {
+            attempt(newToken, false).then(resolve, reject);
+            return;
+          }
+          return reject(sessionExpiredError());
+        }
+        if (xhr.status === 402) {
+          return reject(makePaywallError(body));
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && body?.success !== false) {
+          return resolve(body?.data);
+        }
+        reject(makeApiError(xhr.status, body, 'Upload failed'));
+      };
+      xhr.onerror = () => {
+        const err = new Error('Network error — backend unreachable.');
+        err.status = 0;
+        reject(err);
+      };
+      const formData = new FormData();
+      formData.append('file', file);
+      xhr.send(formData);
+    });
+  return attempt(getAccessToken(), true);
 };
+
+// Poll extraction progress for a job — real stage + percentage, or the
+// stage/percentage + reason it failed at.
+export const fetchUploadStatus = (jobId) =>
+  requestData(`/upload/status/${encodeURIComponent(jobId)}`);
+
+// ---------- admin / owner dashboard ----------
+
+export const fetchAdminStats = () => requestData('/admin/stats');
+export const fetchAdminUsers = () => requestData('/admin/users');
+export const fetchAdminErrors = (code) =>
+  requestData(`/admin/errors${code ? `?code=${encodeURIComponent(code)}` : ''}`);
+export const fetchAdminActivity = () => requestData('/admin/activity');
 
 // ---------- assistant ----------
 
@@ -246,14 +357,57 @@ export const sendAssistantMessage = async (message, history = []) => {
 
 // ---------- receipts ----------
 
-export const scanReceipt = (file) => {
+// The scan is a single blocking vision-AI call that can stall for a while when
+// the free-tier models are busy (upstream 429/503 + retries). The backend now
+// caps its whole vision cascade at a 75s wall-clock budget (SCAN_BUDGET_SEC) and
+// runs it off the event loop, so it ALWAYS returns a decisive answer within
+// ~80s. This abort is deliberately set above that budget so the backend wins the
+// race — the client only aborts if the request truly hangs (dead network), and
+// the caller shows the classified failure with a retry.
+export const scanReceipt = async (file, { timeoutMs = 110000, statementJobId } = {}) => {
   const formData = new FormData();
   formData.append('file', file);
-  return requestData('/receipts/scan', { method: 'POST', body: formData });
+  // Associate the scanned receipt with the statement the user is focused on
+  // (Epic-2 per-statement scoping). Omitted → backend resolves to newest.
+  if (statementJobId) formData.append('statement_job_id', statementJobId);
+  const controller = new AbortController();
+  const timedOut = { v: false };
+  const timer = setTimeout(() => { timedOut.v = true; controller.abort(); }, timeoutMs);
+  try {
+    return await requestData('/receipts/scan', {
+      method: 'POST',
+      body: formData,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (timedOut.v) {
+      const e = new Error('The scan is taking longer than expected — the vision AI may be busy. Please try again in a moment.');
+      e.code = 'scan_timeout';
+      e.status = 0;
+      throw e;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
-export const fetchReceipts = async () => {
-  const data = await requestData('/receipts');
+// Scope opts (all optional): { scope:'statement'|'general', jobId, day, start, end }.
+// No opts → the full gallery (unchanged default). See backend list_receipts.
+const scopeQuery = (opts = {}) => {
+  const { scope, jobId, day, start, end } = opts;
+  const p = new URLSearchParams();
+  if (scope) p.set('scope', scope);
+  if (jobId) p.set('job_id', jobId);
+  if (day) p.set('day', day);
+  if (start) p.set('start', start);
+  if (end) p.set('end', end);
+  const qs = p.toString();
+  return qs ? `?${qs}` : '';
+};
+
+export const fetchReceipts = async (opts = {}) => {
+  const data = await requestData(`/receipts${scopeQuery(opts)}`);
   return data?.receipts || [];
 };
 
@@ -267,8 +421,8 @@ export const parseReceiptText = (text, { save = false } = {}) =>
 
 // ---------- personal entries ----------
 
-export const fetchPersonalEntries = async () => {
-  const data = await requestData('/personal/entries');
+export const fetchPersonalEntries = async (opts = {}) => {
+  const data = await requestData(`/personal/entries${scopeQuery(opts)}`);
   return data?.entries || [];
 };
 
@@ -309,10 +463,19 @@ export const fetchBusinessSummary = (month) => {
 // Backend caps the range at 365 days. Returns the deterministic result
 // even when LLM is unavailable; the UI hides the insight slot when
 // `llm_status !== 'ok'`.
-export const fetchReconciliation = (start_date, end_date, scope = 'personal') =>
+// `opts` (optional): { mode:'statement'|'general', jobId }. Statement mode
+// scopes to a single upload over its own period (the date range is then only a
+// hint — the backend derives the real period). Default general = today.
+export const fetchReconciliation = (start_date, end_date, scope = 'personal', opts = {}) =>
   requestData('/reconcile', {
     method: 'POST',
-    body: JSON.stringify({ start_date, end_date, scope }),
+    body: JSON.stringify({
+      start_date,
+      end_date,
+      scope,
+      mode: opts.mode || 'general',
+      ...(opts.jobId ? { job_id: opts.jobId } : {}),
+    }),
   });
 
 // Streams a PDF and triggers the browser download. Returns nothing —

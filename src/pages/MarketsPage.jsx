@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { Badge, Eyebrow, Sparkline, CountUp, readToken } from '../components/common';
+import { Badge, EmptyState, ErrorState, Eyebrow, Skeleton, Sparkline, CountUp, Tabs, TabPanel, readToken } from '../components/common';
 import { TiltCard } from '../components/motion';
 import { ChartJS, chartTheme } from '../components/ChartJS';
 import { useT, AutoT } from '../data/i18n';
@@ -183,7 +183,9 @@ const Leaders = ({ rows, label }) => {
         <span className="text-[11px] text-txt-3 font-mono uppercase tracking-ticker">top performers · 24h</span>
       </div>
       {picks.length === 0 ? (
-        <div className="bento p-6 text-center text-xs text-txt-3">No {label} data cached yet — the bot will retry.</div>
+        <div className="bento">
+          <EmptyPanel title={`No ${label} prices yet`} desc="Nothing is cached for this category right now. The market bot retries automatically." />
+        </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
           {picks.map((p, i) => (
@@ -281,7 +283,7 @@ const MarketPulse = ({ rows, label, catId }) => {
         </span>
         <span className="text-[11px] uppercase tracking-ticker text-txt-3 font-mono">avg 24h move · {label}</span>
       </div>
-      <ChartJS type="line" data={data} options={options} height={180} />
+      <ChartJS type="line" data={data} options={options} height={180} ariaLabel={`Indicative market trend for ${label}`} />
     </div>
   );
 };
@@ -634,7 +636,7 @@ const InsightPanel = ({ snapshot }) => {
               <div
                 className={`max-w-[90%] px-3 py-2 rounded-xl text-xs sm:text-sm leading-relaxed break-words whitespace-pre-wrap ${
                   m.role === 'user'
-                    ? 'btn-primary rounded-br-sm'
+                    ? 'chat-bubble-user rounded-br-sm'
                     : 'bg-surface-4/70 text-txt-1 border border-bdr/60 rounded-bl-sm'
                 }`}
               >
@@ -665,12 +667,12 @@ const InsightPanel = ({ snapshot }) => {
           onChange={(e) => setDraft(e.target.value)}
           disabled={pending}
           placeholder={t('mki.placeholder')}
-          className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-surface-4/60 border border-bdr/60 focus:border-accent/40 outline-none text-sm placeholder:text-txt-3"
+          className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-surface-4/60 border border-bdr/60 focus-ring text-sm placeholder:text-txt-3"
         />
         <button
           type="submit"
           disabled={pending || !draft.trim()}
-          className="btn-primary px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50 transition flex items-center gap-1.5 flex-shrink-0"
+          className="press btn-primary px-3 py-2 rounded-lg text-sm font-medium disabled:opacity-50 transition flex items-center gap-1.5 flex-shrink-0"
           aria-label={t('mki.ask')}
         >
           <Icon name="send" size={14} />
@@ -722,7 +724,9 @@ const DSEPanel = ({ payload }) => {
     }
   }, [rows, filter]);
 
-  if (!rows.length) return <EmptyPanel label="DSE feed has no data yet — the bot will retry." />;
+  if (!rows.length) {
+    return <EmptyPanel title="DSE prices are warming up" desc="Dar es Salaam Stock Exchange quotes land here as soon as the next sweep completes." />;
+  }
 
   const visible = sorted.slice(0, 12);
   const volumeAsOf = visible.find((s) => s.volume_as_of)?.volume_as_of;
@@ -793,7 +797,7 @@ const ForexPanel = ({ bot, global: globalFx }) => {
   const botRates = bot?.data || [];
   const globalRates = globalFx?.data || [];
   if (!botRates.length && !globalRates.length) {
-    return <EmptyPanel label="Bank of Tanzania scrape returned no rates yet." />;
+    return <EmptyPanel title="No exchange rates yet" desc="Bank of Tanzania rates refresh on a schedule. They'll appear here shortly." />;
   }
   const sortedBot = [...botRates].sort(
     (a, b) => (Number(b.selling) || Number(b.buying) || 0) - (Number(a.selling) || Number(a.buying) || 0)
@@ -857,7 +861,13 @@ const FuelPanel = ({ payload }) => {
   const data = payload?.data || {};
   const hasPrices = data.petrol || data.diesel || data.kerosene;
   if (!hasPrices) {
-    return <EmptyPanel label={data.error ? `EWURA scrape: ${data.error}` : 'Latest EWURA cap-price PDF not parsed yet.'} />;
+    /* A parse failure is an error, not an absence — it gets the warning tint (#10).
+       The raw scraper message belongs in the log, not on screen (#3). */
+    return data.error ? (
+      <EmptyPanel kind="error" title="Fuel prices couldn't be read" desc="We couldn't parse the latest EWURA cap-price notice. We'll retry on the next sweep." />
+    ) : (
+      <EmptyPanel title="Fuel prices are warming up" desc="EWURA publishes cap prices monthly. The latest notice hasn't been read yet." />
+    );
   }
   const items = [
     { label: 'Petrol',   value: data.petrol,   icon: 'zap',      color: 'exp' },
@@ -893,7 +903,7 @@ const FuelPanel = ({ payload }) => {
 
 const CryptoPanel = ({ payload }) => {
   const rows = payload?.data || [];
-  if (!rows.length) return <EmptyPanel label="Crypto feed warming up." />;
+  if (!rows.length) return <EmptyPanel title="Crypto prices are warming up" desc="Live coin prices refresh every few minutes." />;
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs sm:text-sm">
@@ -929,7 +939,7 @@ const CryptoPanel = ({ payload }) => {
 
 const IndicesPanel = ({ payload }) => {
   const rows = payload?.data || [];
-  if (!rows.length) return <EmptyPanel label="Equity indices feed warming up." />;
+  if (!rows.length) return <EmptyPanel title="World indices are warming up" desc="Global equity indices refresh on each market sweep." />;
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
       {rows.map((i) => (
@@ -949,7 +959,7 @@ const IndicesPanel = ({ payload }) => {
 
 const PredictionsPanel = ({ payload }) => {
   const rows = payload?.data || [];
-  if (!rows.length) return <EmptyPanel label="Polymarket feed warming up." />;
+  if (!rows.length) return <EmptyPanel title="Prediction markets are warming up" desc="Polymarket odds appear here once the next sweep completes." />;
   return (
     <div className="grid sm:grid-cols-2 gap-3">
       {rows.slice(0, 6).map((m, i) => {
@@ -978,10 +988,10 @@ const PredictionsPanel = ({ payload }) => {
   );
 };
 
-const EmptyPanel = ({ label }) => (
-  <div className="border border-dashed border-bdr/60 rounded-xl p-6 text-center text-xs text-txt-3">
-    {label}
-  </div>
+/* Thin wrapper over the shared EmptyState so every market panel reads the same.
+   Panels sit inside cards, so the shared component's tall padding is trimmed. */
+const EmptyPanel = ({ title, desc, kind = 'first-run' }) => (
+  <EmptyState kind={kind} title={title} desc={desc} className="!py-8" />
 );
 
 /* ================================================================
@@ -1001,27 +1011,17 @@ const MainTable = ({ snapshot, ages, universe }) => {
 
   return (
     <div className="bento p-4 sm:p-5 lg:p-6">
-      {/* Category tabs — the horizontal switcher from Market UI */}
-      <div className="flex items-center gap-1 overflow-x-auto scrollbar-none border-b border-bdr/60 -mx-1 px-1 mb-4 pb-px">
-        {TABS.map((tItem) => {
-          const on = tItem.id === tab;
-          return (
-            <button
-              key={tItem.id}
-              onClick={() => setTab(tItem.id)}
-              className={`relative flex items-center gap-1.5 px-3 py-2 text-xs sm:text-sm whitespace-nowrap transition ${
-                on ? 'text-txt-1 font-semibold' : 'text-txt-3 hover:text-txt-2'
-              }`}
-            >
-              {tItem.label}
-              {tItem.count != null && (
-                <span className={`text-[10px] px-1.5 py-0.5 rounded-md tabular ${on ? 'bg-accent/15 text-accent' : 'bg-surface-4/60 text-txt-3'}`}>{tItem.count}</span>
-              )}
-              {on && <span className="absolute -bottom-px left-0 right-0 h-0.5 rounded-full bg-accent" />}
-            </button>
-          );
-        })}
-      </div>
+      {/* Six tabs never fit a phone, so the row scrolls behind edge fades rather
+          than wrapping onto a second line (tabs.md #3–#5). */}
+      <Tabs
+        variant="underline"
+        size="sm"
+        label="Market data feeds"
+        className="mb-4"
+        tabs={TABS.map((tItem) => ({ key: tItem.id, label: tItem.label, badge: tItem.count }))}
+        active={tab}
+        onChange={setTab}
+      />
 
       <div className="flex items-center justify-between gap-2 mb-3">
         <p className="text-[10px] sm:text-[11px] text-txt-3 font-mono uppercase tracking-ticker">
@@ -1030,17 +1030,19 @@ const MainTable = ({ snapshot, ages, universe }) => {
         <Badge color={active.tone === 'accent' ? 'accent' : active.tone === 'net' ? 'net' : active.tone === 'expense' ? 'expense' : 'muted'} dot>{active.badge}</Badge>
       </div>
 
-      {/* Scoped gainers / decliners for the market you clicked */}
-      {tab === 'dse'     && <ClassMovers rows={universe?.dse} />}
-      {tab === 'crypto'  && <ClassMovers rows={universe?.crypto} />}
-      {tab === 'indices' && <ClassMovers rows={universe?.indices} />}
+      <TabPanel tabKey={tab}>
+        {/* Scoped gainers / decliners for the market you clicked */}
+        {tab === 'dse'     && <ClassMovers rows={universe?.dse} />}
+        {tab === 'crypto'  && <ClassMovers rows={universe?.crypto} />}
+        {tab === 'indices' && <ClassMovers rows={universe?.indices} />}
 
-      {tab === 'dse'     && <DSEPanel payload={snapshot?.dse} />}
-      {tab === 'crypto'  && <CryptoPanel payload={snapshot?.crypto} />}
-      {tab === 'indices' && <IndicesPanel payload={snapshot?.indices} />}
-      {tab === 'forex'   && <ForexPanel bot={snapshot?.forex_bot} global={snapshot?.forex_global} />}
-      {tab === 'fuel'    && <FuelPanel payload={snapshot?.fuel} />}
-      {tab === 'predict' && <PredictionsPanel payload={snapshot?.predictions} />}
+        {tab === 'dse'     && <DSEPanel payload={snapshot?.dse} />}
+        {tab === 'crypto'  && <CryptoPanel payload={snapshot?.crypto} />}
+        {tab === 'indices' && <IndicesPanel payload={snapshot?.indices} />}
+        {tab === 'forex'   && <ForexPanel bot={snapshot?.forex_bot} global={snapshot?.forex_global} />}
+        {tab === 'fuel'    && <FuelPanel payload={snapshot?.fuel} />}
+        {tab === 'predict' && <PredictionsPanel payload={snapshot?.predictions} />}
+      </TabPanel>
     </div>
   );
 };
@@ -1106,11 +1108,32 @@ const MarketsPage = () => {
         </div>
 
         {error && (
-          <div className="bento p-4 border border-dng/30 bg-dng/5 text-sm text-dng">
-            {error} · The cache may be empty if the backend just started — try again in a minute.
-          </div>
+          <ErrorState
+            title="Couldn't load market data"
+            cause={`${error} The cache may still be empty if the backend just started.`}
+            timestamp={Date.now()}
+            onRetry={load}
+            retryDisabled={loading}
+          />
         )}
 
+        {/* First paint only: the 5-minute refresh interval must not blank the page
+            out from under a user who is already reading it (§80). */}
+        {loading && !snapshot ? (
+          <div className="space-y-5">
+            <Skeleton className="h-40 rounded-[22px]" />
+            <Skeleton className="h-72 rounded-[22px]" />
+            <div className="grid lg:grid-cols-12 gap-4 sm:gap-5">
+              <Skeleton className="lg:col-span-8 h-96 rounded-[22px]" />
+              <div className="lg:col-span-4 space-y-4 sm:space-y-5">
+                <Skeleton className="h-28 rounded-[22px]" />
+                <Skeleton className="h-32 rounded-[22px]" />
+                <Skeleton className="h-32 rounded-[22px]" />
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
         {/* ---- TOP — ask the market advisor ---- */}
         <InsightPanel snapshot={snapshot} />
 
@@ -1130,6 +1153,8 @@ const MarketsPage = () => {
             <Distribution universe={universe} />
           </div>
         </div>
+          </>
+        )}
 
         {/* ---- BOTTOM — fine print ---- */}
         {/* Disclaimer */}

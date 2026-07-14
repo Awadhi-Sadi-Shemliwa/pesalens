@@ -107,7 +107,10 @@ export default defineConfig(({ mode }) => ({
       },
     },
   },
-  esbuild: mode === 'production'
-    ? { drop: ['console', 'debugger'] }
-    : undefined,
+  esbuild: {
+    // Automatic JSX runtime so vendored components (src/components/reactbits)
+    // that use JSX without `import React` compile — matches modern React 18.
+    jsx: 'automatic',
+    ...(mode === 'production' ? { drop: ['console', 'debugger'] } : {}),
+  },
 }));

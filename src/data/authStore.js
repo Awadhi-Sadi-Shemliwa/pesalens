@@ -15,6 +15,7 @@
 // without a network round-trip on first paint.
 
 import { useEffect, useState } from 'react';
+import { setActiveStatement } from './activeStatement';
 
 const REFRESH_KEY = 'pesalens.refreshToken';
 const USER_KEY = 'pesalens.user';
@@ -95,6 +96,9 @@ export const clearSession = () => {
   _refreshTokenMem = null;
   if (isMobile()) safeWrite(REFRESH_KEY, null);
   safeWrite(USER_KEY, null);
+  // Drop the per-user active statement so a NEXT user on this browser can't
+  // inherit a foreign job_id (which would 404 owner-checked endpoints).
+  setActiveStatement(null);
   broadcast();
 };
 

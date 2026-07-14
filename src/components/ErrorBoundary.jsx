@@ -25,7 +25,9 @@ class ErrorBoundary extends React.Component {
   handleHome = () => {
     this.setState({ hasError: false, message: '' });
     if (typeof window !== 'undefined') {
-      window.location.hash = '/';
+      // Full navigation to home — after a render crash a clean reload is the
+      // safest recovery.
+      window.location.assign('/');
     }
   };
 
@@ -43,7 +45,7 @@ class ErrorBoundary extends React.Component {
             <button onClick={this.handleHome} className="px-4 py-2 text-sm rounded-lg bg-surface-3 hover:bg-surface-4 text-txt-1 border border-bdr">
               Go home
             </button>
-            <button onClick={this.handleReload} className="px-4 py-2 text-sm rounded-lg btn-primary">
+            <button onClick={this.handleReload} className="px-4 py-2 text-sm rounded-lg press btn-primary">
               Reload
             </button>
           </div>

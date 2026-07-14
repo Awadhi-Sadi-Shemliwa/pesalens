@@ -49,6 +49,20 @@ export default {
         float: '0 24px 60px -28px rgba(0,0,0,0.6), 0 0 0 1px rgb(var(--c-accent) / 0.06)',
         ring:  '0 0 0 1px rgb(var(--c-accent) / 0.18), 0 12px 40px -12px rgb(var(--c-accent) / 0.25)',
       },
+      animation: {
+        'star-movement-bottom': 'star-movement-bottom linear infinite alternate',
+        'star-movement-top': 'star-movement-top linear infinite alternate',
+      },
+      keyframes: {
+        'star-movement-bottom': {
+          '0%': { transform: 'translate(0%, 0%)', opacity: '1' },
+          '100%': { transform: 'translate(-100%, 0%)', opacity: '0' },
+        },
+        'star-movement-top': {
+          '0%': { transform: 'translate(0%, 0%)', opacity: '1' },
+          '100%': { transform: 'translate(100%, 0%)', opacity: '0' },
+        },
+      },
     },
   },
   plugins: [],

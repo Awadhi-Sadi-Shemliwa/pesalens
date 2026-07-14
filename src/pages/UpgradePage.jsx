@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { Badge, Eyebrow } from '../components/common';
+import { Badge, Button, Eyebrow, Skeleton, toast } from '../components/common';
 import { TiltCard } from '../components/motion';
 import {
   cancelSubscription,
@@ -144,17 +144,16 @@ const PlanCard = ({ plan, busy, onChoose, recommended }) => {
           ? 'One payment for a year of full access — best for active users and small businesses.'
           : 'Cancel any time. Access stays active until the end of the billing period.'}
       </p>
-      <button
+      <Button
+        block
+        className="mt-5"
+        variant={recommended ? 'primary' : 'secondary'}
+        loading={busy}
+        loadingLabel="Starting…"
         onClick={() => onChoose(plan)}
-        disabled={busy}
-        className={`mt-5 w-full px-4 py-3 rounded-xl text-sm font-semibold transition disabled:opacity-50 ${
-          recommended
-            ? 'btn-primary'
-            : 'border border-accent/40 text-accent hover:bg-accent/10'
-        }`}
       >
-        {busy ? 'Starting…' : `Choose ${plan.interval === 'year' ? 'Annual' : 'Monthly'}`}
-      </button>
+        {`Choose ${plan.interval === 'year' ? 'Annual' : 'Monthly'}`}
+      </Button>
     </TiltCard>
   );
 };
@@ -170,8 +169,10 @@ const ManualPayCard = ({ details, onClose }) => {
     try {
       await requestPaymentConfirmation(details.payment_id);
       setConfirmed(true);
+      toast.success("We'll verify your payment and activate Pro shortly.", { title: 'Confirmation requested' });
     } catch (err) {
       setConfirmError(err.message || "Couldn't request confirmation — please try again.");
+      toast.error(err.message || 'Please try again.', { title: "Couldn't request confirmation" });
     } finally {
       setConfirming(false);
     }
@@ -242,13 +243,13 @@ const UpgradePage = () => {
     load();
   }, []);
 
-  // Handle Stripe success redirect (?status=success).
+  // Handle Stripe success redirect (?status=success). Read the real query
+  // string (path routing); fall back to a legacy hash query for old links.
   useEffect(() => {
-    const search = window.location.hash.split('?')[1] || '';
+    const search = window.location.search.slice(1) || window.location.hash.split('?')[1] || '';
     if (search.includes('status=success')) {
-      // Replace the hash to clear the query so a refresh doesn't re-trigger.
-      const nextHash = window.location.hash.split('?')[0];
-      window.history.replaceState(null, '', `#${nextHash.replace(/^#/, '')}`);
+      // Clear the query so a refresh doesn't re-trigger, keeping the clean path.
+      window.history.replaceState(null, '', window.location.pathname);
       load();
     }
   }, []);
@@ -266,6 +267,7 @@ const UpgradePage = () => {
       setPending(data);
     } catch (err) {
       setError(err.message || 'Could not start checkout.');
+      toast.error(err.message || 'Could not start checkout.', { title: 'Checkout failed' });
     } finally {
       setBusyPlan(null);
     }
@@ -276,8 +278,12 @@ const UpgradePage = () => {
     try {
       await cancelSubscription();
       await load();
+      /* Cancelling a subscription is a billing change; it must never complete
+         without telling the user it did (§65). */
+      toast.success('Your Pro subscription has been cancelled.', { title: 'Subscription cancelled' });
     } catch (err) {
       setError(err.message || 'Could not cancel subscription.');
+      toast.error(err.message || 'Could not cancel subscription.', { title: 'Cancellation failed' });
     }
   };
 
@@ -302,8 +308,14 @@ const UpgradePage = () => {
           </div>
         )}
 
+        {/* Skeleton matches StatusCard's shape rather than announcing the wait in
+            words (§81–83). Prices must never render a placeholder value. */}
         {loading ? (
-          <div className="bento p-8 text-center text-sm text-txt-3">Loading subscription…</div>
+          <div className="bento p-5 sm:p-6 space-y-3">
+            <Skeleton className="h-3 w-24" />
+            <Skeleton className="h-7 w-48" />
+            <Skeleton className="h-4 w-full max-w-sm" />
+          </div>
         ) : (
           <StatusCard subscription={subscription} />
         )}

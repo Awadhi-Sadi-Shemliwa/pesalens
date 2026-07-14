@@ -50,7 +50,36 @@ export const chartTheme = () => ({
   ],
 });
 
-export const ChartJS = ({ type, data, options = {}, height = 260 }) => {
+/* A canvas is opaque to assistive tech and to anyone who can't perceive colour,
+   so every chart needs a text equivalent (charts.md, WCAG 1.1.1). We build a
+   visually-hidden data table from the same `data` the chart draws, and name the
+   canvas with `ariaLabel`. Sighted users see the chart; everyone else gets the
+   numbers. */
+const SrDataTable = ({ data }) => {
+  const labels = data?.labels || [];
+  const sets = data?.datasets || [];
+  if (!labels.length || !sets.length) return null;
+  return (
+    <table className="sr-only">
+      <thead>
+        <tr>
+          <th>Category</th>
+          {sets.map((s, i) => <th key={i}>{s.label || `Series ${i + 1}`}</th>)}
+        </tr>
+      </thead>
+      <tbody>
+        {labels.map((lab, r) => (
+          <tr key={r}>
+            <th scope="row">{String(lab)}</th>
+            {sets.map((s, i) => <td key={i}>{String(Array.isArray(s.data) ? s.data[r] : '')}</td>)}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+};
+
+export const ChartJS = ({ type, data, options = {}, height = 260, ariaLabel }) => {
   const canvasRef = useRef(null);
   const chartRef = useRef(null);
   // Bump on theme toggle so the chart rebuilds with fresh token colors.
@@ -68,12 +97,20 @@ export const ChartJS = ({ type, data, options = {}, height = 260 }) => {
 
     const th = chartTheme();
 
+    // A bar's length is its whole encoding, so a truncated value axis misstates
+    // the ratio between bars (charts.md #1). Force the value axis to start at
+    // zero unless the caller has deliberately configured that scale itself.
+    const baseScales = type === 'bar' && !options.scales
+      ? { scales: { y: { beginAtZero: true } } }
+      : {};
+
     chartRef.current = new Chart(canvasRef.current, {
       type,
       data,
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        ...baseScales,
         plugins: {
           legend: { display: false },
           tooltip: {
@@ -98,7 +135,12 @@ export const ChartJS = ({ type, data, options = {}, height = 260 }) => {
 
   return (
     <div style={{ height }}>
-      <canvas ref={canvasRef} />
+      <canvas
+        ref={canvasRef}
+        role="img"
+        aria-label={ariaLabel || 'Chart'}
+      />
+      <SrDataTable data={data} />
     </div>
   );
 };

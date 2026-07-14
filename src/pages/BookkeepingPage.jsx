@@ -1,10 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { Eyebrow, Badge, Modal } from '../components/common';
+import { Eyebrow, Badge, EmptyState, Modal, Skeleton, toast } from '../components/common';
 import { TiltCard } from '../components/motion';
 import { useT } from '../data/i18n';
 import LiveTextScanner from '../components/LiveTextScanner';
+import { consumeNavIntent } from '../components/Router';
 
 const TONE = {
   accent: 'bg-accent/12 text-accent border-accent/25',
@@ -63,6 +64,7 @@ const BookkeepingPage = () => {
   const [showAdd, setShowAdd] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [latest, setLatest] = useState(null);
   const [entries, setEntries] = useState([]);
@@ -71,6 +73,7 @@ const BookkeepingPage = () => {
   const [summary, setSummary] = useState(null);
   const [patterns, setPatterns] = useState({ insights: [], by_category: {}, receipt_count: 0 });
   const galleryRef = useRef(null);
+  const captureRef = useRef(null);
 
   const setDraftField = (key, value) =>
     setDraft((prev) => {
@@ -118,12 +121,37 @@ const BookkeepingPage = () => {
   };
 
   useEffect(() => {
-    loadPatterns();
-    loadEntries();
-    loadSummary(month);
+    /* Only the first load draws a skeleton; the month-change refresh below must not
+       blank out a ledger the user is already reading (§80). */
+    Promise.allSettled([loadPatterns(), loadEntries(), loadSummary(month)]).finally(() =>
+      setLoading(false),
+    );
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { loadSummary(month); }, [month]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Honour a one-shot intent from another page (e.g. a BUSINESS-scope
+  // "Scan a receipt" in reconciliation). `scan` scrolls to the capture panel
+  // (Take Photo / Gallery); `add` opens the ledger-entry form.
+  const [pendingScanScroll, setPendingScanScroll] = useState(false);
+  useEffect(() => {
+    const intent = consumeNavIntent();
+    if (intent === 'scan') setPendingScanScroll(true);
+    else if (intent === 'add') { setError(null); setShowAdd(true); }
+  }, []);
+
+  // Scroll only AFTER the initial loads resolve. Scrolling on mount lands wrong
+  // because the still-empty P&L/summary/ledger sections above the capture panel
+  // inflate once their data arrives, pushing the panel out from under the
+  // viewport. Waiting for `loading` to clear means the layout has settled.
+  useEffect(() => {
+    if (!pendingScanScroll || loading) return;
+    const id = requestAnimationFrame(() => {
+      captureRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setPendingScanScroll(false);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [pendingScanScroll, loading]);
 
   const saveEntry = async () => {
     const amt = parseFloat(draft.amount);
@@ -148,8 +176,10 @@ const BookkeepingPage = () => {
       setDraft(blankEntry());
       setShowAdd(false);
       await Promise.all([loadEntries(), loadSummary(month)]);
+      toast.success('Entry saved');
     } catch (err) {
       setError(err?.message || 'Could not save entry.');
+      toast.error(err?.message || 'Could not save entry.');
     }
   };
 
@@ -159,9 +189,11 @@ const BookkeepingPage = () => {
     try {
       await deleteBusinessEntry(id);
       loadSummary(month);
+      toast.success('Entry deleted');
     } catch (err) {
       setEntries(previous);
       setError(err?.message || 'Could not delete entry.');
+      toast.error(err?.message || 'Could not delete entry.');
     }
   };
 
@@ -170,8 +202,10 @@ const BookkeepingPage = () => {
     setError(null);
     try {
       await downloadBusinessReport(month);
+      toast.success('Report downloaded');
     } catch (err) {
       setError(err?.message || 'Could not download report.');
+      toast.error(err?.message || 'Could not download report.');
     } finally {
       setDownloading(false);
     }
@@ -185,12 +219,15 @@ const BookkeepingPage = () => {
       const data = await scanReceipt(file);
       if (data?.is_receipt === false) {
         setError(data.message || 'That image is not a receipt.');
+        toast.warning(data.message || 'That image is not a receipt.');
         return;
       }
       setLatest(data);
       await Promise.all([loadPatterns(), loadSummary(month)]);
+      toast.success('Receipt captured');
     } catch (err) {
       setError(err?.message || 'Receipt scan failed.');
+      toast.error(err?.message || 'Receipt scan failed.');
     } finally {
       setScanning(false);
     }
@@ -223,10 +260,10 @@ const BookkeepingPage = () => {
             <p className="text-xs text-txt-3 mt-1.5 font-mono uppercase tracking-ticker">Manual ledger · receipts · P&amp;L · balance sheet</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => { setError(null); setShowAdd(true); }} className="btn-primary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
+            <button onClick={() => { setError(null); setShowAdd(true); }} className="press btn-primary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
               <Icon name="plus" size={14} />Add Entry
             </button>
-            <button onClick={() => setShowCamera(true)} className="btn-secondary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
+            <button onClick={() => setShowCamera(true)} className="press btn-secondary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
               <Icon name="receipt" size={14} />Scan Receipt
             </button>
           </div>
@@ -249,7 +286,7 @@ const BookkeepingPage = () => {
             <button
               onClick={handleDownload}
               disabled={downloading}
-              className="btn-primary px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
+              className="press btn-primary px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2 disabled:opacity-50"
             >
               <Icon name="download" size={14} />
               {downloading ? 'Preparing…' : 'Download PDF'}
@@ -364,10 +401,39 @@ const BookkeepingPage = () => {
             </div>
             <span className="text-xs text-txt-3 font-mono uppercase tracking-ticker">{monthEntries.length}</span>
           </div>
-          {monthEntries.length === 0 ? (
-            <div className="p-8 text-center text-sm text-txt-3">
-              No entries this month yet. Click <span className="text-accent font-medium">Add Entry</span> to record revenue, expenses, assets, liabilities, or equity.
+          {/* An empty month is a filtered list, not an empty ledger — different
+              cause, different recovery verb (empty-states.md #7, #9). */}
+          {loading ? (
+            <div className="p-4 space-y-2">
+              {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-12 rounded-xl" />)}
             </div>
+          ) : monthEntries.length === 0 ? (
+            entries.length > 0 ? (
+              <EmptyState
+                kind="filtered"
+                title="Nothing recorded in this month"
+                hiddenCount={entries.length}
+                action={
+                  <button
+                    onClick={() => setMonth(currentMonth())}
+                    className="rounded-xl border border-bdr px-4 py-2 text-[13px] font-semibold text-txt-1 hover:bg-surface-3 transition focus-ring"
+                  >
+                    Reset to this month
+                  </button>
+                }
+              />
+            ) : (
+              <EmptyState
+                kind="first-run"
+                title="Your ledger is empty"
+                desc="Record revenue, expenses, assets, liabilities or equity — PesaLens keeps the books balanced for you."
+                action={
+                  <button onClick={() => setShowAdd(true)} className="press btn-primary rounded-xl px-4 py-2 text-[13px] font-semibold focus-ring">
+                    Add your first entry
+                  </button>
+                }
+              />
+            )
           ) : (
             <>
               <div className="md:hidden divide-y divide-bdr/40">
@@ -434,7 +500,7 @@ const BookkeepingPage = () => {
         </div>
 
         {/* ---- Receipt scan tools ---- */}
-        <div className="bento p-5 lg:p-6">
+        <div ref={captureRef} className="bento p-5 lg:p-6 scroll-mt-24">
           <Eyebrow num="05">Capture a receipt</Eyebrow>
           <h3 className="mt-2 mb-4 text-base font-semibold tracking-tight">Add expenses by photo</h3>
           <input ref={galleryRef} type="file" accept="image/*" className="hidden" onChange={onPick} />
@@ -601,7 +667,7 @@ const BookkeepingPage = () => {
             {error && (
               <div className="p-3 bg-exp/10 border border-exp/30 rounded-xl text-xs text-exp">{error}</div>
             )}
-            <button onClick={saveEntry} className="w-full btn-primary py-3 rounded-xl font-semibold text-sm">Save Entry</button>
+            <button onClick={saveEntry} className="w-full press btn-primary btn-block py-3 rounded-xl font-semibold text-sm">Save Entry</button>
           </div>
         </Modal>
 

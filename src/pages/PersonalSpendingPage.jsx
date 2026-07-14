@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
-import { Badge, Modal, Eyebrow, CountUp } from '../components/common';
+import { Badge, EmptyState, Modal, Eyebrow, CountUp, Segmented, FilterChip, ChipRow, Skeleton, ProgressBar, ErrorState, toast } from '../components/common';
 import { TiltCard } from '../components/motion';
 import { ChartJS, chartTheme } from '../components/ChartJS';
 import LiveTextScanner from '../components/LiveTextScanner';
@@ -14,8 +14,15 @@ import {
   fetchPersonalEntries,
   createPersonalEntry,
   deletePersonalEntry,
+  fetchStatementIndex,
 } from '../data/api';
 import { useT, AutoT } from '../data/i18n';
+import { consumeNavIntent } from '../components/Router';
+import { useActiveStatement } from '../data/activeStatement';
+import { bankLabel } from '../data/bankLabels';
+
+const isoDaysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
+const todayIso = () => new Date().toISOString().slice(0, 10);
 
 const PERSONAL_CATEGORIES = ['Groceries', 'Transport', 'Dining', 'Utilities', 'Health', 'Housing', 'Entertainment', 'Other'];
 
@@ -80,11 +87,95 @@ const blankEntry = () => ({
   amount: '',
 });
 
+/* ----------------------------------------------------------------
+   ScanOverlay — HONEST receipt-scan feedback (design corpus §84–89,
+   error-states.md #3). The instant a scan starts this blocks the surface so the
+   user can't fire a second scan, shows indeterminate progress while the single
+   vision-AI call runs, and resolves into a decisive success or a classified,
+   timestamped failure with the right retry. It is NOT dismissable while scanning
+   — the client-side scan timeout (110s, see scanReceipt in api.js) is the escape
+   hatch, not a second upload.
+   ---------------------------------------------------------------- */
+const ScanOverlay = ({ job, onRetry, onClose }) => {
+  if (!job || job.phase === 'idle') return null;
+  const scanning = job.phase === 'scanning';
+  const done = job.phase === 'done';
+  const failed = job.phase === 'failed';
+  const notReceipt = job.failure?.code === 'not_receipt';
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-md anim-in" />
+      <div
+        className="relative w-full max-w-md bg-surface-2 border border-bdr rounded-2xl p-6 anim-up"
+        style={{ boxShadow: '0 40px 100px -20px rgba(0,0,0,0.7)' }}
+      >
+        {scanning && (
+          <>
+            <div className="flex items-center gap-2 mb-4">
+              <span className="w-2 h-2 rounded-full bg-accent anim-pulse-soft" />
+              <span className="font-mono text-[10px] uppercase tracking-ticker text-txt-3">Scanning</span>
+            </div>
+            <h3 className="text-lg font-semibold tracking-tight mb-1 truncate">Reading your receipt</h3>
+            <p className="text-sm text-txt-2 mb-5">
+              Vision AI is pulling out the vendor, date, totals and line items…
+            </p>
+            <ProgressBar
+              indeterminate
+              tone="accent"
+              label="Reading with vision AI"
+              sublabel="This can take a moment — free-tier models are sometimes busy. Hang tight."
+            />
+          </>
+        )}
+
+        {done && (
+          <div className="flex flex-col items-center text-center py-2">
+            <div className="p-3 rounded-2xl bg-inc/10 border border-inc/25 mb-3">
+              <Icon name="check" size={28} className="text-inc" />
+            </div>
+            <h3 className="text-lg font-semibold text-txt-1">Receipt captured</h3>
+            <p className="text-sm text-txt-2 mt-1">
+              {job.vendor || 'Saved'}{job.total != null ? ` · ${fmtTZSFull(job.total)}` : ''}
+            </p>
+          </div>
+        )}
+
+        {failed && (
+          <ErrorState
+            icon={notReceipt ? 'image' : 'alert'}
+            title={notReceipt ? 'That’s not a receipt' : 'Scan didn’t finish'}
+            cause={job.failure?.message}
+            code={job.failure?.code}
+            timestamp={job.failure?.timestamp}
+            onRetry={onRetry}
+            retryLabel={notReceipt ? 'Choose another image' : 'Try again'}
+          />
+        )}
+
+        {failed && (
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="absolute top-3 right-3 p-1.5 rounded-lg text-txt-3 hover:text-txt-1 hover:bg-surface-4 focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            <Icon name="x" size={18} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const PersonalSpendingPage = () => {
   const [showScan, setShowScan] = useState(false);
   const [showCamera, setShowCamera] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
-  const [scanning, setScanning] = useState(false);
+  // Honest scan job state drives a prominent overlay: scanning → done, or a
+  // classified failure with a reason + retry. `scanning` is derived so the
+  // existing disabled/busy checks keep working unchanged.
+  const [scanJob, setScanJob] = useState(null);
+  const scanning = scanJob?.phase === 'scanning';
   const [latest, setLatest] = useState(null);
   const [history, setHistory] = useState([]);
   const [manualEntries, setManualEntries] = useState([]);
@@ -95,17 +186,47 @@ const PersonalSpendingPage = () => {
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [txnFilter, setTxnFilter] = useState('all');   // all | receipt | manual
+  const [catFilter, setCatFilter] = useState(null);    // null = every category
   const [trendRange, setTrendRange] = useState(14);     // 7 | 14 | 30 days
+  const [loading, setLoading] = useState(true);
   const { t } = useT();
+
+  // ── Per-statement scoping (Epic-2) ─────────────────────────────────────────
+  // The ledger scopes to a single statement ("This statement", shared with the
+  // Dashboard selector) or a broad "General" window. Default = statement; falls
+  // back to General when the user has no uploads to scope to.
+  const [activeJobId] = useActiveStatement();
+  const [statements, setStatements] = useState([]);
+  const [statementsReady, setStatementsReady] = useState(false);
+  const [viewMode, setViewMode] = useState('statement'); // 'statement' | 'general'
+  const [genStart, setGenStart] = useState(isoDaysAgo(90));
+  const [genEnd, setGenEnd] = useState(todayIso());
+  const showScope = statements.length > 0;
+  // Only trust the active statement if it's actually one of THIS user's
+  // statements — a stale id (e.g. left in storage by a previous account) would
+  // otherwise scope to a foreign job. Fall back to the newest (index is
+  // newest-first, matching the backend's null-resolution).
+  const effectiveJobId =
+    (activeJobId && statements.some((s) => s.job_id === activeJobId))
+      ? activeJobId
+      : (statements[0]?.job_id || null);
+  const activeStatement = statements.find((s) => s.job_id === effectiveJobId) || null;
+  const scopeOpts = useMemo(() => {
+    if (!showScope) return {};                              // no uploads → unscoped (as before)
+    if (viewMode === 'general') return { scope: 'general', start: genStart, end: genEnd };
+    if (effectiveJobId) return { scope: 'statement', jobId: effectiveJobId };
+    return {};
+  }, [showScope, viewMode, effectiveJobId, genStart, genEnd]);
+  const scopeKey = JSON.stringify(scopeOpts);
 
   const galleryRef = useRef(null);
   const modalGalleryRef = useRef(null);
 
   const setDraftField = (key, value) => setDraft((prev) => ({ ...prev, [key]: value }));
 
-  const refreshEntries = async () => {
+  const refreshEntries = async (opts = scopeOpts) => {
     try {
-      const rows = await fetchPersonalEntries();
+      const rows = await fetchPersonalEntries(opts);
       setManualEntries(
         (rows || []).map((row) => ({
           id: row.id,
@@ -125,9 +246,9 @@ const PersonalSpendingPage = () => {
     }
   };
 
-  const refreshReceipts = async () => {
+  const refreshReceipts = async (opts = scopeOpts) => {
     try {
-      const rows = await fetchReceipts();
+      const rows = await fetchReceipts(opts);
       setReceipts(rows || []);
     } catch (err) {
       if (err?.status && err.status !== 401) {
@@ -155,6 +276,7 @@ const PersonalSpendingPage = () => {
         description: draft.description.trim() || null,
         amount: amt,
         direction: 'expense',
+        statement_job_id: effectiveJobId || undefined,
       });
       setManualEntries((prev) => [
         {
@@ -170,8 +292,10 @@ const PersonalSpendingPage = () => {
       ]);
       setDraft(blankEntry());
       setShowAdd(false);
+      toast.success('Entry saved');
     } catch (err) {
       setError(err?.message || 'Could not save entry.');
+      toast.error(err?.message || 'Could not save entry.');
     }
   };
 
@@ -180,9 +304,11 @@ const PersonalSpendingPage = () => {
     setManualEntries((prev) => prev.filter((e) => e.id !== id));
     try {
       await deletePersonalEntry(id);
+      toast.success('Entry deleted');
     } catch (err) {
       setManualEntries(previous);
       setError(err?.message || 'Could not delete entry.');
+      toast.error(err?.message || 'Could not delete entry.');
     }
   };
 
@@ -196,31 +322,99 @@ const PersonalSpendingPage = () => {
   };
 
   useEffect(() => {
+    /* Patterns + the statement index load once; the ledger itself reloads on
+       every scope change (below). We gate the first ledger fetch on the index
+       resolving so we don't fire an UNSCOPED request (statements still empty)
+       and then immediately re-fetch scoped — which briefly flashed the full
+       ledger before narrowing. */
     refreshPatterns();
-    refreshEntries();
-    refreshReceipts();
+    fetchStatementIndex()
+      .then((rows) => setStatements(rows || []))
+      .catch(() => { /* index is non-critical — fall back to unscoped */ })
+      .finally(() => setStatementsReady(true));
+  }, []);
+
+  useEffect(() => {
+    /* Only the first load draws a skeleton; later scope switches must not blank
+       out a list the user is already reading (§80). Wait for the statement
+       index so the very first fetch already carries the right scope. */
+    if (!statementsReady) return;
+    Promise.allSettled([refreshEntries(scopeOpts), refreshReceipts(scopeOpts)]).finally(() =>
+      setLoading(false),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeKey, statementsReady]);
+
+  // Honour a one-shot intent handed over by another page (e.g. the
+  // reconciliation "Scan a receipt" CTA). `scan` opens the gallery/camera
+  // picker; `add` opens the manual-entry form — so a personal-scope action in
+  // reconciliation lands exactly on the right personal action here.
+  useEffect(() => {
+    const intent = consumeNavIntent();
+    if (intent === 'scan') setShowScan(true);
+    else if (intent === 'add') { setError(null); setShowAdd(true); }
   }, []);
 
   const handleScan = async (file) => {
     if (!file) return;
-    setScanning(true);
     setError(null);
     setNotice(null);
+    setScanJob({ phase: 'scanning', file });
     try {
-      const data = await scanReceipt(file);
+      // Associate the receipt with the statement in focus (or newest when
+      // viewing General) so it lands in the right per-statement scope.
+      const data = await scanReceipt(file, { statementJobId: effectiveJobId });
       if (data?.is_receipt === false) {
-        setNotice(data.message || 'That image is not a receipt. Please add a receipt.');
+        // The backend returns 200 + is_receipt:false for TWO different reasons:
+        // the model saw a non-receipt image (carries image_description), or every
+        // vision model was busy/failed (message only). Surface either prominently
+        // with the right next step — retrying a non-receipt is pointless, so that
+        // case sends the user to pick another image instead.
+        const notReceipt = !!data.image_description;
+        setScanJob({
+          phase: 'failed', file,
+          failure: {
+            message: data.message || 'That image is not a receipt.',
+            code: notReceipt ? 'not_receipt' : 'vision_unavailable',
+            timestamp: Date.now(),
+          },
+        });
+        toast.warning(data.message || 'That image is not a receipt.');
         return;
       }
       setLatest(data);
       setHistory((prev) => [data, ...prev].slice(0, 10));
       await refreshPatterns();
       await refreshReceipts();
+      setScanJob({ phase: 'done', file, vendor: data.vendor, total: data.total });
+      toast.success('Receipt captured');
+      // Let the success state land, then dismiss (the Latest card shows below).
+      setTimeout(() => setScanJob((j) => (j?.phase === 'done' ? null : j)), 1400);
     } catch (err) {
-      setError(err.message || 'Receipt scan failed');
-    } finally {
-      setScanning(false);
+      setScanJob({
+        phase: 'failed', file,
+        failure: {
+          message: err?.message || 'Receipt scan failed',
+          code: err?.code || 'scan_error',
+          timestamp: Date.now(),
+        },
+      });
+      toast.error(err?.message || 'Receipt scan failed');
     }
+  };
+
+  // Retry from the failure overlay: re-scan the same image for transient
+  // failures; for a "not a receipt" verdict, re-open the picker so the user can
+  // choose a different image (re-scanning the same one would just fail again).
+  const retryScan = () => {
+    const job = scanJob;
+    if (!job?.file) { setScanJob(null); return; }
+    if (job.failure?.code === 'not_receipt') {
+      setScanJob(null);
+      galleryRef.current?.click();
+      return;
+    }
+    handleScan(job.file);
   };
 
   const handleCameraCapture = async (file) => {
@@ -330,10 +524,33 @@ const PersonalSpendingPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allEntries.length, monthlyTotal]);
 
-  // Transactions grouped by day, honouring the receipt/manual filter.
-  const filteredEntries = allEntries.filter((e) =>
-    txnFilter === 'all' ? true : txnFilter === 'receipt' ? e.source === 'receipt' : e.source !== 'receipt',
+  // Two independent facets: source (all|receipt|manual) and category. Selecting
+  // in a second facet intersects — AND across groups (filter-chips.md #3).
+  const bySource = (e) =>
+    txnFilter === 'all' ? true : txnFilter === 'receipt' ? e.source === 'receipt' : e.source !== 'receipt';
+  const byCategory = (e) => (catFilter ? e.category === catFilter : true);
+  const filteredEntries = allEntries.filter((e) => bySource(e) && byCategory(e));
+
+  // Each facet's counts are measured against the OTHER facet's current
+  // selection, so a chip never promises rows the sibling filter has already
+  // excluded — tapping it would land on an empty list.
+  const sourceCounts = {
+    receipt: allEntries.filter((e) => e.source === 'receipt' && byCategory(e)).length,
+    manual: allEntries.filter((e) => e.source !== 'receipt' && byCategory(e)).length,
+  };
+  const categoryCounts = useMemo(() => {
+    const by = {};
+    for (const e of allEntries) if (bySource(e)) by[e.category] = (by[e.category] || 0) + 1;
+    return by;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries.length, txnFilter, monthlyTotal]);
+  const categories = useMemo(
+    () => [...new Set(allEntries.map((e) => e.category).filter(Boolean))].sort(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allEntries.length, monthlyTotal],
   );
+  const activeFilterCount = (txnFilter !== 'all' ? 1 : 0) + (catFilter ? 1 : 0);
+
   const dayGroups = useMemo(() => {
     const by = {};
     for (const e of filteredEntries) {
@@ -347,7 +564,7 @@ const PersonalSpendingPage = () => {
       items: by[k],
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredEntries.length, txnFilter, monthlyTotal]);
+  }, [filteredEntries.length, txnFilter, catFilter, monthlyTotal]);
 
   const overviewTiles = [
     { label: t('pp.session'), sub: 'All recorded spend', val: monthlyTotal, grad: 'from-exp/25 via-exp/10 to-transparent', ring: 'border-exp/25', chip: 'bg-exp/15 text-exp', icon: 'wallet' },
@@ -365,14 +582,53 @@ const PersonalSpendingPage = () => {
             <p className="text-xs text-txt-3 mt-1.5 font-mono uppercase tracking-ticker">{t('pp.tagline')}</p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            <button onClick={() => { setError(null); setShowAdd(true); }} className="btn-primary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
+            <button onClick={() => { setError(null); setShowAdd(true); }} className="press btn-primary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
               <Icon name="plus" size={14} />{t('bk.addEntry')}
             </button>
-            <button onClick={() => setShowScan(true)} className="btn-secondary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
+            <button onClick={() => setShowScan(true)} className="press btn-secondary px-4 py-2.5 rounded-lg text-sm font-medium flex items-center gap-2">
               <Icon name="receipt" size={14} />{t('bk.scanReceipt')}
             </button>
           </div>
         </div>
+
+        {/* ===== SCOPE ============================================== */}
+        {showScope && (
+          <div className="rounded-2xl border border-bdr bg-surface-2/40 p-3 sm:p-3.5 flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
+            <div className="flex items-center gap-3 min-w-0">
+              <Segmented
+                label="Ledger scope"
+                value={viewMode}
+                onChange={setViewMode}
+                options={[
+                  { key: 'statement', label: 'This statement' },
+                  { key: 'general', label: 'General' },
+                ]}
+              />
+              {viewMode === 'statement' && activeStatement && (
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Badge color="net">{bankLabel(activeStatement.bank, 'Statement')}</Badge>
+                  {activeStatement.period_end && (
+                    <span className="text-[11px] text-txt-3 font-mono truncate">
+                      {activeStatement.period_start || '—'} → {activeStatement.period_end}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+            {viewMode === 'general' && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="text-[11px] text-txt-3 uppercase tracking-wide">From</label>
+                <input type="date" value={genStart} max={genEnd}
+                  onChange={(e) => setGenStart(e.target.value)}
+                  className="focus-ring bg-surface-1 border border-bdr rounded-lg px-2.5 py-1.5 text-xs text-txt-1" />
+                <label className="text-[11px] text-txt-3 uppercase tracking-wide">To</label>
+                <input type="date" value={genEnd} min={genStart} max={todayIso()}
+                  onChange={(e) => setGenEnd(e.target.value)}
+                  className="focus-ring bg-surface-1 border border-bdr rounded-lg px-2.5 py-1.5 text-xs text-txt-1" />
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Top-level status banners (kept visible above the fold). */}
         {notice && (
@@ -467,20 +723,87 @@ const PersonalSpendingPage = () => {
                 <Eyebrow num="03">Transactions</Eyebrow>
                 <h3 className="mt-1.5 text-base font-semibold tracking-tight">{allEntries.length} recorded</h3>
               </div>
-              <div className="flex items-center gap-1 rounded-lg border border-bdr/60 p-0.5">
-                {[{ id: 'all', label: 'All' }, { id: 'receipt', label: 'Receipts' }, { id: 'manual', label: 'Manual' }].map((f) => (
-                  <button key={f.id} onClick={() => setTxnFilter(f.id)}
-                    className={`text-[11px] px-2.5 py-1 rounded-md transition font-medium ${txnFilter === f.id ? 'bg-accent/15 text-accent' : 'text-txt-3 hover:text-txt-1'}`}>
-                    {f.label}
-                  </button>
-                ))}
-              </div>
+              {/* An exclusive facet with three options is a segmented control, not a
+                  chip row (tabs.md #10). The badge recounts on the same frame as the
+                  click, so a toggle always has a visible consequence (filter-chips.md #4). */}
+              <Segmented
+                label="Transaction source"
+                value={txnFilter}
+                onChange={setTxnFilter}
+                options={[
+                  { key: 'all', label: 'All', badge: allEntries.length },
+                  { key: 'receipt', label: 'Receipts', badge: sourceCounts.receipt },
+                  { key: 'manual', label: 'Manual', badge: sourceCounts.manual },
+                ]}
+              />
             </div>
 
-            {dayGroups.length === 0 ? (
-              <div className="p-10 text-center text-sm text-txt-3">
-                {t('pp.entriesEmpty')} <span className="text-accent font-medium">{t('bk.addEntry')}</span>.
+            {/* Category facet — a scrolling chip row, since the set is open-ended
+                and would wrap into a wall (filter-chips.md #8). Counts honour the
+                source facet above; a category with none is disabled, not dropped. */}
+            {categories.length > 0 && (
+              <div className="px-4 sm:px-5 pt-3 border-b border-bdr/50 pb-3">
+                <ChipRow
+                  activeCount={activeFilterCount}
+                  onClear={() => { setTxnFilter('all'); setCatFilter(null); }}
+                  resultCount={filteredEntries.length}
+                  resultNoun="shown"
+                >
+                  <FilterChip active={!catFilter} onClick={() => setCatFilter(null)}>All</FilterChip>
+                  {categories.map((c) => (
+                    <FilterChip
+                      key={c}
+                      active={catFilter === c}
+                      disabled={!categoryCounts[c]}
+                      count={categoryCounts[c] || 0}
+                      onClick={() => setCatFilter(catFilter === c ? null : c)}
+                    >
+                      {c}
+                    </FilterChip>
+                  ))}
+                </ChipRow>
               </div>
+            )}
+
+            {loading ? (
+              <div className="p-4 space-y-2">
+                {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-12 rounded-xl" />)}
+              </div>
+            ) : dayGroups.length === 0 ? (
+              allEntries.length > 0 ? (
+                /* Not an empty ledger — the active filters hid every row. Name the
+                   hidden count and hand back an exit (empty-states.md #9). */
+                <EmptyState
+                  kind="filtered"
+                  title="No transactions match these filters"
+                  hiddenCount={allEntries.length}
+                  action={
+                    <button onClick={() => { setTxnFilter('all'); setCatFilter(null); }} className="press btn-secondary rounded-xl px-4 py-2 text-[13px] font-semibold focus-ring">
+                      Clear filters
+                    </button>
+                  }
+                />
+              ) : (
+              <EmptyState
+                kind="first-run"
+                title={showScope && viewMode === 'statement' && activeStatement
+                  ? `0 — nothing recorded yet for this statement`
+                  : t('pp.empty.title')}
+                desc={showScope && viewMode === 'statement' && activeStatement
+                  ? `No receipts or entries are tagged to ${bankLabel(activeStatement.bank, 'this statement')} yet. Scan a receipt or add an entry — it’ll be linked to this statement.`
+                  : t('pp.empty.desc')}
+                action={
+                  <button onClick={() => setShowAdd(true)} className="press btn-primary rounded-xl px-4 py-2 text-[13px] font-semibold focus-ring">
+                    {t('bk.addEntry')}
+                  </button>
+                }
+                secondaryAction={
+                  <button onClick={() => setShowScan(true)} className="underline underline-offset-2 hover:text-txt-2 transition focus-ring rounded">
+                    {t('pp.empty.scan')}
+                  </button>
+                }
+              />
+              )
             ) : (
               <div className="max-h-[560px] overflow-y-auto scrollbar-none divide-y divide-bdr/40">
                 {dayGroups.map((grp) => (
@@ -765,7 +1088,7 @@ const PersonalSpendingPage = () => {
             {error && (
               <div className="p-3 bg-exp/10 border border-exp/30 rounded-xl text-xs text-exp">{error}</div>
             )}
-            <button onClick={saveManualEntry} className="w-full btn-primary py-3 rounded-xl font-semibold text-sm">Save Entry</button>
+            <button onClick={saveManualEntry} className="w-full press btn-primary btn-block py-3 rounded-xl font-semibold text-sm">Save Entry</button>
           </div>
         </Modal>
 
@@ -822,6 +1145,8 @@ const PersonalSpendingPage = () => {
         />
 
         <EntryDetailModal entry={selected} onClose={() => setSelected(null)} />
+
+        <ScanOverlay job={scanJob} onRetry={retryScan} onClose={() => setScanJob(null)} />
       </div>
     </AppShell>
   );
@@ -919,7 +1244,7 @@ const SpendTrend = ({ series, th }) => {
       },
     },
   };
-  return <ChartJS type="line" data={data} options={options} height={170} />;
+  return <ChartJS type="line" data={data} options={options} height={170} ariaLabel="Daily spending trend" />;
 };
 
 const EntryDetailModal = ({ entry, onClose }) => {

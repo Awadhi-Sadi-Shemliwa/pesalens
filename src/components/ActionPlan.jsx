@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import { Icon } from './Icon';
+import { navigate } from './Router';
 import { Eyebrow } from './common';
 import { TiltCard } from './motion';
 import { buildActionPlan, fmtTZS } from '../data/decisions';
@@ -277,8 +278,8 @@ const ActionPlan = ({ summary }) => {
             <h3 className="text-lg sm:text-xl font-semibold tracking-tight mb-2 break-words">{t('act.cta.title')}</h3>
             <p className="text-sm text-txt-2 leading-relaxed mb-5 break-words">{t('act.cta.body')}</p>
             <button
-              onClick={() => { window.location.hash = '/markets'; }}
-              className="btn-primary px-4 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 w-fit mt-auto"
+              onClick={() => navigate('/simulator')}
+              className="press btn-primary px-4 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 w-fit mt-auto"
             >
               {t('act.cta.button')} <Icon name="arrowRight" size={14} />
             </button>

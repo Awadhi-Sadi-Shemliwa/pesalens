@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Icon } from './Icon';
+import { navigate } from './Router';
 import { Eyebrow, Badge } from './common';
 import { TiltCard } from './motion';
 import { ChartJS, chartTheme } from './ChartJS';
@@ -189,19 +190,23 @@ const TierCard = ({ tier, value, active, recommended, onPick, t }) => {
   const theme = TIER_THEME[tier.id];
   return (
     <TiltCard max={6} className="h-full">
-      <button
-        type="button"
-        onClick={() => onPick(value)}
-        aria-pressed={active}
-        className={`relative w-full h-full text-left glass-pane rounded-2xl border p-4 sm:p-5 transition-all min-h-[160px] overflow-hidden
-          ${active ? `${theme.border} ring-2 ${theme.ring}` : 'border-bdr/60 hover:border-bdr-hover'}`}
-      >
-        <span aria-hidden className={`absolute -right-10 -top-10 w-28 h-28 rounded-full blur-2xl ${theme.glow} pointer-events-none transition-opacity ${active ? 'opacity-100' : 'opacity-0'}`} />
+      {/* The ribbon lives on an UNCLIPPED wrapper so the button below can keep
+          overflow-hidden for its glow without shearing the badge, which
+          deliberately protrudes above the card edge. */}
+      <div className="relative h-full">
         {recommended && (
-          <span className="absolute -top-2.5 right-3 text-[10px] uppercase tracking-ticker font-semibold px-2 py-0.5 rounded-full btn-primary shadow-md">
+          <span className="absolute -top-2 right-3 z-10 text-[10px] uppercase tracking-ticker font-semibold px-2 py-0.5 rounded-full bg-accent text-deep shadow-md">
             {t('sim.step1.recommend')}
           </span>
         )}
+        <button
+          type="button"
+          onClick={() => onPick(value)}
+          aria-pressed={active}
+          className={`relative w-full h-full text-left glass-pane rounded-2xl border p-4 sm:p-5 transition-all min-h-[160px] overflow-hidden
+            ${active ? `${theme.border} ring-2 ${theme.ring}` : 'border-bdr/60 hover:border-bdr-hover'}`}
+        >
+        <span aria-hidden className={`absolute -right-10 -top-10 w-28 h-28 rounded-full blur-2xl ${theme.glow} pointer-events-none transition-opacity ${active ? 'opacity-100' : 'opacity-0'}`} />
         <div className="relative flex items-center gap-2 mb-2">
           <span className={`w-2 h-2 rounded-full ${theme.dot}`} />
           <span className={`text-xs uppercase tracking-ticker font-semibold ${theme.accent}`}>
@@ -217,7 +222,8 @@ const TierCard = ({ tier, value, active, recommended, onPick, t }) => {
         <p className="relative text-xs sm:text-sm text-txt-2 leading-relaxed break-words">
           {t(`sim.tier.${tier.id}.bestFor`)}
         </p>
-      </button>
+        </button>
+      </div>
     </TiltCard>
   );
 };
@@ -690,7 +696,7 @@ const ProjectionChart = ({ monthly, annual, drawdown, fv12, fv36, fv60, t }) => 
         </div>
       </div>
       <div className="relative">
-        <ChartJS type="line" data={data} options={options} height={220} />
+        <ChartJS type="line" data={data} options={options} height={220} ariaLabel="Projected investment value versus money invested over time" />
       </div>
       <div className="relative flex flex-wrap gap-x-4 gap-y-1.5 mt-3">
         {legend.map((l) => (
@@ -722,8 +728,8 @@ const NoStatementFallback = ({ t }) => (
           {t('sim.fallback.body')}
         </p>
         <button
-          onClick={() => { window.location.hash = '/dashboard'; }}
-          className="mt-4 btn-primary px-4 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2"
+          onClick={() => { navigate('/dashboard'); }}
+          className="mt-4 press btn-primary px-4 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2"
         >
           {t('sim.fallback.cta')} <Icon name="arrowRight" size={14} />
         </button>
@@ -746,7 +752,7 @@ const DeficitFallback = ({ t }) => (
           {t('sim.deficit.body')}
         </p>
         <button
-          onClick={() => { window.location.hash = '/dashboard'; }}
+          onClick={() => { navigate('/dashboard'); }}
           className="mt-4 px-4 py-2.5 rounded-lg text-sm font-medium border border-dng/40 text-dng hover:bg-dng/10 transition inline-flex items-center gap-2"
         >
           {t('sim.deficit.cta')} <Icon name="arrowRight" size={14} />

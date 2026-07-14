@@ -8,11 +8,23 @@ import {
   confirmVerifyEmail,
   deleteMyAccount,
   exportMyData,
+  fetchActivity,
   fetchMe,
   sendVerifyEmail,
   signOut,
 } from '../data/api';
+import { Button, EmptyState, PasswordField, Skeleton, toast } from '../components/common';
+import { passwordRulesMet } from '../data/password';
 import { useT } from '../data/i18n';
+
+/* Human labels for the activity feed (mirrors the backend map). */
+const ACTIVITY_ICON = {
+  signin_success: 'user', logout: 'logout', signup: 'user',
+  password_changed: 'shield', password_change_revoked: 'alert', password_reset: 'shield',
+  email_verified: 'check', email_verified_via_signin: 'check', data_export: 'download',
+  upload_succeeded: 'upload', upload_failed: 'alert',
+  manual_payment_confirmed: 'zap', manual_payment_confirm_requested: 'wallet',
+};
 
 const SectionHeader = ({ eyebrow, title, sub }) => (
   <div className="mb-3">
@@ -87,6 +99,12 @@ const SettingsPage = () => {
     }
   };
 
+  // Submit stays inert until every rule has flipped (§75, password-field.md #4).
+  // Uses the same predicate PasswordField's checklist renders, so the button and
+  // the checklist can never disagree.
+  const pwMatch = pw.confirm.length > 0 && pw.next === pw.confirm;
+  const pwAllOk = passwordRulesMet(pw.next) && pwMatch && pw.current.length > 0;
+
   // ---------- Verify email ----------
   const [verifyState, setVerifyState] = useState({ phase: 'idle', code: '', msg: '' });
   const startVerify = async () => {
@@ -128,12 +146,30 @@ const SettingsPage = () => {
       a.remove();
       URL.revokeObjectURL(url);
       setExportMsg('Download started.');
+      /* The download lands in the browser's download tray, away from the button —
+         so this one gets a toast, unlike the in-field password confirmation below
+         (form-fields.md #5). */
+      toast.success('Your JSON download has started.', { title: 'Data exported' });
     } catch (err) {
       setExportMsg(err?.message || 'Could not export data.');
+      toast.error(err?.message || "We couldn't build your data export.", { title: 'Export failed' });
     } finally {
       setExportBusy(false);
     }
   };
+
+  // ---------- Activity history + owner-console capability check ----------
+  const [activity, setActivity] = useState(null); // null = loading
+  // Owner-console visibility comes from the server-provided is_admin flag on
+  // /auth/me (fetched on mount above) — no probe. Probing an admin endpoint hid
+  // the console on any transient failure and ran COUNT queries just to decide
+  // nav visibility.
+  const isAdmin = Boolean(user?.is_admin);
+  useEffect(() => {
+    fetchActivity()
+      .then((d) => setActivity(d?.activity || []))
+      .catch(() => setActivity([]));
+  }, []);
 
   // ---------- Delete account ----------
   const [delConfirm, setDelConfirm] = useState('');
@@ -148,9 +184,11 @@ const SettingsPage = () => {
     setDelBusy(true);
     try {
       await deleteMyAccount();
+      toast.success('Your account and data have been removed.', { title: 'Account deleted' });
       navigate('/signin');
     } catch (err) {
       setDelErr(err?.message || 'Could not delete account.');
+      toast.error(err?.message || 'Could not delete account.', { title: 'Deletion failed' });
     } finally {
       setDelBusy(false);
     }
@@ -159,6 +197,7 @@ const SettingsPage = () => {
   // ---------- Sign out ----------
   const handleSignOut = async () => {
     await signOut();
+    toast.success('Signed out');
     navigate('/signin');
   };
 
@@ -203,12 +242,7 @@ const SettingsPage = () => {
             sub="Required for password-reset emails and to satisfy our payment partners."
           />
           {verifyState.phase === 'idle' ? (
-            <button
-              onClick={startVerify}
-              className="btn-primary text-sm font-semibold px-4 py-2 rounded-lg"
-            >
-              Send verification code
-            </button>
+            <Button size="sm" onClick={startVerify}>Send verification code</Button>
           ) : verifyState.phase === 'sending' ? (
             <p className="text-xs text-txt-3">Sending…</p>
           ) : verifyState.phase === 'done' ? (
@@ -227,14 +261,10 @@ const SettingsPage = () => {
               </Field>
               {verifyState.msg ? <Banner tone="dng">{verifyState.msg}</Banner> : null}
               <div className="flex gap-2">
-                <button type="submit" disabled={verifyState.phase === 'submitting'}
-                        className="btn-primary text-sm font-semibold px-4 py-2 rounded-lg disabled:opacity-60">
-                  {verifyState.phase === 'submitting' ? 'Verifying…' : 'Verify'}
-                </button>
-                <button type="button" onClick={startVerify}
-                        className="text-sm text-txt-2 hover:text-txt-1 px-4 py-2 rounded-lg hover:bg-surface-3">
-                  Resend
-                </button>
+                <Button type="submit" size="sm" loading={verifyState.phase === 'submitting'} loadingLabel="Verifying…">
+                  Verify
+                </Button>
+                <Button variant="ghost" size="sm" onClick={startVerify}>Resend</Button>
               </div>
             </form>
           )}
@@ -248,47 +278,96 @@ const SettingsPage = () => {
           sub="You'll be signed out and asked to sign in again on this and every other device."
         />
         <form onSubmit={submitPassword} className="space-y-3 max-w-md">
-          <Field label="Current password">
-            <input type="password" autoComplete="current-password" required
-                   value={pw.current} onChange={(e) => setPw((p) => ({ ...p, current: e.target.value }))}
-                   className="w-full bg-surface-3 border border-bdr rounded-xl px-4 py-3 text-sm" />
-          </Field>
-          <Field label="New password" hint="At least 8 characters · one letter and one number.">
-            <input type="password" autoComplete="new-password" required minLength={8}
-                   value={pw.next} onChange={(e) => setPw((p) => ({ ...p, next: e.target.value }))}
-                   className="w-full bg-surface-3 border border-bdr rounded-xl px-4 py-3 text-sm" />
-          </Field>
-          <Field label="Confirm new password">
-            <input type="password" autoComplete="new-password" required minLength={8}
-                   value={pw.confirm} onChange={(e) => setPw((p) => ({ ...p, confirm: e.target.value }))}
-                   className="w-full bg-surface-3 border border-bdr rounded-xl px-4 py-3 text-sm" />
-          </Field>
+          <PasswordField
+            label="Current password"
+            autoComplete="current-password"
+            value={pw.current}
+            onChange={(v) => setPw((p) => ({ ...p, current: v }))}
+            disabled={pwBusy}
+          />
+          <PasswordField
+            label="New password"
+            value={pw.next}
+            onChange={(v) => setPw((p) => ({ ...p, next: v }))}
+            helper="Length beats symbols — a few unrelated words is stronger than one decorated one."
+            showStrength
+            showRules
+            disabled={pwBusy}
+          />
+          <PasswordField
+            label="Confirm new password"
+            value={pw.confirm}
+            onChange={(v) => setPw((p) => ({ ...p, confirm: v }))}
+            success={pwMatch}
+            successMessage="Passwords match."
+            error={pw.confirm.length > 0 && !pwMatch ? "Passwords don't match yet." : null}
+            disabled={pwBusy}
+          />
           {pwMsg.text ? <Banner tone={pwMsg.tone}>{pwMsg.text}</Banner> : null}
-          <button type="submit" disabled={pwBusy}
-                  className="btn-primary text-sm font-semibold px-4 py-2 rounded-lg disabled:opacity-60">
-            {pwBusy ? 'Updating…' : 'Update password'}
-          </button>
+          <Button type="submit" size="sm" className="self-start" disabled={!pwAllOk} loading={pwBusy} loadingLabel="Updating…">
+            Update password
+          </Button>
         </form>
       </Card>
 
       <Card>
         <SectionHeader
           eyebrow="03"
+          title="Account activity"
+          sub="A timestamped log of what your account did — sign-ins, password changes, uploads and payments."
+        />
+        {activity === null ? (
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => <Skeleton key={i} className="h-10" />)}
+          </div>
+        ) : activity.length === 0 ? (
+          <EmptyState
+            kind="first-run"
+            title="Nothing to show yet"
+            desc="Sign-ins, password changes, uploads and payments will be listed here with a timestamp."
+          />
+        ) : (
+          <div className="divide-y divide-bdr/50 -my-1">
+            {activity.slice(0, 12).map((a) => (
+              <div key={a.id} className="py-2.5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Icon name={ACTIVITY_ICON[a.event] || 'bell'} size={14} className="text-txt-3 flex-shrink-0" />
+                  <span className="text-sm text-txt-1 truncate">{a.title}</span>
+                </div>
+                <span className="font-mono text-[11px] text-txt-3 whitespace-nowrap">
+                  {a.created_at ? new Date(a.created_at).toLocaleString() : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+        {isAdmin && (
+          <button
+            onClick={() => navigate('/admin')}
+            className="mt-4 inline-flex items-center gap-2 text-sm font-semibold text-accent hover:text-accent/80 focus-visible:ring-2 focus-visible:ring-accent rounded"
+          >
+            <Icon name="shield" size={14} /> Open owner console
+          </button>
+        )}
+      </Card>
+
+      <Card>
+        <SectionHeader
+          eyebrow="04"
           title="Export your data"
           sub="A JSON copy of your profile, uploads, ledger entries, and payment history. Yours to keep."
         />
         <div className="flex items-center gap-3 flex-wrap">
-          <button onClick={downloadExport} disabled={exportBusy}
-                  className="btn-primary text-sm font-semibold px-4 py-2 rounded-lg disabled:opacity-60">
-            {exportBusy ? 'Preparing…' : 'Download JSON'}
-          </button>
+          <Button size="sm" icon="download" loading={exportBusy} loadingLabel="Preparing…" onClick={downloadExport}>
+            Download JSON
+          </Button>
           {exportMsg ? <span className="text-xs text-txt-3">{exportMsg}</span> : null}
         </div>
       </Card>
 
       <Card className="border-dng/30">
         <SectionHeader
-          eyebrow="04"
+          eyebrow="05"
           title={<span className="text-dng">Delete account</span>}
           sub="Removes your account, every uploaded statement, every receipt, and your payment history. Permanent."
         />

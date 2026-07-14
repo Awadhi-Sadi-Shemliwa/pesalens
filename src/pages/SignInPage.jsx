@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { Link, useRouter } from '../components/Router';
 import { Icon } from '../components/Icon';
-import { Mark, Eyebrow } from '../components/common';
+import { Mark, Eyebrow, PasswordField, Button, OtpInput, useCooldown } from '../components/common';
 import { setUserType } from '../data/userStore';
 import { setSession } from '../data/authStore';
 import { signIn, forgotPassword, resetPassword } from '../data/api';
+import { passwordRulesMet } from '../data/password';
 import { useT } from '../data/i18n';
 
 const SignInPage = () => {
@@ -16,6 +17,8 @@ const SignInPage = () => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [resetForm, setResetForm] = useState({ code: '', next: '', confirm: '' });
+  const [codeError, setCodeError] = useState(false);
+  const [resendLeft, startResendCooldown] = useCooldown(30);
 
   const handleSignIn = async (event) => {
     event.preventDefault();
@@ -50,6 +53,7 @@ const SignInPage = () => {
     try {
       await forgotPassword(email.trim());
       setMode('forgot-reset');
+      startResendCooldown(); // throttle the resend from the moment the code is sent (#7)
     } catch (err) {
       setError(err?.message || 'Could not send reset code.');
     } finally {
@@ -57,13 +61,18 @@ const SignInPage = () => {
     }
   };
 
+  // Same predicate the PasswordField checklist renders, so the button and the
+  // checklist can never disagree (password-field.md #4).
+  const resetMatch = resetForm.confirm.length > 0 && resetForm.next === resetForm.confirm;
+  const resetAllOk = passwordRulesMet(resetForm.next) && resetMatch && resetForm.code.trim().length > 0;
+
   const handleReset = async (event) => {
     event.preventDefault();
     setError('');
+    setCodeError(false);
     if (!resetForm.code) return setError('Enter the 6-digit code from your email.');
-    if (resetForm.next.length < 8) return setError('New password must be at least 8 characters.');
-    if (!/[A-Za-z]/.test(resetForm.next) || !/\d/.test(resetForm.next))
-      return setError('New password must contain a letter and a number.');
+    if (!passwordRulesMet(resetForm.next))
+      return setError('New password must be 8+ characters and contain a letter and a number.');
     if (resetForm.next !== resetForm.confirm) return setError('Passwords do not match.');
     setBusy(true);
     try {
@@ -74,9 +83,23 @@ const SignInPage = () => {
       });
       setMode('forgot-done');
     } catch (err) {
-      setError(err?.message || 'Could not reset password.');
+      const msg = err?.message || 'Could not reset password.';
+      setError(msg);
+      // A rejected code shakes, clears and refocuses box one (otp-input.md #8).
+      if (/code|otp|invalid|expired/i.test(msg)) { setCodeError(true); setTimeout(() => setCodeError(false), 500); }
     } finally {
       setBusy(false);
+    }
+  };
+
+  const resendCode = async () => {
+    if (resendLeft > 0 || busy) return;
+    setError('');
+    try {
+      await forgotPassword(email.trim());
+      startResendCooldown();
+    } catch (err) {
+      setError(err?.message || 'Could not resend the code.');
     }
   };
 
@@ -151,13 +174,9 @@ const SignInPage = () => {
                   {error}
                 </div>
               ) : null}
-              <button
-                type="submit"
-                disabled={busy}
-                className="w-full btn-primary py-3 rounded-xl font-semibold text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-              >
-                {busy ? 'Signing in…' : t('auth.signinBtn')}
-              </button>
+              <Button type="submit" block size="lg" loading={busy} loadingLabel="Signing in…">
+                {t('auth.signinBtn')}
+              </Button>
             </div>
             <p className="text-center text-sm text-txt-2 mt-6">
               {t('auth.noAccount')}{' '}
@@ -188,14 +207,12 @@ const SignInPage = () => {
                 />
               </div>
               {error ? <div role="alert" className="text-sm text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2">{error}</div> : null}
-              <button type="submit" disabled={busy}
-                      className="w-full btn-primary py-3 rounded-xl font-semibold text-sm disabled:opacity-60">
-                {busy ? 'Sending…' : 'Send reset code'}
-              </button>
-              <button type="button" onClick={() => { setError(''); setMode('signin'); }}
-                      className="w-full text-sm text-txt-2 hover:text-txt-1 py-2">
+              <Button type="submit" block size="lg" loading={busy} loadingLabel="Sending…">
+                Send reset code
+              </Button>
+              <Button variant="ghost" block onClick={() => { setError(''); setMode('signin'); }}>
                 Back to sign in
-              </button>
+              </Button>
             </div>
           </form>
         ) : mode === 'forgot-reset' ? (
@@ -209,48 +226,51 @@ const SignInPage = () => {
             </p>
             <div className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-txt-2 mb-1.5">6-digit code</label>
-                <input
-                  inputMode="numeric"
-                  maxLength={8}
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-sm font-medium text-txt-2">6-digit code</label>
+                  <button
+                    type="button"
+                    onClick={resendCode}
+                    disabled={resendLeft > 0 || busy}
+                    className="focus-ring rounded text-[12px] font-semibold text-accent hover:text-accent-hover disabled:text-txt-3 disabled:cursor-not-allowed"
+                  >
+                    {resendLeft > 0 ? `Resend in ${resendLeft}s` : 'Resend code'}
+                  </button>
+                </div>
+                <OtpInput
                   value={resetForm.code}
-                  onChange={(e) => setResetForm((p) => ({ ...p, code: e.target.value }))}
-                  placeholder="123456"
-                  className="w-full bg-surface-3 border border-bdr rounded-xl px-4 py-3 text-sm font-mono tracking-widest"
+                  onChange={(v) => setResetForm((p) => ({ ...p, code: v }))}
+                  error={codeError}
+                  disabled={busy}
+                  autoFocus
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-txt-2 mb-1.5">New password</label>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  required minLength={8}
-                  value={resetForm.next}
-                  onChange={(e) => setResetForm((p) => ({ ...p, next: e.target.value }))}
-                  className="w-full bg-surface-3 border border-bdr rounded-xl px-4 py-3 text-sm"
-                />
-                <p className="text-[11px] text-txt-3 mt-1">8+ chars · letter + number.</p>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-txt-2 mb-1.5">Confirm new password</label>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  required minLength={8}
-                  value={resetForm.confirm}
-                  onChange={(e) => setResetForm((p) => ({ ...p, confirm: e.target.value }))}
-                  className="w-full bg-surface-3 border border-bdr rounded-xl px-4 py-3 text-sm"
-                />
-              </div>
+              <PasswordField
+                label="New password"
+                value={resetForm.next}
+                onChange={(v) => setResetForm((p) => ({ ...p, next: v }))}
+                helper="Length beats symbols — a few unrelated words is stronger than one decorated one."
+                showStrength
+                showRules
+                disabled={busy}
+              />
+              <PasswordField
+                label="Confirm new password"
+                value={resetForm.confirm}
+                onChange={(v) => setResetForm((p) => ({ ...p, confirm: v }))}
+                success={resetMatch}
+                successMessage="Passwords match."
+                error={resetForm.confirm.length > 0 && !resetMatch ? "Passwords don't match yet." : null}
+                disabled={busy}
+              />
               {error ? <div role="alert" className="text-sm text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2">{error}</div> : null}
-              <button type="submit" disabled={busy}
-                      className="w-full btn-primary py-3 rounded-xl font-semibold text-sm disabled:opacity-60">
-                {busy ? 'Resetting…' : 'Reset password'}
-              </button>
-              <button type="button" onClick={() => { setError(''); setMode('forgot-email'); }}
-                      className="w-full text-sm text-txt-2 hover:text-txt-1 py-2">
+              {/* Submit stays inert until every rule has flipped (password-field.md #4). */}
+              <Button type="submit" block size="lg" disabled={!resetAllOk} loading={busy} loadingLabel="Resetting…">
+                Reset password
+              </Button>
+              <Button variant="ghost" block onClick={() => { setError(''); setMode('forgot-email'); }}>
                 Use a different email
-              </button>
+              </Button>
             </div>
           </form>
         ) : (
@@ -263,10 +283,9 @@ const SignInPage = () => {
             <p className="text-txt-2 leading-relaxed">
               Your password has been updated. Sign in with the new one.
             </p>
-            <button onClick={() => { setMode('signin'); setPass(''); setError(''); }}
-                    className="mt-7 w-full btn-primary py-3 rounded-xl font-semibold text-sm">
+            <Button block size="lg" className="mt-7" onClick={() => { setMode('signin'); setPass(''); setError(''); }}>
               Continue to sign in
-            </button>
+            </Button>
           </div>
         )}
       </div>

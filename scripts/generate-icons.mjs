@@ -2,25 +2,34 @@
 /**
  * generate-icons.mjs
  *
- * Reads brand/logo.svg + brand/logo-maskable.svg and emits every
- * raster size we need for PWA install prompts and the Capacitor APK.
+ * Single source of truth for the PesaLens visual identity. Reads the official
+ * logo lockup (brand/PesaLens Logo.png), isolates the circular emblem, and
+ * emits every raster the web app, PWA install prompt and Capacitor APK need —
+ * for BOTH the web project and the mobile project.
  *
- * Outputs:
- *   public/icon-192.png            (PWA "any" purpose)
- *   public/icon-512.png            (PWA "any" purpose)
- *   public/icon-maskable-192.png   (PWA "maskable" purpose)
- *   public/icon-maskable-512.png   (PWA "maskable" purpose)
- *   public/apple-touch-icon.png    (iOS Add-to-Home, 180×180)
- *   public/favicon.svg             (copied from brand)
- *   public/favicon-32.png          (legacy browser tab)
- *   public/favicon-16.png          (legacy browser tab)
- *   PesaLens-MobileAPP/android/app/src/main/res/mipmap-{m,h,xh,xxh,xxxh}dpi/
- *     ic_launcher.png  + ic_launcher_round.png  + ic_launcher_foreground.png
+ * The lockup PNG carries a baked dark-navy background, so the emblem tiles read
+ * as a self-contained brand mark on any surface (favicons, launcher icons, the
+ * in-app <Mark/>). The full lockup is copied out for large brand moments
+ * (auth panels, splash screens) as pesalens-lockup.png.
  *
- * Run:  node scripts/generate-icons.mjs
+ * Outputs (per public dir: web `public/` + mobile `PesaLens-MobileAPP/public/`):
+ *   icon-192.png / icon-512.png            (PWA "any")
+ *   icon-maskable-192.png / -512.png       (PWA "maskable")
+ *   apple-touch-icon.png                   (180×180)
+ *   favicon-32.png / favicon-16.png        (legacy tabs)
+ *   favicon.svg                            (emblem embedded as data URI)
+ *   logo.png                               (emblem — used by <Mark/>)
+ *   pesalens-lockup.png                    (full lockup — large brand spots)
+ * Plus, in the mobile Android project:
+ *   mipmap-<dpi>/ic_launcher.png + _round.png + _foreground.png
+ *   values/ic_launcher_background.xml
+ *   drawable-<dpi>/splash.png              (lockup centred on brand navy)
+ *
+ * Run:  npm run icons     (node scripts/generate-icons.mjs)
  */
 
-import { mkdir, copyFile, writeFile } from "node:fs/promises";
+import { mkdir, copyFile, writeFile, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
@@ -28,54 +37,51 @@ import sharp from "sharp";
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const brand = join(root, "brand");
-const publicDir = join(root, "public");
+const webPublic = join(root, "public");
+const mobilePublic = join(root, "PesaLens-MobileAPP/public");
 const androidRes = join(root, "PesaLens-MobileAPP/android/app/src/main/res");
 
-const masterSvg = join(brand, "logo.svg");
-const maskSvg = join(brand, "logo-maskable.svg");
+const LOCKUP = join(brand, "PesaLens Logo.png");
+const BRAND_BG = "#08090C"; // brand "money black" — matches the lockup backdrop
 
-const ANDROID_ICON_PX = {
-  // ic_launcher / ic_launcher_round (legacy launcher icons + as-is on
-  // pre-Oreo devices). Apex sizes per density bucket.
-  "mipmap-mdpi":    48,
-  "mipmap-hdpi":    72,
-  "mipmap-xhdpi":   96,
-  "mipmap-xxhdpi":  144,
-  "mipmap-xxxhdpi": 192,
-};
-// Adaptive icon foreground is rendered in a 108dp×108dp area, of which
-// the centre 72dp is the safe zone. We render the maskable SVG full-bleed
-// at the launcher pixel size — Android will composite it over the
-// background colour drawable.
-const ANDROID_FG_PX = {
-  "mipmap-mdpi":    108,
-  "mipmap-hdpi":    162,
-  "mipmap-xhdpi":   216,
-  "mipmap-xxhdpi":  324,
-  "mipmap-xxxhdpi": 432,
-};
+// The circular emblem inside the 445×339 lockup (measured once). If the master
+// artwork is re-exported at a different size, update this box.
+const EMBLEM = { left: 140, top: 45, width: 165, height: 165 };
 
 async function ensure(dir) {
   await mkdir(dir, { recursive: true });
 }
 
-async function pngFromSvg(svgPath, outPath, size) {
-  await ensure(dirname(outPath));
-  await sharp(svgPath, { density: 384 })
-    .resize(size, size, { fit: "cover" })
+/** High-res square emblem buffer (upscaled from the lockup crop). */
+async function emblemBuffer(size) {
+  return sharp(LOCKUP)
+    .extract(EMBLEM)
+    .resize(size, size, { fit: "cover", kernel: "lanczos3" })
     .png({ compressionLevel: 9 })
-    .toFile(outPath);
-  console.log(` → ${outPath} (${size}×${size})`);
+    .toBuffer();
 }
 
-async function pngRoundFromSvg(svgPath, outPath, size) {
-  // Circular crop for ic_launcher_round.png. We render to a square then
-  // composite a circular alpha mask so the corners go transparent.
+async function writeEmblem(outPath, size, maskable = false) {
   await ensure(dirname(outPath));
-  const square = await sharp(svgPath, { density: 384 })
-    .resize(size, size, { fit: "cover" })
-    .png()
-    .toBuffer();
+  if (maskable) {
+    const inner = Math.round(size * 0.82);
+    const emb = await emblemBuffer(inner);
+    const pad = Math.round((size - inner) / 2);
+    await sharp({
+      create: { width: size, height: size, channels: 4, background: BRAND_BG },
+    })
+      .composite([{ input: emb, top: pad, left: pad }])
+      .png({ compressionLevel: 9 })
+      .toFile(outPath);
+  } else {
+    await sharp(await emblemBuffer(size)).toFile(outPath);
+  }
+  console.log(` → ${outPath} (${size}×${size}${maskable ? ", maskable" : ""})`);
+}
+
+async function writeRoundEmblem(outPath, size) {
+  await ensure(dirname(outPath));
+  const square = await emblemBuffer(size);
   const r = Math.floor(size / 2);
   const mask = Buffer.from(
     `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}"><circle cx="${r}" cy="${r}" r="${r}" fill="#fff"/></svg>`
@@ -87,48 +93,125 @@ async function pngRoundFromSvg(svgPath, outPath, size) {
   console.log(` → ${outPath} (${size}×${size}, round)`);
 }
 
-async function main() {
-  console.log("Generating PWA icons in public/");
-  await ensure(publicDir);
+async function writeFaviconSvg(outPath) {
+  await ensure(dirname(outPath));
+  const b64 = (await emblemBuffer(256)).toString("base64");
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">` +
+    `<image href="data:image/png;base64,${b64}" width="256" height="256"/></svg>\n`;
+  await writeFile(outPath, svg, "utf8");
+  console.log(` → ${outPath} (svg, embedded)`);
+}
 
-  await pngFromSvg(maskSvg, join(publicDir, "icon-192.png"), 192);
-  await pngFromSvg(maskSvg, join(publicDir, "icon-512.png"), 512);
-  await pngFromSvg(maskSvg, join(publicDir, "icon-maskable-192.png"), 192);
-  await pngFromSvg(maskSvg, join(publicDir, "icon-maskable-512.png"), 512);
-  await pngFromSvg(maskSvg, join(publicDir, "apple-touch-icon.png"), 180);
-  await pngFromSvg(maskSvg, join(publicDir, "favicon-32.png"), 32);
-  await pngFromSvg(maskSvg, join(publicDir, "favicon-16.png"), 16);
+/** Every raster a web/PWA public dir needs. */
+async function fillPublicDir(pub) {
+  await ensure(pub);
+  await writeEmblem(join(pub, "icon-192.png"), 192);
+  await writeEmblem(join(pub, "icon-512.png"), 512);
+  await writeEmblem(join(pub, "icon-maskable-192.png"), 192, true);
+  await writeEmblem(join(pub, "icon-maskable-512.png"), 512, true);
+  await writeEmblem(join(pub, "apple-touch-icon.png"), 180);
+  await writeEmblem(join(pub, "favicon-32.png"), 32);
+  await writeEmblem(join(pub, "favicon-16.png"), 16);
+  await writeEmblem(join(pub, "logo.png"), 256);
+  await writeFaviconSvg(join(pub, "favicon.svg"));
+  await copyFile(LOCKUP, join(pub, "pesalens-lockup.png"));
+  console.log(` → ${join(pub, "pesalens-lockup.png")} (lockup)`);
+}
 
-  // Modern browsers prefer SVG favicons. Copy the master directly.
-  await copyFile(masterSvg, join(publicDir, "favicon.svg"));
-  console.log(` → ${join(publicDir, "favicon.svg")} (svg)`);
+const ANDROID_ICON_PX = {
+  "mipmap-mdpi": 48,
+  "mipmap-hdpi": 72,
+  "mipmap-xhdpi": 96,
+  "mipmap-xxhdpi": 144,
+  "mipmap-xxxhdpi": 192,
+};
+const ANDROID_FG_PX = {
+  "mipmap-mdpi": 108,
+  "mipmap-hdpi": 162,
+  "mipmap-xhdpi": 216,
+  "mipmap-xxhdpi": 324,
+  "mipmap-xxxhdpi": 432,
+};
 
-  console.log("\nGenerating Android launcher icons");
+async function fillAndroidLaunchers() {
   for (const [bucket, px] of Object.entries(ANDROID_ICON_PX)) {
     const dir = join(androidRes, bucket);
-    await pngFromSvg(maskSvg, join(dir, "ic_launcher.png"), px);
-    await pngRoundFromSvg(maskSvg, join(dir, "ic_launcher_round.png"), px);
+    await writeEmblem(join(dir, "ic_launcher.png"), px);
+    await writeRoundEmblem(join(dir, "ic_launcher_round.png"), px);
   }
   for (const [bucket, px] of Object.entries(ANDROID_FG_PX)) {
     const dir = join(androidRes, bucket);
-    await pngFromSvg(maskSvg, join(dir, "ic_launcher_foreground.png"), px);
+    await writeEmblem(join(dir, "ic_launcher_foreground.png"), px, true);
   }
-
-  // Adaptive background — flat brand colour, drawn behind the foreground.
-  // The PesaLens APK uses a colour drawable in values/ic_launcher_background.xml,
-  // so we just patch that file with the brand deep tone.
   const bgXml = join(androidRes, "values", "ic_launcher_background.xml");
+  await ensure(dirname(bgXml));
   await writeFile(
     bgXml,
-    '<?xml version="1.0" encoding="utf-8"?>\n' +
-      "<resources>\n" +
-      '    <color name="ic_launcher_background">#08090C</color>\n' +
+    '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n' +
+      `    <color name="ic_launcher_background">${BRAND_BG}</color>\n` +
       "</resources>\n",
     "utf8"
   );
   console.log(` → ${bgXml} (color)`);
+}
 
-  console.log("\nDone.");
+/** The lockup's own backdrop colour (sampled from a corner) so a splash built
+ *  around it shows no seam between the artwork and the fill. */
+async function lockupBackground() {
+  const { data } = await sharp(LOCKUP)
+    .extract({ left: 2, top: 2, width: 6, height: 6 })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  return { r: data[0], g: data[1], b: data[2] };
+}
+
+/** Regenerate each existing splash.png as the lockup centred on brand navy. */
+async function fillAndroidSplash() {
+  if (!existsSync(androidRes)) return;
+  const bg = await lockupBackground();
+  const buckets = (await readdir(androidRes)).filter((d) => d.startsWith("drawable"));
+  for (const bucket of buckets) {
+    const out = join(androidRes, bucket, "splash.png");
+    if (!existsSync(out)) continue;
+    const { width, height } = await sharp(out).metadata();
+    const logoW = Math.round(Math.min(width, height) * 0.52);
+    const logo = await sharp(LOCKUP)
+      .resize(logoW, null, { fit: "inside", kernel: "lanczos3" })
+      .png()
+      .toBuffer();
+    await sharp({
+      create: { width, height, channels: 4, background: bg },
+    })
+      .composite([{ input: logo, gravity: "center" }])
+      .png({ compressionLevel: 9 })
+      .toFile(out);
+    console.log(` → ${out} (${width}×${height}, splash)`);
+  }
+}
+
+async function main() {
+  if (!existsSync(LOCKUP)) {
+    console.error(`Missing brand lockup: ${LOCKUP}`);
+    process.exit(1);
+  }
+
+  // Emblem master for reference / other tooling.
+  await writeEmblem(join(brand, "logo.png"), 512);
+
+  console.log("\nWeb public/");
+  await fillPublicDir(webPublic);
+
+  console.log("\nMobile public/");
+  await fillPublicDir(mobilePublic);
+
+  console.log("\nAndroid launcher icons");
+  await fillAndroidLaunchers();
+
+  console.log("\nAndroid splash screens");
+  await fillAndroidSplash();
+
+  console.log("\nDone. (Run a mobile build + `npx cap sync` to bundle mobile assets.)");
 }
 
 main().catch((err) => {

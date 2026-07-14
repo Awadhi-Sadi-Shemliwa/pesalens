@@ -223,6 +223,18 @@ body::before {
   0%   { background-position: -200% 0; }
   100% { background-position: 200% 0; }
 }
+/* Indeterminate progress — a segment that sweeps across the track for work with
+   no honest percentage (e.g. a single blocking vision-AI call). */
+@keyframes progressIndeterminate {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(360%); }
+}
+.anim-progress-indeterminate {
+  animation: progressIndeterminate 1.25s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .anim-progress-indeterminate { animation: none; transform: translateX(90%); }
+}
 @keyframes float {
   0%, 100% { transform: translateY(0); }
   50%      { transform: translateY(-6px); }
@@ -305,6 +317,95 @@ body::before {
 .delay-5 { animation-delay: 0.38s; }
 .delay-6 { animation-delay: 0.48s; }
 .delay-7 { animation-delay: 0.58s; }
+
+/* ================================================================
+   Dialogs — spring entrance, staggered content, symmetric exit (modals.md)
+   ================================================================ */
+/* Entrance scales up from just under full size while opacity rises, on the app's
+   spring curve, so the panel "pops" instead of cutting in (modals.md #2). */
+@keyframes dialog-in {
+  from { opacity: 0; transform: scale(0.95) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+/* The exit reverses the entrance exactly (#4) — a modal that vanishes reads cheap. */
+@keyframes dialog-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to   { opacity: 0; transform: scale(0.95) translateY(8px); }
+}
+@keyframes drawer-in  { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+@keyframes drawer-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateX(28px); } }
+@keyframes backdrop-out { from { opacity: 1; } to { opacity: 0; } }
+
+.dialog-in  { animation: dialog-in  0.26s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.dialog-out { animation: dialog-out 0.18s cubic-bezier(0.4, 0, 1, 1) both; }
+.drawer-in  { animation: drawer-in  0.28s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.drawer-out { animation: drawer-out 0.18s cubic-bezier(0.4, 0, 1, 1) both; }
+.backdrop-out { animation: backdrop-out 0.18s ease-out both; }
+
+/* Inner elements enter on a short offset so the eye is walked down the hierarchy
+   rather than hit with everything at once (#3). */
+@keyframes dialog-stagger {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.dialog-stagger > * { animation: dialog-stagger 0.32s cubic-bezier(0.4, 0, 0.2, 1) both; }
+.dialog-stagger > *:nth-child(1) { animation-delay: 0.04s; }
+.dialog-stagger > *:nth-child(2) { animation-delay: 0.08s; }
+.dialog-stagger > *:nth-child(3) { animation-delay: 0.12s; }
+.dialog-stagger > *:nth-child(4) { animation-delay: 0.16s; }
+.dialog-stagger > *:nth-child(n + 5) { animation-delay: 0.2s; }
+
+/* ================================================================
+   Focus
+   ================================================================ */
+/* Single source of truth for the keyboard focus indicator. The ring clears 3:1
+   against every surface token in both themes (form-fields.md #3). Use this on any
+   element that overrides the global input/button rules further down this file. */
+.focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgb(var(--c-accent) / 0.55), 0 0 0 4px rgb(var(--c-accent) / 0.12);
+  border-color: rgb(var(--c-accent) / 0.6);
+}
+
+/* Inside a tab list, the accent already means "this tab is selected". Reusing it
+   for the focus ring would make the two indistinguishable, and they routinely sit
+   on different tabs at once while arrowing around (tabs.md #6, #8). The keyboard
+   ring switches to the blue secondary token so the two states stay separable. */
+.focus-ring-tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgb(var(--c-net) / 0.75), 0 0 0 4px rgb(var(--c-net) / 0.15);
+  border-radius: 0.5rem;
+}
+
+/* Edge fades on a scrolling tab / chip row: the row must advertise that it
+   continues past the viewport, or the off-screen items are never found
+   (tabs.md #4, filter-chips.md #9). Toggled by measuring scroll position. */
+.edge-fade-l,
+.edge-fade-r {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2.5rem;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 1;
+}
+.edge-fade-l { left: 0;  background: linear-gradient(90deg, rgb(var(--c-s2)) 10%, transparent); }
+.edge-fade-r { right: 0; background: linear-gradient(270deg, rgb(var(--c-s2)) 10%, transparent); }
+.edge-fade-on { opacity: 1; }
+
+/* For a bare input nested in a styled wrapper (chat pills, search bars): ring the
+   wrapper, since the input itself is transparent and has no edge to draw on. */
+.focus-ring-within:focus-within {
+  outline: none;
+  box-shadow: 0 0 0 2px rgb(var(--c-accent) / 0.55), 0 0 0 4px rgb(var(--c-accent) / 0.12);
+  border-color: rgb(var(--c-accent) / 0.6);
+}
+/* ...and suppress the inner control's own ring so only one is drawn. */
+.focus-ring-within :is(input, select, textarea):focus {
+  box-shadow: none;
+}
 
 /* ================================================================
    Surfaces & depth
@@ -478,43 +579,122 @@ button:focus-visible {
 }
 
 /* ================================================================
-   Buttons
+   Buttons — press feedback (buttons.md)
+
+   Two tiers, because a ripple on a 32px icon button is noise:
+
+   `.press`  — the cheap tier, pure CSS, for icon/ghost/chip controls. Compresses
+               to 0.95 while held (#5) and springs back on release. The return
+               curve overshoots, but only by ~10% of the 0.05 delta, so this tier
+               reads as "elastic", not as the full 1.05 bounce.
+   `<Button>` — the real tier (components/common.jsx). Adds the click-point ripple
+               (#7) and drives the release through the `btn-release` keyframe below,
+               which is the only way to hit a true 1.05 overshoot (#6): CSS alone
+               cannot observe the pointerup that ends `:active`.
+
+   Both are neutralised by the global reduced-motion block at the end of this file.
    ================================================================ */
+.press {
+  transition: transform 0.26s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.2s ease,
+              background 0.2s ease,
+              border-color 0.2s ease,
+              color 0.2s ease;
+}
+/* Press is fast and has no bounce — the squash should track the finger (#8). */
+.press:active:not(:disabled) {
+  transform: scale(0.95);
+  transition-duration: 0.09s;
+  transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
+}
+.press:disabled { transform: none; }
+
+/* Release: 0.95 → past 1 → settle. Only the JS Button applies this (on pointerup). */
+@keyframes btn-release {
+  0%   { transform: scale(0.95); }
+  55%  { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+.btn-release { animation: btn-release 0.34s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Ripple: anchored to the contact point via --rx/--ry set on pointerdown (#7). */
+@keyframes btn-ripple {
+  from { transform: scale(0); opacity: 0.45; }
+  to   { transform: scale(1); opacity: 0; }
+}
+.btn-ripple {
+  position: absolute;
+  left: var(--rx);
+  top: var(--ry);
+  width: var(--rd);
+  height: var(--rd);
+  margin-left: calc(var(--rd) / -2);
+  margin-top: calc(var(--rd) / -2);
+  border-radius: 9999px;
+  background: currentColor;
+  pointer-events: none;
+  animation: btn-ripple 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 .btn-primary {
   background: var(--btn-primary-bg);
   color: rgb(var(--btn-primary-fg));
   border: 1px solid rgb(var(--c-accent) / 0.6);
   box-shadow: var(--btn-primary-shadow);
-  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
-              box-shadow 0.2s ease,
-              background 0.2s ease;
 }
-.btn-primary:hover {
+/* Hover = lift + deepened shadow + a halo tinted to the button's own fill (#2–4). */
+.btn-primary:hover:not(:disabled) {
   background: var(--btn-primary-bg-hover);
-  transform: translateY(-1px);
-  box-shadow: var(--btn-primary-shadow-hover);
+  transform: translateY(-1px) scale(1.03);
+  box-shadow: var(--btn-primary-shadow-hover), 0 0 24px rgb(var(--c-accent) / 0.28);
 }
-.btn-primary:active { transform: translateY(0) scale(0.98); }
 
 .btn-secondary {
   background: rgb(var(--c-accent) / 0.08);
   color: rgb(var(--c-accent));
   border: 1px solid rgb(var(--c-accent) / 0.22);
-  transition: all 0.2s ease;
 }
-.btn-secondary:hover {
+.btn-secondary:hover:not(:disabled) {
   background: rgb(var(--c-accent) / 0.14);
   border-color: rgb(var(--c-accent) / 0.4);
   color: rgb(var(--c-accent-h));
+  transform: translateY(-1px) scale(1.03);
+  box-shadow: 0 0 20px rgb(var(--c-accent) / 0.18);
 }
-.btn-secondary:active { transform: scale(0.98); }
 
 .btn-ghost {
   background: transparent;
   color: rgb(var(--c-t2));
-  transition: all 0.2s ease;
 }
-.btn-ghost:hover { color: rgb(var(--c-t1)); background: rgb(var(--c-s4)); }
+.btn-ghost:hover:not(:disabled) { color: rgb(var(--c-t1)); background: rgb(var(--c-s4)); }
+
+.btn-danger {
+  background: rgb(var(--c-dng) / 0.10);
+  color: rgb(var(--c-dng));
+  border: 1px solid rgb(var(--c-dng) / 0.28);
+}
+.btn-danger:hover:not(:disabled) {
+  background: rgb(var(--c-dng) / 0.16);
+  border-color: rgb(var(--c-dng) / 0.5);
+  transform: translateY(-1px) scale(1.03);
+  box-shadow: 0 0 20px rgb(var(--c-dng) / 0.20);
+}
+
+/* A full-width CTA scaling 3% shears against its container edges, so the wide
+   variant buys its "alive" signal from the glow and lift alone. */
+.btn-block:hover:not(:disabled) { transform: translateY(-1px); }
+
+/* Disabled must not lift, glow or squash — an inert control that still reacts
+   to the cursor promises an action it will not perform. */
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  transform: none;
+  box-shadow: none;
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 /* ================================================================
    Chat bubbles
@@ -581,10 +761,31 @@ button:focus-visible {
   display: contents;
 }
 
+/* A rejected one-time code shakes, clears and refocuses (otp-input.md #8). The
+   shake is the "something happened" signal so a wrong code never fails silently. */
+@keyframes shake-x {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+.shake-x { animation: shake-x 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+  /* Squashing the duration to nothing turns a scale animation into a scale *jump*,
+     which is exactly the vestibular trigger the query exists to avoid. Buttons
+     keep their colour and shadow changes and drop the geometry entirely. */
+  .press:active:not(:disabled),
+  .btn-primary:hover:not(:disabled),
+  .btn-secondary:hover:not(:disabled),
+  .btn-danger:hover:not(:disabled) {
+    transform: none;
+  }
+  .btn-ripple { display: none; }
 }

@@ -6,6 +6,7 @@ import { useUserType } from '../data/userStore';
 import { useAuth } from '../data/authStore';
 import { fetchMe, signOut } from '../data/api';
 import { useT } from '../data/i18n';
+import { MotionProvider, PageBackground } from '../motion';
 
 const COMMON_NAV_KEYS = [
   { key: '/dashboard', icon: 'dashboard', t: 'nav.dashboard' },
@@ -47,94 +48,126 @@ const displayNameFor = (user) => {
   return 'Account';
 };
 
-/* ---------- Public top nav ---------- */
+/* ---------- Public top nav — floating glassmorphic pill ----------
+   Center links scroll-spy the landing sections. In-page jumps use
+   scrollIntoView (never location.hash — that would collide with the router's
+   reserved #/admin fragment). */
+const NAV_SECTIONS = [
+  { id: 'hero',     key: 'nav.home' },
+  { id: 'method',   key: 'nav.method' },
+  { id: 'features', key: 'nav.capabilities' },
+  { id: 'markets',  key: 'nav.markets' },
+  { id: 'why',      key: 'nav.why' },
+];
+
 export const PublicNav = () => {
-  const [scrolled, setScrolled] = useState(false);
+  const [active, setActive] = useState('hero');
   const [mobOpen, setMobOpen] = useState(false);
   const { t } = useT();
 
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 12);
-    window.addEventListener('scroll', onScroll);
+    const onScroll = () => {
+      let current = 'hero';
+      for (const { id } of NAV_SECTIONS) {
+        const el = document.getElementById(id);
+        if (el && el.getBoundingClientRect().top <= 160) current = id;
+      }
+      setActive(current);
+    };
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
-  const links = [
-    { to: '/',         label: t('nav.product') },
-    { to: '/signup',   label: t('nav.startTrial') },
-  ];
+  const jump = (id) => {
+    setMobOpen(false);
+    if (id === 'hero') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const pill = (id) =>
+    `press rounded-full px-4 py-2 text-sm transition-all duration-300 ${
+      active === id
+        ? 'bg-accent/15 text-txt-1 font-medium shadow-[inset_0_0_0_1px_rgb(var(--c-accent)/0.25)]'
+        : 'text-txt-2 hover:text-txt-1 hover:bg-surface-3/60'
+    }`;
 
   return (
-    <nav
-      className={`fixed top-0 w-full z-50 transition-all duration-300 ${
-        scrolled ? 'glass border-b border-bdr/80' : 'bg-transparent'
-      }`}
-    >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
-        <Link to="/"><Mark size={32} /></Link>
-        <div className="hidden md:flex items-center gap-1">
-          {links.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              className="px-3 py-2 text-sm text-txt-2 hover:text-txt-1 transition rounded-lg hover:bg-surface-3/60"
-            >
-              {item.label}
-            </Link>
+    <nav className="fixed top-0 w-full z-50 px-3 sm:px-5 pt-3">
+      <div className="max-w-6xl mx-auto glass-pane rounded-full border border-bdr/70 flex items-center justify-between h-14 pl-4 pr-2 sm:pl-5">
+        <button
+          onClick={() => jump('hero')}
+          className="transition-all duration-300 hover:drop-shadow-[0_0_14px_rgb(var(--c-accent)/0.45)]"
+          aria-label="PesaLens home"
+        >
+          <Mark size={30} />
+        </button>
+
+        {/* Center section links */}
+        <div className="hidden xl:flex items-center gap-1 absolute left-1/2 -translate-x-1/2">
+          {NAV_SECTIONS.map(({ id, key }) => (
+            <button key={id} onClick={() => jump(id)} className={pill(id)}>
+              {t(key)}
+            </button>
           ))}
         </div>
-        <div className="flex items-center gap-1.5">
+
+        <div className="flex items-center gap-1">
           <div className="hidden md:flex items-center">
             <LanguageToggle />
             <ThemeToggle />
           </div>
-          <div className="hidden md:flex items-center gap-2 ml-1">
-            <Link
-              to="/signin"
-              className="text-sm text-txt-2 hover:text-txt-1 transition px-3 py-2"
-            >
-              {t('nav.signin')}
-            </Link>
-            <Link
-              to="/signup"
-              className="btn-primary text-sm font-medium px-4 py-2 rounded-lg inline-flex items-center gap-2"
-            >
-              {t('nav.openAccount')}
-              <Icon name="arrowRight" size={14} />
-            </Link>
-          </div>
-          <button
-            className="md:hidden p-2 rounded-lg hover:bg-surface-3"
-            onClick={() => setMobOpen(!mobOpen)}
-            aria-label="Toggle menu"
+          <Link
+            to="/signin"
+            className="hidden md:inline-block text-sm text-txt-2 hover:text-txt-1 transition px-3 py-2"
           >
-            <Icon name={mobOpen ? 'x' : 'menu'} size={22} className="text-txt-1" />
-          </button>
-        </div>
-      </div>
-      {mobOpen && (
-        <div className="md:hidden glass border-t border-bdr px-4 py-4 space-y-2">
-          {links.map((item) => (
-            <Link
-              key={item.to}
-              to={item.to}
-              className="block py-2 text-sm text-txt-2 hover:text-txt-1"
-              onClick={() => setMobOpen(false)}
-            >
-              {item.label}
-            </Link>
-          ))}
-          <Link to="/signin" className="block py-2 text-sm text-txt-2" onClick={() => setMobOpen(false)}>
             {t('nav.signin')}
           </Link>
           <Link
             to="/signup"
-            className="block btn-primary text-sm font-medium px-5 py-2.5 rounded-lg text-center"
+            className="press btn-primary text-sm font-semibold pl-4 pr-3 py-2.5 rounded-full hidden sm:inline-flex items-center gap-1.5 transition-shadow hover:shadow-ring"
+          >
+            {t('nav.openAccount')}
+            <Icon name="arrowUpRight" size={14} />
+          </Link>
+          <button
+            className="xl:hidden p-2.5 rounded-full hover:bg-surface-3"
+            onClick={() => setMobOpen(!mobOpen)}
+            aria-label="Toggle menu"
+          >
+            <Icon name={mobOpen ? 'x' : 'menu'} size={20} className="text-txt-1" />
+          </button>
+        </div>
+      </div>
+
+      {mobOpen && (
+        <div className="xl:hidden max-w-6xl mx-auto mt-2 glass-pane rounded-3xl border border-bdr/70 px-4 py-4 space-y-1">
+          {NAV_SECTIONS.map(({ id, key }) => (
+            <button
+              key={id}
+              onClick={() => jump(id)}
+              className={`block w-full text-left rounded-xl px-3 py-2.5 text-sm ${
+                active === id ? 'bg-accent/15 text-txt-1 font-medium' : 'text-txt-2 hover:text-txt-1'
+              }`}
+            >
+              {t(key)}
+            </button>
+          ))}
+          <div className="border-t border-bdr/60 my-2" />
+          <Link to="/signin" className="block px-3 py-2.5 text-sm text-txt-2" onClick={() => setMobOpen(false)}>
+            {t('nav.signin')}
+          </Link>
+          <Link
+            to="/signup"
+            className="block press btn-primary text-sm font-semibold px-5 py-2.5 rounded-full text-center"
             onClick={() => setMobOpen(false)}
           >
             {t('nav.openAccount')}
           </Link>
-          <div className="flex items-center justify-center gap-2 pt-2 border-t border-bdr/60 mt-2">
+          <div className="flex items-center justify-center gap-2 pt-2">
             <LanguageToggle />
             <ThemeToggle />
           </div>
@@ -469,6 +502,7 @@ export const AppShell = ({ children }) => {
   }, []);
 
   return (
+    <MotionProvider>
     <div className="flex h-screen overflow-hidden">
       <AppSidebar collapsed={collapsed} setCollapsed={setCollapsed} />
       {mobMenu && (
@@ -511,11 +545,18 @@ export const AppShell = ({ children }) => {
           </div>
         </div>
       )}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <AppTopBar onMenuToggle={() => setMobMenu(!mobMenu)} />
-        <TrialBanner />
-        <main className="flex-1 overflow-x-hidden overflow-y-auto bg-surface-1 p-3 sm:p-4 lg:p-6">{children}</main>
+      <div className="flex-1 flex flex-col overflow-hidden relative">
+        {/* Subtle unified Light Pillar behind the content — identical in both
+            themes. Sits inside the content column so it never bleeds under the
+            sidebar / top bar. Cards stay opaque; the beam shows in the gutters. */}
+        <PageBackground variant="inner" />
+        <div className="relative z-[1] flex flex-col flex-1 overflow-hidden">
+          <AppTopBar onMenuToggle={() => setMobMenu(!mobMenu)} />
+          <TrialBanner />
+          <main className="flex-1 overflow-x-hidden overflow-y-auto bg-surface-1/70 p-3 sm:p-4 lg:p-6">{children}</main>
+        </div>
       </div>
     </div>
+    </MotionProvider>
   );
 };
