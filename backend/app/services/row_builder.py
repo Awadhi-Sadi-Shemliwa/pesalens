@@ -83,6 +83,38 @@ def parse_date(text: str) -> date | None:
     return None
 
 
+# Time-of-day token: 24h "13:40" or 12h "1:40 pm" (optional seconds). Anchored
+# on a colon between an hour and minute so it doesn't grab commas/periods from
+# amounts or the dots in reference codes (e.g. CI260327.1413.K25607).
+_TIME_RX = re.compile(
+    r"\b(?P<h>[01]?\d|2[0-3]):(?P<m>[0-5]\d)(?::[0-5]\d)?\s*(?P<ap>[ap]\.?m\.?)?",
+    re.I,
+)
+
+
+def parse_time(text: str) -> str | None:
+    """Extract a 24h "HH:MM" time-of-day from a cell / raw row, or None.
+
+    Mobile-money statements (M-Pesa/Airtel/Selcom/Tigo/Halo/Yas) print a
+    "Date & Time" column; most banks omit it. Best-effort — the value is only a
+    reconciliation tiebreaker, so a miss (or a rare false positive on a colon in
+    a description) is harmless. Handles 24h ("13:40") and 12h am/pm ("1:40 pm").
+    """
+    if not text:
+        return None
+    for m in _TIME_RX.finditer(text):
+        h = int(m.group("h"))
+        minute = int(m.group("m"))
+        ap = (m.group("ap") or "").lower().replace(".", "")
+        if ap == "pm" and h < 12:
+            h += 12
+        elif ap == "am" and h == 12:
+            h = 0
+        if 0 <= h <= 23 and 0 <= minute <= 59:
+            return f"{h:02d}:{minute:02d}"
+    return None
+
+
 # ────────────────────────────────────────────────────────────────────
 # AMOUNT PARSING — strips currency prefixes, handles commas
 # ────────────────────────────────────────────────────────────────────
@@ -501,6 +533,9 @@ def _row_to_transaction(
     # Try to get date from the date column
     date_str = get("date")
     txn_date = parse_date(date_str)
+    # Time-of-day usually shares the date cell ("Date & Time" column); fall back
+    # to the whole row for layouts that split it out. Best-effort, tiebreaker only.
+    txn_time = parse_time(date_str)
 
     # Get description
     description = get("description")
@@ -568,10 +603,13 @@ def _row_to_transaction(
         confidence -= 0.1
 
     row_text = " ".join(str(c or "") for c in row)
+    if txn_time is None:
+        txn_time = parse_time(row_text)
 
     return Transaction(
         row_index=row_idx,
         txn_date=txn_date,
+        txn_time=txn_time,
         description=description,
         reference=reference,
         debit=debit,
@@ -920,6 +958,9 @@ def build_from_words(
 def _finalize_word_txn(data: dict, row_idx: int, page_number: int) -> Transaction | None:
     """Convert word-mode row data into a Transaction."""
     txn_date = parse_date(data.get("date", ""))
+    # Time from the date field first (shared "Date & Time" cell), else the raw
+    # row. Best-effort, tiebreaker only.
+    txn_time = parse_time(data.get("date", "")) or parse_time(data.get("_raw", ""))
     description = re.sub(r"\s+", " ", data.get("description", "")).strip()
 
     # Handle single "amount" column
@@ -968,6 +1009,7 @@ def _finalize_word_txn(data: dict, row_idx: int, page_number: int) -> Transactio
     return Transaction(
         row_index=row_idx,
         txn_date=txn_date,
+        txn_time=txn_time,
         description=description,
         reference=reference,
         debit=debit,

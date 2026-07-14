@@ -44,6 +44,15 @@ class ReconciliationGroup(BaseModel):
     explained_amount: float
     status: Literal["fully_explained", "partial", "blind_spot"]
     candidates: list[ReconciliationCandidate] = Field(default_factory=list)
+    # The provider (BankFormat value, e.g. "nmb") and time-of-day of the
+    # statement debit this group represents, so the UI can show "NMB · 13:40".
+    bank: Optional[str] = None
+    time: Optional[str] = None
+    # Set when this debit was chosen over a competing one from another service
+    # by amount sufficiency and/or recency — explains the attribution to the user
+    # ("Attributed to NMB 13:40 — Selcom's 18k withdrawal was too small to cover
+    # the 25k receipt").
+    attribution_note: Optional[str] = None
     # LLM coaching note. Nullable — empty when the LLM is unavailable.
     insight: Optional[str] = None
 
@@ -117,6 +126,12 @@ class ReconciliationResponse(BaseModel):
     scope: Literal["personal", "business"]
     kpis: ReconciliationKpis
     groups: list[ReconciliationGroup] = Field(default_factory=list)
+    # Receipts / entries that fell inside the date range but weren't consumed
+    # by any statement debit (either nothing matched them, or no statement
+    # covers their date). Surfaced so the ledger shows EVERY backing item the
+    # user recorded — a scanned receipt must be visible in reconciliation even
+    # before it's paired with an outflow.
+    unmatched_candidates: list[ReconciliationCandidate] = Field(default_factory=list)
     patterns: Optional[HistoricalPatterns] = None
     charges_summary: Optional[ChargesSummary] = None
     overall_summary: Optional[str] = None

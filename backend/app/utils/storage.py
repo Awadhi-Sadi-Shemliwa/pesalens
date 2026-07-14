@@ -82,6 +82,23 @@ def delete_upload(file_path: Path) -> None:
         log.warning("Could not delete upload %s: %s", file_path, exc)
 
 
+def delete_upload_by_job(job_id: str, user_id: Optional[int] = None) -> None:
+    """Delete any saved PDF(s) for a job_id — used to clean up orphaned uploads
+    whose worker never ran (e.g. a process restart). Best-effort; never raises.
+
+    Saved files are named `{job_id}_{safe_name}` (see save_upload), so a glob on
+    the prefix reliably finds the one file regardless of its original name.
+    """
+    try:
+        target = settings.uploads_path / str(user_id) if user_id else settings.uploads_path
+        if not target.exists():
+            return
+        for path in target.glob(f"{job_id}_*"):
+            delete_upload(path)
+    except OSError as exc:
+        log.warning("Could not clean up upload for job %s: %s", job_id, exc)
+
+
 def save_debug(job_id: str, page_num: int, data: dict, user_id: Optional[int] = None) -> Path:
     """Save per-page debug output."""
     ensure_dirs()

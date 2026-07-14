@@ -48,9 +48,13 @@ from app.schemas.reconciliation import (
     TopVendor,
 )
 from app.services.analytics import (
+    _infer_period,
     categorize,
     charges_and_interest_in_range,
+    effective_stmt,
     load_all_results,
+    load_result,
+    newest_job_id,
 )
 from app.utils.logger import get_logger
 
@@ -58,6 +62,16 @@ log = get_logger(__name__)
 
 
 Scope = Literal["personal", "business"]
+
+# Rounding tolerance (TZS) when comparing two amounts/budgets so float noise
+# doesn't flip a sufficiency or remaining-budget test.
+_AMOUNT_EQ_TOL = 1.0
+
+# A cash withdrawal (or set of them) must be able to fund at least this share of
+# a receipt before we attribute the receipt to it. Below this, the purchase was
+# mostly paid from other funds, so the receipt stays in the unmatched ledger at
+# full amount instead of being consumed behind a token credit.
+_MIN_ATTRIB_FRACTION = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -102,19 +116,37 @@ def _txn_dedupe_key(t: dict) -> tuple:
     )
 
 
-def load_statement_txns_in_range(user_id: int, start: date, end: date) -> tuple[list[dict], int, int]:
+def load_statement_txns_in_range(
+    user_id: int, start: date, end: date, job_id: Optional[str] = None
+) -> tuple[list[dict], int, int]:
     """All statement transactions for a user where txn_date ∈ [start, end].
 
     Returns `(transactions, upload_count, result_count)`. `upload_count` is
     the number of uploads in the user's `Upload` table; `result_count` is the
     number that actually have a result JSON on disk. The difference (e.g.
     encrypted PDFs that failed extraction) is surfaced in the response notes.
+
+    When `job_id` is given, only that statement's result is scanned. This is
+    load-bearing for statement-scoped reconciliation: the cross-upload dedupe
+    below collapses identical rows and keeps the FIRST occurrence (oldest
+    upload), so filtering by job_id AFTER a global dedupe would silently drop a
+    target-statement row that an overlapping older statement already claimed.
+    Restricting the result set up front makes the dedupe operate only within
+    the one statement (whose rows are naturally unique) — and reads just that
+    one JSON instead of scanning the whole archive.
     """
-    results = load_all_results(user_id)
+    if job_id is not None:
+        one = load_result(user_id, job_id)
+        results = [one] if one else []
+    else:
+        results = load_all_results(user_id)
     seen: set[tuple] = set()
     out: list[dict] = []
     for result in results:
         job_id = result.get("job_id")
+        # Provider that issued this statement — lets the matcher attribute a
+        # receipt to the right service and the UI show "NMB · 13:40".
+        bank = (result.get("metadata") or {}).get("bank")
         for t in result.get("transactions") or []:
             txn_date = _parse_date(t.get("txn_date"))
             if not txn_date or not (start <= txn_date <= end):
@@ -126,6 +158,8 @@ def load_statement_txns_in_range(user_id: int, start: date, end: date) -> tuple[
             row = dict(t)
             row["_job_id"] = job_id
             row["_txn_date"] = txn_date
+            row["_bank"] = bank
+            row["_txn_time"] = t.get("txn_time")
             out.append(row)
     out.sort(key=lambda r: r["_txn_date"])
     return out, len(results), len(results)
@@ -157,6 +191,7 @@ def load_receipts_in_range(user_id: int, start: date, end: date) -> list[dict]:
             "_date": d,
             "_date_inferred": date_inferred,
             "_amount": float(amount),
+            "_stmt": r.get("statement_job_id"),
             "vendor": r.get("vendor"),
             "category": (r.get("category") or "").lower() or None,
             "id": r.get("id"),
@@ -198,6 +233,7 @@ def load_manual_entries_in_range(
                 "_date": d,
                 "_amount": float(row.amount or 0),
                 "_source": "personal",
+                "_stmt": row.statement_job_id,
                 "vendor": row.vendor,
                 "category": row.category,
                 "id": row.id,
@@ -222,6 +258,7 @@ def load_manual_entries_in_range(
             "_date": d,
             "_amount": float(row.amount or 0),
             "_source": "business",
+            "_stmt": None,  # business entries carry no statement association
             "vendor": row.vendor,
             "category": row.category,
             "id": row.id,
@@ -280,6 +317,43 @@ def classify_debits(txns: list[dict]) -> tuple[list[dict], list[dict], list[dict
 # Matching
 # ---------------------------------------------------------------------------
 
+# Display names for BankFormat values — used in attribution notes. Acronym
+# banks stay upper-case; mobile-money brands read as words.
+BANK_LABEL = {
+    "crdb": "CRDB", "nmb": "NMB", "nbc": "NBC", "kcb": "KCB", "absa": "Absa",
+    "amana": "Amana", "mpesa": "M-Pesa", "airtel_money": "Airtel Money",
+    "tigo_pesa": "Tigo Pesa", "halo_pesa": "Halo Pesa", "selcom": "Selcom",
+    "yas": "Yas", "unknown": "Unknown",
+}
+
+
+def _bank_label(bank: Optional[str]) -> str:
+    if not bank:
+        return "this service"
+    return BANK_LABEL.get(str(bank).lower(), str(bank).upper())
+
+
+def _time_to_min(hhmm: Optional[str]) -> Optional[int]:
+    """'HH:MM' -> minutes since midnight, or None when absent/unparseable."""
+    if not hhmm:
+        return None
+    try:
+        h, m = str(hhmm).split(":")[:2]
+        return int(h) * 60 + int(m)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _time_sort_key(hhmm: Optional[str]) -> int:
+    """Ascending sort key by time-of-day; untimed rows sort after timed ones."""
+    m = _time_to_min(hhmm)
+    return m if m is not None else 24 * 60 + 1
+
+
+def _fmt_amt(v: float) -> str:
+    return f"TZS {v:,.0f}"
+
+
 def _make_candidate(c: dict) -> ReconciliationCandidate:
     if "_source" in c:
         source = c["_source"]
@@ -308,16 +382,77 @@ def _status(explained: float, debit: float) -> str:
     return "blind_spot"
 
 
+def _attr_score(we: dict, c: dict) -> float:
+    """Higher = a better cash withdrawal to attribute this candidate to.
+
+    Feasibility (the withdrawal still has budget to fully cover the purchase) is
+    enforced by the CALLER — this only ORDERS the survivors. So it rewards date
+    proximity (same-day best, decaying across the window) and, on the same day,
+    the most recent withdrawal (the fresher cash on hand). It does NOT compare
+    the purchase's time-of-day: receipts and manual entries don't carry a
+    reliable time, so any such comparison would be fabricated.
+    """
+    score = 0.0
+    # Date proximity: same-day best, decaying across the window.
+    days_gap = (c["_date"] - we["d"]).days
+    score += max(0.0, 20.0 - days_gap)
+    # Same-day tiebreak: prefer the later (more recent) withdrawal — it held the
+    # freshest cash before the purchase. Uses only the withdrawal's OWN time.
+    if days_gap == 0:
+        w_min = _time_to_min(we.get("time"))
+        if w_min is not None:
+            score += w_min / 1440.0  # 0..~1, later in the day ranks higher
+    return score
+
+
+def _attribution_note(winner: dict, rival: dict, c: dict) -> Optional[str]:
+    """One-line explanation of why `winner` claimed `c` over a rival provider.
+
+    Two truthful cases: the rival was too SMALL to cover the purchase (the
+    sufficiency rule the money-map is built around), or both could cover it and
+    the winner was the more recent large-enough withdrawal.
+    """
+    vendor = (c.get("vendor") or c.get("category") or "this purchase")
+    amt = _fmt_amt(float(c["_amount"]))
+    wlabel = _bank_label(winner.get("bank"))
+    rlabel = _bank_label(rival.get("bank"))
+    wt = f" {winner['time']}" if winner.get("time") else ""
+    if rival["amount"] + _AMOUNT_EQ_TOL < float(c["_amount"]):
+        # Sufficiency drove it — the rival couldn't cover the purchase.
+        return (
+            f"{amt} {vendor} attributed to {wlabel}{wt} — {rlabel}'s "
+            f"{_fmt_amt(rival['amount'])} withdrawal was too small to cover it."
+        )
+    # Both sufficient — the winner is the most recent withdrawal large enough
+    # to cover it (see _attr_score for the ordering).
+    rt = f" {rival['time']}" if rival.get("time") else ""
+    return (
+        f"{amt} {vendor} attributed to {wlabel}{wt} over {rlabel}{rt} — "
+        "the most recent withdrawal large enough to cover it."
+    )
+
+
 def _match_withdrawals(
     withdrawals: list[dict],
     pool: list[dict],
     range_end: date,
 ) -> list[ReconciliationGroup]:
-    """Greedy window-based clustering of receipts/entries against cash withdrawals."""
+    """Attribute receipts/entries to the cash withdrawal that best explains them.
 
-    sorted_w = sorted(withdrawals, key=lambda t: _parse_date(t.get("txn_date")) or range_end)
-    groups: list[ReconciliationGroup] = []
+    Each withdrawal gets a window [date, min(next-withdrawal-1, +7d, range_end)]
+    and a remaining-amount budget. Every candidate is assigned to the feasible
+    withdrawal with the highest `_attr_score`, so when two same-day withdrawals
+    from different services could both explain a purchase, the sufficient,
+    closest-in-time one wins — and we record why in `attribution_note`.
+    """
+    sorted_w = sorted(
+        withdrawals,
+        key=lambda t: (_parse_date(t.get("txn_date")) or range_end,
+                       _time_sort_key(t.get("_txn_time"))),
+    )
 
+    # Build each withdrawal's window + mutable remaining budget.
+    wentries: list[dict] = []
     for i, w in enumerate(sorted_w):
         d_w = _parse_date(w.get("txn_date"))
         if not d_w:
@@ -325,44 +460,109 @@ def _match_withdrawals(
         amount = float(w.get("debit") or 0)
         if amount <= 0:
             continue
-
         next_w_date = None
         for j in range(i + 1, len(sorted_w)):
             n = _parse_date(sorted_w[j].get("txn_date"))
             if n and n > d_w:
                 next_w_date = n
                 break
-        # Window: from withdrawal date until the day before the next
-        # withdrawal, capped at +7 days, capped at the range end.
         upper = d_w + timedelta(days=7)
         if next_w_date:
             upper = min(upper, next_w_date - timedelta(days=1))
         upper = min(upper, range_end)
         if upper < d_w:
             upper = d_w
+        wentries.append({
+            "w": w, "d": d_w, "amount": amount, "remaining": amount,
+            "upper": upper, "time": w.get("_txn_time"), "bank": w.get("_bank"),
+            "picked": [], "explained": 0.0, "note": None,
+        })
 
-        # Pick unconsumed candidates whose date is in the window, largest first.
-        in_window = [c for c in pool if not c.get("_consumed") and d_w <= c["_date"] <= upper]
-        in_window.sort(key=lambda c: c["_amount"], reverse=True)
-
-        explained = 0.0
-        picked: list[dict] = []
-        for c in in_window:
-            if explained >= amount:
+    # Attribute each candidate across the withdrawals whose window covers it
+    # (oldest purchases claim budget first). We credit each withdrawal only by
+    # the portion it can actually fund (`min(remaining, still-unattributed)`), so:
+    #   • an exhausted withdrawal can't swallow a receipt and add ~0 to explained
+    #     (the vanishing bug) — it simply contributes nothing;
+    #   • a fresh withdrawal SMALLER than the receipt still gets partial credit
+    #     (it's not a blind spot just because one purchase exceeded it) and the
+    #     receipt spills onto the next withdrawal.
+    # Guardrails:
+    #   • a receipt is attributed only when the in-window withdrawals can fund a
+    #     MEANINGFUL share of it (`_MIN_ATTRIB_FRACTION`); otherwise it's mostly
+    #     other-funds spend and belongs in the unmatched ledger at full amount,
+    #     not hidden behind a token credit;
+    #   • each group shows the receipt at the CONTRIBUTED amount for that
+    #     withdrawal (not the full amount), so a split receipt isn't double-shown.
+    for c in sorted(
+        (c for c in pool if not c.get("_consumed")), key=lambda c: c["_date"]
+    ):
+        c_amount = float(c["_amount"])
+        # Withdrawals whose window contains the purchase date, best first.
+        in_window = [
+            we for we in wentries if we["d"] <= c["_date"] <= we["upper"]
+        ]
+        usable = sorted(
+            (we for we in in_window if we["remaining"] > _AMOUNT_EQ_TOL),
+            key=lambda we: _attr_score(we, c),
+            reverse=True,
+        )
+        # Leave the receipt in the pool (→ unmatched ledger) when nothing can
+        # fund it, or when the available budget can't explain a meaningful share.
+        total_available = sum(we["remaining"] for we in usable)
+        if not usable or total_available + _AMOUNT_EQ_TOL < c_amount * _MIN_ATTRIB_FRACTION:
+            continue
+        best = usable[0]
+        remaining_to_attribute = c_amount
+        for we in usable:
+            if remaining_to_attribute <= _AMOUNT_EQ_TOL:
                 break
-            picked.append(c)
-            explained += c["_amount"]
-            c["_consumed"] = True
-        capped = min(explained, amount)
+            contribution = min(we["remaining"], remaining_to_attribute)
+            if contribution <= _AMOUNT_EQ_TOL:
+                continue
+            we["remaining"] -= contribution
+            we["explained"] += contribution
+            # Show the portion THIS withdrawal funded, so a receipt split across
+            # withdrawals isn't rendered at full amount in each group.
+            we["picked"].append({**c, "_amount": contribution})
+            remaining_to_attribute -= contribution
+        # A meaningful share was funded → the receipt is accounted for; keep it
+        # out of the unmatched ledger (its contributions are shown in the groups).
+        c["_consumed"] = True
+        # Explain the attribution only when `best` could FULLY cover the purchase
+        # — then "attributed to X" is a whole-purchase claim we can defend. Cite a
+        # different-service rival that was too small (the money-map case), else a
+        # genuine budget-holding runner-up (so "most recent large enough" holds).
+        if best.get("note") is None and best["amount"] + _AMOUNT_EQ_TOL >= c_amount:
+            too_small = next(
+                (we for we in in_window
+                 if we is not best
+                 and (we.get("bank") or "") != (best.get("bank") or "")
+                 and we["amount"] + _AMOUNT_EQ_TOL < c_amount),
+                None,
+            )
+            rival = too_small or next(
+                (we for we in usable
+                 if we is not best
+                 and (we.get("bank") or "") != (best.get("bank") or "")),
+                None,
+            )
+            if rival is not None:
+                best["note"] = _attribution_note(best, rival, c)
 
+    groups: list[ReconciliationGroup] = []
+    for we in wentries:
+        explained = min(we["explained"], we["amount"])
         groups.append(ReconciliationGroup(
             kind="withdrawal",
-            txn_date=d_w.isoformat(),
-            description=(w.get("description") or "").strip()[:200] or "Withdrawal",
-            debit_amount=round(amount, 2),
-            explained_amount=round(capped, 2),
-            status=_status(capped, amount),  # type: ignore[arg-type]
-            candidates=[_make_candidate(c) for c in picked],
+            txn_date=we["d"].isoformat(),
+            description=(we["w"].get("description") or "").strip()[:200] or "Withdrawal",
+            debit_amount=round(we["amount"], 2),
+            explained_amount=round(explained, 2),
+            status=_status(explained, we["amount"]),  # type: ignore[arg-type]
+            candidates=[_make_candidate(c) for c in we["picked"]],
+            bank=we.get("bank"),
+            time=we.get("time"),
+            attribution_note=we.get("note"),
         ))
     return groups
 
@@ -409,6 +609,8 @@ def _match_pos_direct(
                 match = c
                 match_score = score
 
+        bank = t.get("_bank")
+        t_time = t.get("_txn_time")
         if match:
             match["_consumed"] = True
             explained = min(float(match["_amount"]), amount)
@@ -420,6 +622,8 @@ def _match_pos_direct(
                 explained_amount=round(explained, 2),
                 status=_status(explained, amount),  # type: ignore[arg-type]
                 candidates=[_make_candidate(match)],
+                bank=bank,
+                time=t_time,
             ))
         else:
             groups.append(ReconciliationGroup(
@@ -430,6 +634,8 @@ def _match_pos_direct(
                 explained_amount=0.0,
                 status="blind_spot",
                 candidates=[],
+                bank=bank,
+                time=t_time,
             ))
     return groups
 
@@ -456,6 +662,8 @@ def _match_transfers(transfers: list[dict], scope: Scope) -> list[Reconciliation
             explained_amount=0.0,
             status="blind_spot",
             candidates=[],
+            bank=t.get("_bank"),
+            time=t.get("_txn_time"),
         ))
     return out
 
@@ -554,10 +762,13 @@ def historical_patterns(
 
 _LLM_SYSTEM = (
     "You are PesaLens AI's reconciliation coach for a Tanzanian user. "
-    "You receive a list of cash outflows from a bank statement, plus the "
-    "receipts and manual entries that may explain each one. For every "
+    "You receive a list of cash outflows from the user's bank / mobile-money "
+    "statements, each tagged with the service (bank) and time it occurred, "
+    "plus the receipts and manual entries that may explain each one. For every "
     "group, write a 1-2 sentence coaching note in TZS terms. Be specific "
-    "(mention vendor, amount, recurrence). NEVER fabricate amounts. If "
+    "(mention the service, vendor, amount, time, recurrence). When an "
+    "attribution_note is present, it explains which service the spend was "
+    "traced to — reinforce it. NEVER fabricate amounts. If "
     "status is blind_spot, ask one pointed question about where the cash "
     "likely went. Also write one short overall_summary. "
     "Return STRICT JSON: "
@@ -574,8 +785,11 @@ def _llm_payload(groups: list[ReconciliationGroup], kpis: ReconciliationKpis) ->
             "idx": i,
             "kind": g.kind,
             "txn_date": g.txn_date,
+            "bank": g.bank,
+            "time": g.time,
             "debit_amount": g.debit_amount,
             "status": g.status,
+            "attribution_note": g.attribution_note,
             "candidates": [
                 {"source": c.source, "date": c.date, "vendor": c.vendor, "amount": c.amount}
                 for c in g.candidates[:5]
@@ -709,21 +923,66 @@ def build_reconciliation(
     start: date,
     end: date,
     scope: Scope,
+    *,
+    job_id: Optional[str] = None,
+    mode: str = "general",
 ) -> ReconciliationResponse:
-    txns, _, result_count = load_statement_txns_in_range(user_id, start, end)
+    """Cross-source reconciliation for a date range.
+
+    `mode="general"` (default) is the historical behaviour — pool everything in
+    [start, end]. `mode="statement"` with a `job_id` scopes the view to a single
+    uploaded statement: its own transactions and only the receipts/entries
+    associated with it (a NULL association resolves to the user's newest
+    statement), over the statement's OWN period.
+    """
+    statement_mode = mode == "statement" and bool(job_id)
+
+    # In statement mode the statement's own period is authoritative — derive it
+    # so the range always covers exactly this statement (and the caller can skip
+    # the range cap). Falls back to the passed range if the period is unknown.
+    # Reads the ONE statement's JSON (not the whole archive) to keep this cheap.
+    if statement_mode:
+        result = load_result(user_id, job_id)
+        if result:
+            period = _infer_period(
+                result.get("transactions") or [], result.get("metadata") or {}
+            )
+            p_start = _parse_date(period.get("start"))
+            p_end = _parse_date(period.get("end"))
+            if p_start and p_end:
+                start, end = p_start, p_end
+
+    # In statement mode, restrict the txn scan to the one statement UP FRONT so
+    # the cross-upload dedupe can't steal an overlapping row from it (see
+    # load_statement_txns_in_range). The receipt/entry pool is scoped by
+    # association below.
+    txns, _, result_count = load_statement_txns_in_range(
+        user_id, start, end, job_id=job_id if statement_mode else None
+    )
     receipts = load_receipts_in_range(user_id, start, end)
     entries = load_manual_entries_in_range(db, user_id, start, end, scope)
 
-    upload_count = (
+    if statement_mode:
+        newest = newest_job_id(user_id, db=db)
+        receipts = [r for r in receipts if effective_stmt(r.get("_stmt"), newest) == job_id]
+        entries = [e for e in entries if effective_stmt(e.get("_stmt"), newest) == job_id]
+
+    # Only SUCCESSFUL uploads have a result JSON to compare against. Rows are now
+    # created at queue time, so counting every row here would make failed / in-
+    # flight uploads permanently inflate the "skipped" note below.
+    done_upload_count = (
         db.query(Upload)
-        .filter(Upload.user_id == user_id)
+        .filter(Upload.user_id == user_id, Upload.status == "done")
         .count()
     )
 
     notes: list[str] = []
-    if upload_count > result_count:
+    # Statement mode intentionally scans a single result, so `result_count` is 1
+    # and this "missing results" note would be misleading — only emit it for the
+    # general (all-statements) view.
+    if not statement_mode and done_upload_count > result_count:
         notes.append(
-            f"{upload_count - result_count} upload(s) had no extraction result on disk and were skipped."
+            f"{done_upload_count - result_count} upload(s) had no extraction result on disk and were skipped."
         )
     if not txns and not receipts and not entries:
         notes.append("No data found for this date range. Upload a statement, scan receipts, or add manual entries.")
@@ -743,6 +1002,24 @@ def build_reconciliation(
     groups.extend(_match_pos_direct(pos_t, pool))
     groups.extend(_match_transfers(transfers_t, scope))
     groups.sort(key=lambda g: g.txn_date)
+
+    # Everything in the pool the matcher didn't consume — receipts/entries with
+    # no statement debit to pair against (common when the user has scanned
+    # receipts but not yet uploaded the matching statement). These still belong
+    # in the ledger so the user can SEE their recorded spend in reconciliation.
+    #
+    # Scope guard: business entries are still MATCHED against personal cash
+    # withdrawals in personal scope (a sole-trader's SME spend consumes the cash
+    # they pull out), so they legitimately appear inside groups. But an
+    # UNMATCHED business entry is noise in a personal ledger — keep the personal
+    # view personal by dropping it here.
+    unmatched = [
+        _make_candidate(c)
+        for c in pool
+        if not c.get("_consumed")
+        and not (scope == "personal" and c.get("_source") == "business")
+    ]
+    unmatched.sort(key=lambda c: c.date, reverse=True)
 
     total_out = sum(g.debit_amount for g in groups)
     total_explained = sum(g.explained_amount for g in groups)
@@ -775,6 +1052,7 @@ def build_reconciliation(
         scope=scope,
         kpis=kpis,
         groups=groups,
+        unmatched_candidates=unmatched,
         patterns=patterns,
         charges_summary=charges_summary,
         overall_summary=overall,

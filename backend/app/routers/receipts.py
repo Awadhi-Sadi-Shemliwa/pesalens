@@ -18,10 +18,13 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+
+from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import User
+from app.db import User, get_db
 from app.deps import get_current_user, require_active_plan
 from app.rate_limit import limiter
 from app.schemas.response import APIResponse
@@ -276,6 +279,37 @@ GEMINI_VISION_MODELS = [
 # chance to actually clear before we waste the second attempt.
 _RETRY_DELAY_SEC = 12.0
 
+# Hard wall-clock budget for the WHOLE vision cascade (Gemini models +
+# OpenRouter fallbacks + inter-service cool-down). Without this the cascade
+# could stack 90s + 12s retry + 90s + 60s timeouts and run for minutes —
+# long past the client's AbortController — so the browser showed "request
+# failed" while the backend quietly finished and SAVED the receipt (the
+# exact bug users hit). Capping the server side below the client abort
+# guarantees the request always returns a decisive answer the UI can show.
+# The client abort (api.js) is set comfortably ABOVE this so the backend
+# always wins the race.
+SCAN_BUDGET_SEC = 75.0
+
+# Per-call HTTP timeouts. Each individual call is also clamped to whatever
+# remains of SCAN_BUDGET_SEC, so a single slow model can never blow the
+# overall budget. Gemini gets the larger slice: the common success path is ONE
+# Gemini call, and schema-guided decoding of a long, many-line receipt
+# (maxOutputTokens=32768) can legitimately stream for ~50s — a 45s cap was
+# clipping those into false failures. 60s still leaves headroom under the 75s
+# budget (a second Gemini attempt just gets the remainder), and Gemini 5xx/429
+# failures return fast so the OpenRouter fallback keeps most of the budget.
+_GEMINI_HTTP_TIMEOUT = 60.0
+_OPENROUTER_HTTP_TIMEOUT = 45.0
+
+# Minimum remaining budget to START a fresh upstream vision call. A vision
+# request needs real time to complete (upload the image, run inference, stream
+# JSON back), so firing one with only a few seconds left is guaranteed-wasted
+# work: it ReadTimeouts, burns a request, and eats the seconds that a decisive
+# failure message could have used. 18s is the floor below which we stop trying
+# and return the classified failure instead. Kept well under _GEMINI_HTTP_TIMEOUT
+# so a first call still gets its full slice on a fresh budget.
+_MIN_START_BUDGET_SEC = 18.0
+
 
 # Structured-output schema for Gemini vision calls. Passed verbatim as
 # `generationConfig.responseSchema` so the model is contractually bound
@@ -344,11 +378,17 @@ def _classify_http_error(status_code: int, body: str) -> str:
     return f"http_{status_code}"
 
 
-def _call_gemini_vision(image_bytes: bytes, mime: str) -> tuple[dict | None, list[str]]:
+def _call_gemini_vision(
+    image_bytes: bytes, mime: str, deadline: float
+) -> tuple[dict | None, list[str]]:
     """Try Google AI Studio Gemini vision models directly.
 
     Free tier has its own per-key quota (not the shared global pool that
     makes OpenRouter free models unreliable), so this is the preferred path.
+
+    `deadline` is a `time.monotonic()` timestamp: no upstream call is started
+    (and no 429 retry sleep is taken) once the budget is spent, so the whole
+    cascade returns before the client's abort fires.
 
     Returns (parsed_or_None, errors). `errors` is a list of "model: tag"
     strings the caller uses to build a useful diagnostic for the user.
@@ -392,21 +432,34 @@ def _call_gemini_vision(image_bytes: bytes, mime: str) -> tuple[dict | None, lis
     }
 
     for model_id in GEMINI_VISION_MODELS:
+        remaining = deadline - time.monotonic()
+        if remaining < _MIN_START_BUDGET_SEC:
+            log.info("Gemini budget exhausted before %s — skipping", model_id)
+            errors.append(f"gemini/{model_id}: budget_exhausted")
+            break
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
             f"{model_id}:generateContent"
         )
-        # One short retry on 429 — per-minute free-tier windows clear fast.
+        # One short retry on 429 — per-minute free-tier windows clear fast,
+        # but only if the budget can absorb the 12s wait AND a real attempt.
         resp = None
         for attempt in range(2):
+            call_timeout = min(_GEMINI_HTTP_TIMEOUT, deadline - time.monotonic())
+            if call_timeout < _MIN_START_BUDGET_SEC:
+                errors.append(f"gemini/{model_id}: budget_exhausted")
+                break
             try:
-                resp = httpx.post(url, json=body, headers=headers, timeout=90.0)
+                resp = httpx.post(url, json=body, headers=headers, timeout=call_timeout)
             except Exception as exc:
                 log.warning("Gemini %s transport error: %s", model_id, exc)
                 errors.append(f"gemini/{model_id}: transport_error")
                 resp = None
                 break
             if resp.status_code != 429 or attempt == 1:
+                break
+            if deadline - time.monotonic() < _RETRY_DELAY_SEC + _MIN_START_BUDGET_SEC:
+                log.info("Gemini %s 429 — no budget for a retry, moving on", model_id)
                 break
             log.info("Gemini %s 429 — retrying in %.1fs", model_id, _RETRY_DELAY_SEC)
             time.sleep(_RETRY_DELAY_SEC)
@@ -474,8 +527,14 @@ def _call_gemini_vision(image_bytes: bytes, mime: str) -> tuple[dict | None, lis
     return None, errors
 
 
-def _call_openrouter(image_bytes: bytes, mime: str) -> tuple[dict | None, list[str]]:
-    """Try vision models on OpenRouter in order; return (parsed, errors)."""
+def _call_openrouter(
+    image_bytes: bytes, mime: str, deadline: float
+) -> tuple[dict | None, list[str]]:
+    """Try vision models on OpenRouter in order; return (parsed, errors).
+
+    `deadline` is a `time.monotonic()` timestamp — each model call is clamped
+    to the remaining budget and the loop stops once it's spent.
+    """
     errors: list[str] = []
     if not settings.openrouter_api_key:
         errors.append("openrouter: no_api_key")
@@ -494,6 +553,11 @@ def _call_openrouter(image_bytes: bytes, mime: str) -> tuple[dict | None, list[s
     candidates = _vision_model_chain()
 
     for model_id in candidates:
+        call_timeout = min(_OPENROUTER_HTTP_TIMEOUT, deadline - time.monotonic())
+        if call_timeout < _MIN_START_BUDGET_SEC:
+            log.info("OpenRouter budget exhausted before %s — skipping", model_id)
+            errors.append(f"openrouter/{model_id}: budget_exhausted")
+            break
         try:
             resp = httpx.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -507,7 +571,7 @@ def _call_openrouter(image_bytes: bytes, mime: str) -> tuple[dict | None, list[s
                     "max_tokens": 1200,
                     "temperature": 0.1,
                 },
-                timeout=60.0,
+                timeout=call_timeout,
             )
         except Exception as exc:
             log.warning("Vision model %s transport error: %s", model_id, exc)
@@ -655,7 +719,33 @@ def _call_openrouter_text(text: str) -> dict | None:
     return parsed
 
 
-def _save_receipt(parsed: dict, image_bytes: bytes, filename: str, user_id: int) -> str:
+def _bank_for_job(user_id: int, statement_job_id: str | None) -> str | None:
+    """Best-effort provider label for the statement a receipt is scoped to.
+
+    Reads the saved result index and returns the `metadata.bank` of the
+    matching job_id so the receipt carries its service (e.g. "nmb") for the
+    per-statement money map. Any failure resolves to None — the receipt is
+    still saved, just without a bank tag.
+    """
+    if not statement_job_id:
+        return None
+    try:
+        from app.services.analytics import load_result
+        result = load_result(user_id, statement_job_id)
+        if result:
+            return (result.get("metadata") or {}).get("bank")
+    except Exception:
+        return None
+    return None
+
+
+def _save_receipt(
+    parsed: dict,
+    image_bytes: bytes,
+    filename: str,
+    user_id: int,
+    statement_job_id: str | None = None,
+) -> str:
     receipt_id = uuid.uuid4().hex[:12]
     target_dir = _receipts_dir(user_id)
     suffix = Path(filename).suffix or ".bin"
@@ -669,6 +759,14 @@ def _save_receipt(parsed: dict, image_bytes: bytes, filename: str, user_id: int)
         "image_filename": image_path.name if image_bytes else None,
         "source_filename": filename,
     }
+    # Per-statement scoping (Epic-2): stamp the association only when present so
+    # existing receipt JSONs are byte-for-byte unaffected. `bank` mirrors the
+    # statement's provider for the money map.
+    if statement_job_id:
+        parsed["statement_job_id"] = statement_job_id
+        bank = _bank_for_job(user_id, statement_job_id)
+        if bank:
+            parsed["bank"] = bank
     # Stamp TRA tax code + EFD compliance fields at save time so they are
     # cheap to read later (no recompute on every dashboard render).
     annotate_tax(parsed)
@@ -742,44 +840,41 @@ def _build_failure_message(errors: list[str]) -> str:
             "connection and try again in a moment."
         )
 
+    if all(t in ("budget_exhausted", "rate_limited", "upstream_5xx") for t in tags):
+        return (
+            "The vision service is busy right now and took too long to "
+            "respond. Free-tier capacity usually frees up within a minute — "
+            "please try again shortly."
+        )
+
     return (
         "Could not read the image right now. The vision service returned "
         "errors on every fallback — please try again shortly."
     )
 
 
-@router.post("/receipts/scan", response_model=APIResponse)
-@limiter.limit(settings.rate_limit_receipts)
-async def scan_receipt(
-    request: Request,
-    file: UploadFile = File(...),
-    user: User = Depends(require_active_plan),
-):
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="filename missing")
+def _run_scan_pipeline(
+    image_bytes: bytes, filename: str, user_id: int, statement_job_id: str | None = None
+) -> dict:
+    """Blocking receipt-scan work: quota, mime sniff, vision cascade, save.
 
-    image_bytes = await file.read()
-    if not image_bytes:
-        raise HTTPException(status_code=400, detail="empty file")
-
-    if len(image_bytes) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Image exceeds 10MB limit")
-
+    Runs in a worker thread (via run_in_threadpool) so the synchronous httpx
+    calls and time.sleep never freeze the event loop — that freeze was what
+    stalled the health probe (Render 503s) and other requests while a scan
+    was in flight. Returns the `data` dict for the APIResponse; raises
+    HTTPException for the fast 4xx client-input cases.
+    """
     # Cheap garbage-collect of expired images, then enforce per-user quota.
-    _cleanup_old_receipt_images(user.id)
-    _enforce_receipt_quota(user.id, len(image_bytes))
+    _cleanup_old_receipt_images(user_id)
+    _enforce_receipt_quota(user_id, len(image_bytes))
 
     # Magic-byte check — trust the bytes, not the Content-Type header.
-    sniffed = _detect_image_mime(image_bytes)
-    if not sniffed:
-        return APIResponse(
-            success=True, message="ok",
-            data={
-                "is_receipt": False,
-                "message": "That file is not a supported image (JPEG/PNG/WebP/HEIC). Please pick a photo of a receipt.",
-            },
-        )
-    mime = sniffed
+    mime = _detect_image_mime(image_bytes)
+    if not mime:
+        return {
+            "is_receipt": False,
+            "message": "That file is not a supported image (JPEG/PNG/WebP/HEIC). Please pick a photo of a receipt.",
+        }
 
     # Strip EXIF (GPS coords, device fingerprint, timestamps) before the
     # image touches disk or the vision LLM. Best-effort: a malformed image
@@ -787,56 +882,55 @@ async def scan_receipt(
     image_bytes = _strip_image_metadata(image_bytes, mime)
 
     if not (settings.gemini_api_key or settings.openrouter_api_key):
-        return APIResponse(
-            success=True, message="ok",
-            data={
-                "is_receipt": False,
-                "message": (
-                    "Receipt scanning is offline. Set GEMINI_API_KEY (preferred, "
-                    "free tier on Google AI Studio) or OPENROUTER_API_KEY in the "
-                    "backend .env to enable real OCR."
-                ),
-            },
-        )
+        return {
+            "is_receipt": False,
+            "message": (
+                "Receipt scanning is offline. Set GEMINI_API_KEY (preferred, "
+                "free tier on Google AI Studio) or OPENROUTER_API_KEY in the "
+                "backend .env to enable real OCR."
+            ),
+        }
+
+    # One shared wall-clock budget across BOTH providers so the whole
+    # cascade returns before the client's abort — the backend always wins
+    # the race and hands back a decisive answer instead of finishing after
+    # the browser already gave up.
+    deadline = time.monotonic() + SCAN_BUDGET_SEC
 
     # Gemini direct first (per-key free quota), OpenRouter free vision models
     # only as a fallback (shared global pool, frequently throttled).
-    parsed, gem_errors = _call_gemini_vision(image_bytes, mime)
+    parsed, gem_errors = _call_gemini_vision(image_bytes, mime, deadline)
     or_errors: list[str] = []
     if not parsed:
-        # Cool-down before bouncing to OpenRouter. The free vision tier
-        # there is a shared upstream pool that 429s under sub-second
-        # cascades from the same server IP; a small wait (quarter of
-        # the per-minute Gemini window) lets the bursts smooth out.
-        time.sleep(_RETRY_DELAY_SEC / 4)
-        parsed, or_errors = _call_openrouter(image_bytes, mime)
+        # Cool-down before bouncing to OpenRouter — but only if there's
+        # budget left, and never longer than what remains.
+        remaining = deadline - time.monotonic()
+        if remaining > _MIN_START_BUDGET_SEC:
+            time.sleep(min(_RETRY_DELAY_SEC / 4, max(0.0, remaining - _MIN_START_BUDGET_SEC)))
+            parsed, or_errors = _call_openrouter(image_bytes, mime, deadline)
+        else:
+            or_errors.append("openrouter: budget_exhausted")
 
     if not parsed:
         all_errors = gem_errors + or_errors
         # Log the per-model diagnostic server-side only — never bubble
         # vendor / model identifiers up to the browser.
-        log.warning("Receipt scan failed for user %s: %s", user.id, all_errors)
-        return APIResponse(
-            success=True, message="ok",
-            data={
-                "is_receipt": False,
-                "message": _build_failure_message(all_errors),
-            },
-        )
+        log.warning("Receipt scan failed for user %s: %s", user_id, all_errors)
+        return {
+            "is_receipt": False,
+            "message": _build_failure_message(all_errors),
+        }
 
     if parsed.get("is_receipt") is False:
         desc = (parsed.get("image_description") or "").strip() or "something else"
-        return APIResponse(
-            success=True, message="ok",
-            data={
-                "is_receipt": False,
-                "image_description": desc,
-                "message": (
-                    f"This looks like {desc}, not a receipt. "
-                    "Please add a photo of a receipt to record the spending."
-                ),
-            },
-        )
+        return {
+            "is_receipt": False,
+            "image_description": desc,
+            "message": (
+                f"This looks like {desc}, not a receipt. "
+                "Please add a photo of a receipt to record the spending."
+            ),
+        }
 
     parsed.setdefault("category", "other")
     parsed.setdefault("currency", "TZS")
@@ -862,11 +956,41 @@ async def scan_receipt(
         if inferred > 0:
             parsed["total"] = inferred
 
-    receipt_id = _save_receipt(parsed, image_bytes, file.filename, user_id=user.id)
-    return APIResponse(
-        success=True, message="ok",
-        data={**parsed, "id": receipt_id},
+    receipt_id = _save_receipt(
+        parsed, image_bytes, filename, user_id=user_id,
+        statement_job_id=statement_job_id,
     )
+    return {**parsed, "id": receipt_id}
+
+
+@router.post("/receipts/scan", response_model=APIResponse)
+@limiter.limit(settings.rate_limit_receipts)
+async def scan_receipt(
+    request: Request,
+    file: UploadFile = File(...),
+    statement_job_id: str | None = Form(default=None),
+    user: User = Depends(require_active_plan),
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="filename missing")
+
+    statement_job_id = (statement_job_id or "").strip()[:40] or None
+
+    image_bytes = await file.read()
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    if len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image exceeds 10MB limit")
+
+    # Everything below blocks (sync httpx + time.sleep + disk I/O). Run it in
+    # a worker thread so the event loop stays free to serve health probes and
+    # other requests while the vision models grind — freezing the loop here is
+    # what produced the Render 503s and "backend didn't respond" symptom.
+    data = await run_in_threadpool(
+        _run_scan_pipeline, image_bytes, file.filename, user.id, statement_job_id
+    )
+    return APIResponse(success=True, message="ok", data=data)
 
 
 @router.post("/receipts/parse-text", response_model=APIResponse)
@@ -1051,9 +1175,59 @@ def _receipt_amount(r: dict) -> float:
     return items_sum
 
 
+def _receipt_effective_date(r: dict) -> str | None:
+    """A receipt's date for windowing: OCR `date`, else `scanned_at` — YYYY-MM-DD."""
+    for key in ("date", "scanned_at"):
+        v = r.get(key)
+        if v:
+            s = str(v)[:10]
+            if len(s) == 10 and s[4] == "-" and s[7] == "-":
+                return s
+    return None
+
+
 @router.get("/receipts", response_model=APIResponse)
-async def list_receipts(user: User = Depends(get_current_user)):
+async def list_receipts(
+    scope: str | None = Query(default=None),
+    job_id: str | None = Query(default=None),
+    day: str | None = Query(default=None),
+    start: str | None = Query(default=None),
+    end: str | None = Query(default=None),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List this user's receipts, optionally scoped.
+
+    No scope params → the full gallery (unchanged default behaviour).
+    `scope=statement&job_id=X` → only receipts belonging to statement X (a
+    receipt with no `statement_job_id` resolves to the newest statement).
+    `scope=general` with `day` or `start`/`end` → receipts whose effective date
+    falls in that window.
+    """
     receipts = _load_receipts(user.id)
+
+    if scope == "statement" and job_id:
+        from app.services.analytics import effective_stmt, newest_job_id
+        newest = newest_job_id(user.id, db=db)
+        receipts = [
+            r for r in receipts
+            if effective_stmt(r.get("statement_job_id"), newest) == job_id
+        ]
+    elif scope == "general":
+        lo = (day or start) or None
+        hi = (day or end) or None
+        if lo or hi:
+            def _in_window(r: dict) -> bool:
+                d = _receipt_effective_date(r)
+                if not d:
+                    return False
+                if lo and d < lo:
+                    return False
+                if hi and d > hi:
+                    return False
+                return True
+            receipts = [r for r in receipts if _in_window(r)]
+
     # Surface a single `amount` field so the gallery doesn't have to know
     # whether OCR populated `total` vs `subtotal` vs item-line prices.
     # Older receipts saved before tax-code annotation get stamped on read

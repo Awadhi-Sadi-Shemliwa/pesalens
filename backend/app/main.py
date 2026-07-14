@@ -21,7 +21,7 @@ from app.middleware import (
     SecurityHeadersMiddleware,
 )
 from app.rate_limit import limiter
-from app.routers import assistant, auth, billing, business, dashboard, markets, personal, receipts, reconcile, upload
+from app.routers import admin, assistant, auth, banks, billing, business, dashboard, markets, personal, receipts, reconcile, upload
 from app.services.market_scheduler import shutdown_scheduler, start_scheduler
 from app.utils.logger import get_logger
 from app.utils.storage import ensure_dirs
@@ -55,6 +55,13 @@ async def lifespan(_app: FastAPI):
     _verify_production_config()
     ensure_dirs()
     init_db()
+    # Fail any extraction job that was queued/processing when the previous
+    # process died — the in-memory executor queue does not survive a restart.
+    try:
+        from app.routers.upload import recover_orphaned_jobs
+        recover_orphaned_jobs()
+    except Exception as exc:  # noqa: BLE001 — must never block boot
+        log.warning("Orphaned-job recovery skipped: %s", exc)
     try:
         start_scheduler()
     except Exception as exc:  # noqa: BLE001
@@ -111,11 +118,28 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    """Generic safety net: never leak stack traces to the client."""
+    """Generic safety net: never leak stack traces to the client.
+
+    Also persists a timestamped ErrorLog row (best-effort) so the owner
+    dashboard can show *what* crashed, *where*, and *when* — the transparency
+    the product was missing. The client still only sees a generic message.
+    """
     if isinstance(exc, HTTPException):
         # Let FastAPI handle its own HTTPExceptions normally.
         raise exc
     log.exception("Unhandled error on %s %s", request.method, request.url.path)
+    try:
+        from app.db import ErrorLog, session_scope
+
+        with session_scope() as db:
+            db.add(ErrorLog(
+                path=str(request.url.path)[:255],
+                method=request.method,
+                error_code="server_error",
+                message=f"{type(exc).__name__}: {exc}"[:2000],
+            ))
+    except Exception:  # noqa: BLE001 - logging must never mask the original error
+        log.debug("Failed to persist ErrorLog", exc_info=True)
     return JSONResponse(
         status_code=500,
         content={"success": False, "message": "Internal server error", "errors": ["server_error"]},
@@ -132,6 +156,8 @@ app.include_router(business.router, prefix="/api")
 app.include_router(markets.router, prefix="/api")
 app.include_router(billing.router, prefix="/api")
 app.include_router(reconcile.router, prefix="/api")
+app.include_router(banks.router, prefix="/api")
+app.include_router(admin.router, prefix="/api")
 
 
 @app.get("/health")

@@ -36,6 +36,11 @@ class Transaction(BaseModel):
 
     row_index: int = Field(..., description="Sequential row number in the statement")
     txn_date: Optional[dt.date] = Field(None, description="Transaction date")
+    # Time-of-day (24h "HH:MM") when the statement prints it — mobile-money
+    # providers (M-Pesa/Airtel/Selcom/Tigo/Halo/Yas) carry a "Date & Time"
+    # column; most banks don't. Best-effort and optional: used as a tiebreaker
+    # for cross-provider receipt attribution, never required.
+    txn_time: Optional[str] = Field(None, description="Transaction time of day, 24h HH:MM")
     description: str = Field("", description="Transaction description/narration")
     reference: Optional[str] = Field(None, description="Transaction reference number")
     debit: Optional[float] = Field(None, description="Amount debited (money out)")

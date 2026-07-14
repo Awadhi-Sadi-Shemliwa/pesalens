@@ -144,6 +144,33 @@ class Upload(Base):
     total_transactions = Column(Integer, default=0)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
+    # Statement period, persisted at extraction time (YYYY-MM-DD). Lets the
+    # statement selector / null-association resolver run as one indexed DB query
+    # instead of re-parsing every result JSON on the disk per request. Nullable:
+    # legacy rows are lazily backfilled from their result JSON on first read.
+    period_start = Column(String(10), nullable=True)
+    period_end = Column(String(10), nullable=True, index=True)
+
+    # --- Extraction job state (honest progress + failure transparency) ---
+    # The row is now created the moment an upload is received (status=queued)
+    # and updated as the background pipeline advances, so the client can poll
+    # GET /upload/status/{job_id} for a REAL stage + percentage rather than a
+    # blank spinner. On failure we keep the row (never delete) with the stage
+    # and percentage where it stopped + a human reason + timestamp.
+    status = Column(String(16), nullable=False, default="queued")  # queued|processing|done|failed
+    stage = Column(String(40), nullable=True)          # human stage label, e.g. "Extracting text"
+    progress = Column(Integer, nullable=False, default=0)  # 0..100, monotonic, real
+    error_code = Column(String(40), nullable=True)     # classified: pdf_unlock_failed|extraction_empty|...
+    error_message = Column(Text, nullable=True)        # human "what happened"
+    failed_stage = Column(String(40), nullable=True)   # stage label at the moment of failure
+    failed_progress = Column(Integer, nullable=True)   # percentage reached before failure
+    started_at = Column(DateTime, nullable=True)       # pipeline start
+    finished_at = Column(DateTime, nullable=True)      # success OR failure timestamp
+    # Liveness beacon — the worker bumps this on every progress ping. Startup
+    # orphan-recovery only fails rows whose heartbeat is STALE, so it can never
+    # clobber a job still being processed by a sibling gunicorn worker.
+    heartbeat_at = Column(DateTime, nullable=True)
+
     user = relationship("User", back_populates="uploads")
 
 
@@ -159,6 +186,11 @@ class PersonalEntry(Base):
     amount = Column(Float, nullable=False)
     direction = Column(String(10), nullable=False, default="expense")  # income|expense
     created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    # Statement this entry belongs to (Epic-2 per-statement scoping). Nullable:
+    # legacy rows + entries added outside a statement context resolve to the
+    # user's newest statement at query time — no data migration required.
+    statement_job_id = Column(String(40), nullable=True, index=True)
 
     user = relationship("User", back_populates="entries")
 
@@ -226,6 +258,29 @@ class AuditLog(Base):
     ip = Column(String(64), nullable=True)
     user_agent = Column(String(255), nullable=True)
     details = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
+
+
+class ErrorLog(Base):
+    """System-wide error ledger — the single source of truth for the owner
+    dashboard's "what crashed, where, why, and when" view.
+
+    Written from two places: the extraction pipeline's failure path (carries
+    the stage + percentage where it died) and the global unhandled-exception
+    handler in main.py (carries the request method + path). Every row is
+    timestamped. This is deliberately append-only and never used for
+    application logic, so it is safe to write from a best-effort try/except.
+    """
+    __tablename__ = "error_log"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    path = Column(String(255), nullable=True)          # request path or job context
+    method = Column(String(10), nullable=True)         # HTTP method, when applicable
+    error_code = Column(String(40), nullable=False, index=True)  # classified code
+    message = Column(Text, nullable=True)              # human message
+    stage = Column(String(40), nullable=True)          # pipeline stage, when applicable
+    progress = Column(Integer, nullable=True)          # percentage reached, when applicable
     created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
 
@@ -318,6 +373,43 @@ def init_db() -> None:
                 if name in existing_payments:
                     continue
                 conn.execute(text(f"ALTER TABLE payments ADD COLUMN {name} {ddl}"))
+
+        if "uploads" in tables:
+            existing_uploads = {col["name"] for col in inspector.get_columns("uploads")}
+            upload_cols: dict[str, str] = {
+                # Extraction job state — see Upload model. Older rows get a
+                # sensible default: they already succeeded, so status=done.
+                "status":          "VARCHAR(16) NOT NULL DEFAULT 'done'",
+                "stage":           "VARCHAR(40)",
+                "progress":        "INTEGER NOT NULL DEFAULT 100",
+                "error_code":      "VARCHAR(40)",
+                "error_message":   "TEXT",
+                "failed_stage":    "VARCHAR(40)",
+                "failed_progress": "INTEGER",
+                "started_at":      "DATETIME",
+                "finished_at":     "DATETIME",
+                "heartbeat_at":    "DATETIME",
+                # Statement period — see Upload model. Legacy rows stay NULL and
+                # are lazily backfilled from their result JSON on first read.
+                "period_start":    "VARCHAR(10)",
+                "period_end":      "VARCHAR(10)",
+            }
+            for name, ddl in upload_cols.items():
+                if name in existing_uploads:
+                    continue
+                conn.execute(text(f"ALTER TABLE uploads ADD COLUMN {name} {ddl}"))
+
+        if "personal_entries" in tables:
+            existing_entries = {col["name"] for col in inspector.get_columns("personal_entries")}
+            entry_cols: dict[str, str] = {
+                # Epic-2 per-statement scoping — see PersonalEntry model. Older
+                # rows stay NULL and resolve to the newest statement at read time.
+                "statement_job_id": "VARCHAR(40)",
+            }
+            for name, ddl in entry_cols.items():
+                if name in existing_entries:
+                    continue
+                conn.execute(text(f"ALTER TABLE personal_entries ADD COLUMN {name} {ddl}"))
 
 
 def get_db() -> Iterator[Session]:

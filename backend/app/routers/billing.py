@@ -192,8 +192,8 @@ def start_checkout(
                     "line_items[0][quantity]": "1",
                     "client_reference_id": str(user.id),
                     "customer_email": user.email,
-                    "success_url": f"{settings.public_app_url}/#/upgrade?status=success&session={{CHECKOUT_SESSION_ID}}",
-                    "cancel_url": f"{settings.public_app_url}/#/upgrade?status=cancelled",
+                    "success_url": f"{settings.public_app_url}/upgrade?status=success&session={{CHECKOUT_SESSION_ID}}",
+                    "cancel_url": f"{settings.public_app_url}/upgrade?status=cancelled",
                     "metadata[user_id]": str(user.id),
                     "metadata[plan]": plan,
                 },
@@ -449,7 +449,7 @@ def request_payment_confirmation(
     payment.confirm_requested_at = now
     db.commit()
 
-    admins = settings.admin_emails
+    admins = settings.billing_admin_emails
     if not admins:
         log.warning("Manual payment %s requested but BILLING_ADMINS is empty", payment.id)
     link = _confirm_link(request, raw_token)

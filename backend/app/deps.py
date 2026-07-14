@@ -100,9 +100,20 @@ def require_active_plan(user: User = Depends(get_current_user)) -> User:
 
 def require_admin(user: User = Depends(get_current_user)) -> User:
     """Allow only emails listed in BILLING_ADMINS to call the manual
-    grant endpoint. Returning 404 (not 403) avoids leaking that the
-    endpoint exists to non-admins.
+    payment-confirmation endpoint. Returning 404 (not 403) avoids leaking
+    that the endpoint exists to non-admins.
     """
-    if not user.email or user.email.lower() not in settings.admin_emails:
+    if not user.email or user.email.lower() not in settings.billing_admin_emails:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    return user
+
+
+def require_system_admin(user: User = Depends(get_current_user)) -> User:
+    """Allow only the dedicated owner-console allowlist (ADMIN_EMAILS, falling
+    back to BILLING_ADMINS) to call /api/admin/*. Kept separate from
+    `require_admin` so granting billing rights never silently widens into
+    full-system read access. 404 (not 403) avoids leaking the endpoint.
+    """
+    if not user.email or user.email.lower() not in settings.admin_console_emails:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return user

@@ -19,7 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import User, get_db
+from app.db import AuditLog, User, get_db
 from app.deps import get_current_user
 from app.rate_limit import limiter
 from app.schemas.response import APIResponse
@@ -345,6 +345,10 @@ def me(user: User = Depends(get_current_user)):
             "email_verified": bool(user.email_verified_at),
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "subscription": summarize_subscription(user),
+            # Owner-console visibility. Lets the client show/hide the Admin nav
+            # without probing an admin endpoint and treating any 404 (wrong API
+            # base, proxy change) as "not an admin".
+            "is_admin": bool(user.email and user.email.lower() in settings.admin_console_emails),
         },
     )
 
@@ -677,6 +681,56 @@ def export_my_data(user: User = Depends(get_current_user), db: Session = Depends
             } for p in user.payments],
         },
     )
+
+
+# Human-readable titles for the activity feed (product voice, not event codes).
+_ACTIVITY_TITLES = {
+    "signup": "Account created",
+    "signin_success": "Signed in",
+    "email_verified_via_signin": "Email verified",
+    "email_verified": "Email verified",
+    "logout": "Signed out",
+    "password_changed": "Password changed",
+    "password_change_revoked": "Password change reverted",
+    "password_reset": "Password reset",
+    "password_reset_requested": "Password reset requested",
+    "data_export": "Data exported",
+    "upload_succeeded": "Statement extracted",
+    "upload_failed": "Statement extraction failed",
+    "manual_payment_confirm_requested": "Payment confirmation requested",
+    "manual_payment_confirmed": "Subscription activated",
+}
+
+
+@router.get("/me/activity", response_model=APIResponse)
+def my_activity(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Per-user activity history — a transparent, timestamped log of what this
+    account did (sign-ins, password changes, uploads, payments). Reads the
+    append-only AuditLog, newest first."""
+    rows = (
+        db.query(AuditLog)
+        .filter(AuditLog.user_id == user.id)
+        .order_by(AuditLog.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    items = []
+    for r in rows:
+        details = None
+        if r.details:
+            try:
+                import json as _json
+                details = _json.loads(r.details)
+            except Exception:  # noqa: BLE001
+                details = None
+        items.append({
+            "id": r.id,
+            "event": r.event,
+            "title": _ACTIVITY_TITLES.get(r.event, r.event.replace("_", " ").capitalize()),
+            "details": details,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        })
+    return APIResponse(success=True, message="ok", data={"activity": items})
 
 
 @router.delete("/me", response_model=APIResponse)

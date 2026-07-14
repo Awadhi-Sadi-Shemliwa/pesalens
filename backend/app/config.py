@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     receipt_quota_mb: int = 500
     receipt_image_retention_days: int = 90
 
+    # A statement is grouped as "recent" when its period end falls within this
+    # many days of the user's most-recent statement period end; older ones are
+    # "past". Drives the money-map recency grouping (Money-Flow Intelligence).
+    recent_window_days: int = 45
+
     # --- Email (verification + password reset) ---
     resend_api_key: str = ""
     email_from: str = "PesaLens <noreply@contact.pesalens.com>"
@@ -105,6 +110,13 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = ""
     public_app_url: str = "http://localhost:5173"
     billing_admins: str = ""
+
+    # Dedicated system-admin (owner console) allowlist — SEPARATE from billing
+    # rights. Adding an email to BILLING_ADMINS lets a finance person confirm
+    # manual payments; it must NOT also grant them read access to every user's
+    # email/name/plan/activity/errors via /api/admin/*. When ADMIN_EMAILS is
+    # empty we fall back to BILLING_ADMINS for backward compatibility.
+    admin_emails: str = ""
 
     # Manual-payment payout details. Empty by default — checkout returns a
     # "contact us" message instead of fake account numbers when unset.
@@ -142,9 +154,25 @@ class Settings(BaseSettings):
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
+    @staticmethod
+    def _parse_emails(raw: str) -> set[str]:
+        return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
     @property
-    def admin_emails(self) -> set[str]:
-        return {e.strip().lower() for e in self.billing_admins.split(",") if e.strip()}
+    def billing_admin_emails(self) -> set[str]:
+        """Emails allowed to confirm manual payments (billing rights only)."""
+        return self._parse_emails(self.billing_admins)
+
+    @property
+    def admin_console_emails(self) -> set[str]:
+        """Emails allowed into the system owner console (/api/admin/*).
+
+        Uses the dedicated ADMIN_EMAILS allowlist, falling back to
+        BILLING_ADMINS only when ADMIN_EMAILS is unset — so existing
+        single-allowlist deployments keep working while new ones can grant
+        billing rights without also granting full-system visibility.
+        """
+        return self._parse_emails(self.admin_emails) or self.billing_admin_emails
 
     @property
     def is_production(self) -> bool:

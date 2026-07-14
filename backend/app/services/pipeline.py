@@ -8,6 +8,7 @@ where later pages omit the header row.
 
 import re
 from pathlib import Path
+from typing import Callable, Optional
 
 from app.schemas.transaction import (
     DocumentType,
@@ -238,16 +239,42 @@ def _extract_header_balances(
         log.info("Parsed reported total credits: %.2f", metadata.reported_total_credits)
 
 
-def run_extraction_pipeline(job_id: str, file_path: Path) -> ExtractionResult:
-    """Run the full extraction pipeline on a PDF file."""
+# Progress callback: (stage_label, percent 0..100). Percentages are the REAL
+# step boundaries; the client eases the *rendered* bar between them but clamps
+# so it never exceeds the last reported value (honest-progress §89).
+ProgressCallback = Callable[[str, int], None]
+
+
+def _report(cb: Optional[ProgressCallback], stage: str, pct: int) -> None:
+    """Best-effort progress ping — a failing callback must never break extraction."""
+    if cb is None:
+        return
+    try:
+        cb(stage, pct)
+    except Exception:  # noqa: BLE001 - progress reporting is non-critical
+        log.debug("progress_cb raised (ignored)", exc_info=True)
+
+
+def run_extraction_pipeline(
+    job_id: str,
+    file_path: Path,
+    progress_cb: Optional[ProgressCallback] = None,
+) -> ExtractionResult:
+    """Run the full extraction pipeline on a PDF file.
+
+    `progress_cb(stage, pct)` (optional) is invoked at each step boundary so a
+    caller can persist real progress for the client to poll.
+    """
     log.info("=== Starting pipeline for job %s ===", job_id)
 
     # --- Step 1: Classify ---
+    _report(progress_cb, "Reading document", 5)
     log.info("Step 1: Classifying document...")
     classification = classify_document(file_path)
     metadata = StatementMetadata(bank=classification.bank_format)
 
     # --- Step 2: Extract text + tables + words ---
+    _report(progress_cb, "Extracting text & tables", 20)
     log.info("Step 2: Extracting text, tables, and words...")
     extractions: list[PageExtraction] = []
 
@@ -272,6 +299,7 @@ def run_extraction_pipeline(job_id: str, file_path: Path) -> ExtractionResult:
     _extract_header_balances(extractions, metadata)
 
     # --- Step 3: Build transaction rows (with column persistence) ---
+    _report(progress_cb, "Building transactions", 55)
     log.info("Step 3: Building transaction rows...")
     row_offset = 0
     table_cmap: ColumnMap | None = None
@@ -326,20 +354,27 @@ def run_extraction_pipeline(job_id: str, file_path: Path) -> ExtractionResult:
     log.info("Collected %d raw transactions from %d pages", len(all_transactions), len(page_results))
 
     # --- Step 5: Normalize ---
+    _report(progress_cb, "Normalizing", 72)
     log.info("Step 4: Normalizing...")
     all_transactions = normalize_transactions(all_transactions)
 
     # --- Step 6: Validate ---
+    _report(progress_cb, "Validating balances", 82)
     log.info("Step 5: Validating...")
     all_transactions, validation_errors = validate_transactions(
         all_transactions, opening_balance=metadata.opening_balance,
     )
 
     # --- Step 7: LLM Repair ---
+    _report(progress_cb, "Repairing & categorizing", 90)
     log.info("Step 6: LLM repair (if enabled)...")
     all_transactions = repair_transactions(all_transactions, metadata=metadata)
 
     # --- Build result ---
+    # Report 98 (not 100) here: honest progress reserves 100% for the caller's
+    # decisive completion once the result is persisted (§89 — never hit 100%
+    # before the operation truly resolves).
+    _report(progress_cb, "Finalizing", 98)
     result = ExtractionResult(
         job_id=job_id,
         filename=file_path.name,

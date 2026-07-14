@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -142,6 +142,19 @@ def load_latest_result(user_id: Optional[int] = None) -> Optional[dict]:
     """Return the most recently saved result for a user (or globally) or None."""
     results = load_all_results(user_id)
     return results[-1] if results else None
+
+
+def load_result(user_id: Optional[int], job_id: str) -> Optional[dict]:
+    """Load a SINGLE saved result JSON by job_id — no full-archive scan.
+
+    Used by statement-scoped hot paths that only need one statement's data, so
+    they don't pay O(all statements) of disk I/O to read one file.
+    """
+    if user_id is not None:
+        path = settings.results_path / str(user_id) / f"{job_id}.json"
+    else:
+        path = settings.results_path / f"{job_id}.json"
+    return _safe_load(path)
 
 
 # ---------- per-result computation ----------
@@ -657,8 +670,41 @@ def _kpis(results: list[dict]) -> dict:
 
 # ---------- public entry points ----------
 
-def build_dashboard_summary(user_id: Optional[int] = None) -> dict:
-    """Top-level aggregation feeding /api/dashboard/summary."""
+def _same_day_siblings(results: list[dict], selected: dict) -> list[dict]:
+    """Other statements uploaded the SAME calendar day as `selected`.
+
+    Powers the "you also uploaded NMB today — look into it too" hint: when a
+    user uploads two services on one day, selecting one surfaces the sibling(s).
+    """
+    sel_day = str(selected.get("created_at") or "")[:10]
+    sel_job = selected.get("job_id")
+    if not sel_day:
+        return []
+    out: list[dict] = []
+    for r in results:
+        if r.get("job_id") == sel_job:
+            continue
+        if str(r.get("created_at") or "")[:10] != sel_day:
+            continue
+        md = r.get("metadata") or {}
+        out.append({
+            "job_id": r.get("job_id"),
+            "bank": md.get("bank"),
+            "filename": r.get("filename"),
+            "created_at": r.get("created_at"),
+        })
+    return out
+
+
+def build_dashboard_summary(
+    user_id: Optional[int] = None, job_id: Optional[str] = None
+) -> dict:
+    """Top-level aggregation feeding /api/dashboard/summary.
+
+    When `job_id` is given, the view is built for THAT statement (its KPIs,
+    categories, series, issues) with trend KPIs computed against the statements
+    uploaded before it; otherwise it reflects the latest upload (unchanged).
+    """
     # Local import to avoid any circular-import surprises at module load.
     from app.services.ds_intel import (
         cash_flow_forecast,
@@ -672,6 +718,10 @@ def build_dashboard_summary(user_id: Optional[int] = None) -> dict:
     if not results:
         return {
             "upload_count": 0,
+            "selected_job_id": None,
+            "requested_job_id": job_id,
+            "fallback": False,
+            "same_day_siblings": [],
             "latest_upload": None,
             "kpis": _kpis([]),
             "balance_comparison": None,
@@ -686,7 +736,21 @@ def build_dashboard_summary(user_id: Optional[int] = None) -> dict:
             "treasury": {"available": False},
         }
 
-    latest = results[-1]
+    # Pick the statement to view. `sel_results` is the history up to AND
+    # including it, so trend KPIs compare against the prior statement. If the
+    # requested job_id has no result on disk (e.g. its JSON was removed) we fall
+    # back to the latest but FLAG it, so the client can tell the user the numbers
+    # aren't for the statement they asked for rather than showing them silently.
+    sel_results = results
+    fallback = False
+    if job_id:
+        idx = next((i for i, r in enumerate(results) if r.get("job_id") == job_id), None)
+        if idx is not None:
+            sel_results = results[: idx + 1]
+        else:
+            fallback = True
+
+    latest = sel_results[-1]
     metadata = latest.get("metadata") or {}
     transactions = latest.get("transactions") or []
     monthly = _monthly_series(transactions)
@@ -708,6 +772,10 @@ def build_dashboard_summary(user_id: Optional[int] = None) -> dict:
 
     return {
         "upload_count": upload_count,
+        "selected_job_id": latest.get("job_id"),
+        "requested_job_id": job_id,
+        "fallback": fallback,
+        "same_day_siblings": _same_day_siblings(results, latest),
         "latest_upload": {
             "job_id": latest.get("job_id"),
             "bank": metadata.get("bank"),
@@ -715,7 +783,7 @@ def build_dashboard_summary(user_id: Optional[int] = None) -> dict:
             "uploaded_at": latest.get("created_at"),
             "total_transactions": latest.get("total_transactions"),
         },
-        "kpis": _kpis(results),
+        "kpis": _kpis(sel_results),
         "balance_comparison": _balance_comparison(latest),
         "transaction_costs": _charges_and_interest(latest),
         "issues": promoted,
@@ -843,6 +911,170 @@ def _infer_period(transactions: list[dict], metadata: dict) -> dict:
         "label": f"{start.isoformat()} → {end.isoformat()} ({cadence}, {span} days)",
         "cadence": cadence,
     }
+
+
+def _upload_period(data: dict) -> tuple[Optional[str], Optional[str]]:
+    """(period_start, period_end) for a result JSON, via the shared inferrer."""
+    period = _infer_period(data.get("transactions") or [], data.get("metadata") or {})
+    return period["start"], period["end"]
+
+
+# Sentinel written to period_start/period_end for a `done` upload that has no
+# derivable period (undated statement, or a missing result JSON). Non-NULL so the
+# backfill query stops re-selecting the row, but empty so it reads back as "no
+# period" (_to_iso_date("") -> None) throughout analytics and the UI.
+_NO_PERIOD = ""
+
+
+def backfill_upload_periods(db, user_id: Optional[int]) -> None:
+    """Populate period_start/period_end on `done` Upload rows that predate period
+    persistence — one-time per row, so later reads are pure indexed DB queries.
+
+    New uploads get their period stamped at extraction time (see upload.py). This
+    self-heals the rows that were extracted before that column existed, and works
+    on both SQLite and Postgres (unlike the init_db SQLite-only backfill). Rows
+    whose result JSON is missing on disk are left NULL (they're effectively
+    orphans and never resolve to a statement).
+    """
+    from app.db import Upload  # local import — db.py must not depend on analytics
+
+    rows = (
+        db.query(Upload)
+        .filter(
+            Upload.user_id == user_id,
+            Upload.status == "done",
+            Upload.period_start.is_(None),
+            Upload.period_end.is_(None),
+        )
+        .all()
+    )
+    if not rows:
+        return
+    changed = False
+    for row in rows:
+        data = load_result(user_id, row.job_id)
+        start = end = None
+        if data:
+            start, end = _upload_period(data)
+            if not row.total_transactions:
+                row.total_transactions = data.get("total_transactions") or len(
+                    data.get("transactions") or []
+                )
+            if not row.bank:
+                row.bank = (data.get("metadata") or {}).get("bank")
+        # ALWAYS stamp something (real period, or the _NO_PERIOD sentinel for an
+        # undated statement / missing JSON) so this row leaves the NULL/NULL set
+        # and is never re-parsed on a future read. `_NO_PERIOD` ("") reads back as
+        # "no period" everywhere (_to_iso_date("") -> None) but isn't NULL, so the
+        # backfill query above won't select it again.
+        row.period_start = start or _NO_PERIOD
+        row.period_end = end or _NO_PERIOD
+        changed = True
+    if changed:
+        try:
+            db.commit()
+        except Exception:  # noqa: BLE001 — backfill is best-effort
+            db.rollback()
+            log.debug("Upload period backfill failed for user=%s", user_id, exc_info=True)
+
+
+def newest_job_id(user_id: Optional[int] = None, db=None) -> Optional[str]:
+    """job_id of the user's newest (by period_end) `done` statement, or None.
+
+    Used to resolve receipts / entries that carry no `statement_job_id` (legacy
+    rows, or items added outside a statement context) to the newest statement at
+    read time — so per-statement scoping needs no data migration.
+
+    Defined via `statement_index` (newest-first, by period_end) so this matches
+    EXACTLY what the frontend treats as the default statement (`statements[0]`).
+    """
+    idx = statement_index(user_id, db=db)
+    return idx[0]["job_id"] if idx else None
+
+
+def effective_stmt(item_job_id: Optional[str], newest: Optional[str]) -> Optional[str]:
+    """The statement an item belongs to: its own tag, else the newest statement."""
+    return item_job_id or newest
+
+
+def _to_iso_date(s: Any) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(str(s)[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_recency(rows: list[dict]) -> list[dict]:
+    """Tag each row recent/past off the newest period_end, then sort newest first."""
+    ends = [d for d in (_to_iso_date(r["period_end"]) for r in rows) if d]
+    if ends:
+        newest = max(ends)
+        window = timedelta(days=max(0, int(settings.recent_window_days)))
+        for r in rows:
+            pe = _to_iso_date(r["period_end"])
+            if pe is not None and pe >= newest - window:
+                r["recency"] = "recent"
+    rows.sort(
+        key=lambda r: str(r.get("period_end") or r.get("created_at") or ""),
+        reverse=True,
+    )
+    return rows
+
+
+def statement_index(user_id: Optional[int] = None, db=None) -> list[dict]:
+    """One row per saved statement for the selector / money-map grouping pipeline.
+
+    Each row: `{job_id, bank, filename, period_start, period_end, created_at,
+    txn_count, recency}`. `recency="recent"` when the statement's period end is
+    within `settings.recent_window_days` of the user's MOST-recent period end,
+    else `"past"`. Newest first.
+
+    When a DB session is supplied this reads the `uploads` table directly (one
+    indexed query, period columns persisted at extraction time), which is what
+    every per-request caller uses. Without `db` it falls back to scanning the
+    result JSONs — kept only for offline / scriptless callers.
+    """
+    if db is not None:
+        from app.db import Upload  # local import to avoid an import cycle
+
+        backfill_upload_periods(db, user_id)
+        rows = [
+            {
+                "job_id": u.job_id,
+                "bank": u.bank,
+                "filename": u.filename,
+                "period_start": u.period_start,
+                "period_end": u.period_end,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "txn_count": u.total_transactions or 0,
+                "recency": "past",  # refined below
+            }
+            for u in (
+                db.query(Upload)
+                .filter(Upload.user_id == user_id, Upload.status == "done")
+                .all()
+            )
+        ]
+        return _apply_recency(rows)
+
+    rows = []
+    for data in load_all_results(user_id):
+        metadata = data.get("metadata") or {}
+        transactions = data.get("transactions") or []
+        start, end = _upload_period(data)
+        rows.append({
+            "job_id": data.get("job_id"),
+            "bank": metadata.get("bank"),
+            "filename": data.get("filename"),
+            "period_start": start,
+            "period_end": end,
+            "created_at": data.get("created_at"),
+            "txn_count": data.get("total_transactions") or len(transactions),
+            "recency": "past",  # refined below
+        })
+    return _apply_recency(rows)
 
 
 def build_assistant_context(latest: dict) -> str:
