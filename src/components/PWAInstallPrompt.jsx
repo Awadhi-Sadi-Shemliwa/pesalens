@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { Icon } from './Icon';
+import { trackEvent } from '../data/analytics';
 
 /* --------------------------------------------------------------------------
    PWAInstallPrompt — branded "Install PesaLens" banner.
@@ -182,7 +183,7 @@ const PWAInstallPrompt = () => {
                 <a
                   href="/downloads/pesalens.apk"
                   download="pesalens.apk"
-                  onClick={() => remember()}
+                  onClick={() => { trackEvent('apk_download', { variant: 'pwa_prompt' }); remember(); }}
                   className="text-xs font-semibold text-accent hover:text-accent-hover inline-flex items-center gap-1 px-2 py-1.5"
                 >
                   <Icon name="arrowDownRight" size={12} />

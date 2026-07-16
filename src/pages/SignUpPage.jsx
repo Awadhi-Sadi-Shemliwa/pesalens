@@ -4,6 +4,7 @@ import { Icon } from '../components/Icon';
 import { Mark, Eyebrow, Button } from '../components/common';
 import { setUserType } from '../data/userStore';
 import { signUp } from '../data/api';
+import { trackEvent } from '../data/analytics';
 import { useT } from '../data/i18n';
 
 const SignUpPage = () => {
@@ -48,6 +49,9 @@ const SignUpPage = () => {
       // lands on the right home page after the user signs in.
       setUserType(form.type);
       setSentTo(form.email.trim());
+      // GA4 recommended event — imported into Google Ads as the conversion
+      // the campaigns optimize toward. Fires only on real success.
+      trackEvent('sign_up', { method: 'email', account_type: form.type });
     } catch (err) {
       setError(err?.message || 'Could not create account.');
     } finally {

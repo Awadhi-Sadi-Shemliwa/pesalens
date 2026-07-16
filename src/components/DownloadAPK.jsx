@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Icon } from './Icon';
+import { trackEvent } from '../data/analytics';
 
 /* --------------------------------------------------------------------------
    DownloadAPK — direct-download button for the signed Android APK.
@@ -55,12 +56,17 @@ const relativeTime = (iso) => {
 const DownloadAPK = ({ variant = 'primary', className = '' }) => {
   const meta = useApkMeta();
   const sub = [meta?.sizeLabel, relativeTime(meta?.updatedAt)].filter(Boolean).join(' · ');
+  // GA4 custom event — .apk isn't in Enhanced Measurement's file_download
+  // extension list, so we report it ourselves. The download itself is the
+  // <a download> navigation; this fires alongside it.
+  const onDownload = () => trackEvent('apk_download', { variant });
 
   if (variant === 'ghost') {
     return (
       <a
         href={APK_URL}
         download="pesalens.apk"
+        onClick={onDownload}
         className={`inline-flex items-center gap-1.5 text-sm font-medium text-txt-2 hover:text-txt-1 transition ${className}`}
       >
         <Icon name="arrowDownRight" size={14} />
@@ -74,6 +80,7 @@ const DownloadAPK = ({ variant = 'primary', className = '' }) => {
       <a
         href={APK_URL}
         download="pesalens.apk"
+        onClick={onDownload}
         className={`group flex items-center gap-3 sm:gap-4 bento p-3.5 sm:p-4 ${className}`}
       >
         <span className="relative w-12 h-12 sm:w-14 sm:h-14 rounded-2xl overflow-hidden flex-shrink-0 border border-bdr/60">
@@ -108,6 +115,7 @@ const DownloadAPK = ({ variant = 'primary', className = '' }) => {
     <a
       href={APK_URL}
       download="pesalens.apk"
+      onClick={onDownload}
       className={`press btn-secondary px-6 py-3 rounded-xl text-[15px] font-semibold inline-flex items-center justify-center gap-2 ${className}`}
     >
       <Icon name="arrowDownRight" size={16} />
