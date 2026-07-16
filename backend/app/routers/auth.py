@@ -168,6 +168,10 @@ def _issue_tokens(user: User, response: Optional[Response] = None) -> dict:
             "account_type": user.account_type,
             "email_verified": bool(user.email_verified_at),
             "subscription": summarize_subscription(user),
+            # Mirrors /auth/me — lets the client know immediately at signin
+            # whether the owner console applies, instead of waiting for the
+            # first /me fetch to merge the flag in.
+            "is_admin": bool(user.email and user.email.lower() in settings.admin_console_emails),
         },
     }
 

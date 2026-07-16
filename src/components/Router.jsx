@@ -15,8 +15,10 @@ const ADMIN_PATH = '/admin';
 const ADMIN_HASH = '#/admin';
 
 // Current route: the admin fragment wins when present, else the pathname.
+// `#admin` (no slash) is accepted as a hand-typed alias of the canonical
+// `#/admin` — urlFor() below still always emits the canonical form.
 const readPath = () => {
-  if (window.location.hash === ADMIN_HASH) return ADMIN_PATH;
+  if (window.location.hash === ADMIN_HASH || window.location.hash === '#admin') return ADMIN_PATH;
   return window.location.pathname || '/';
 };
 

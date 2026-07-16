@@ -19,7 +19,10 @@
  *   • Bypass for /api/* and any request that isn't GET.
  */
 
-const CACHE_VERSION = "pesalens-v1";
+// Bump whenever precached shell assets (icons, manifest) change content
+// without changing filename — the activate handler evicts older caches.
+// v2: brand icon refresh (old wallet favicon was pinned by the v1 cache).
+const CACHE_VERSION = "pesalens-v2";
 const SHELL = [
   "/",
   "/index.html",

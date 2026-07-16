@@ -133,6 +133,15 @@ Required at minimum:
 - `EMAIL_REPLY_TO` — a real support address, NOT a personal Gmail.
 - `BILLING_ADMINS` — comma-separated emails of admins who can confirm
   manual payments.
+- `ADMIN_EMAILS` — comma-separated emails allowed into the owner
+  console at `https://pesalens.com/#/admin` (system stats, active
+  users, errors, activity). Falls back to `BILLING_ADMINS` when empty.
+
+> **Changing `.env` later:** `env_file` values are injected at container
+> *creation*, so after editing `.env` run
+> `docker compose --env-file .env up -d` to recreate the backend —
+> `docker compose restart` does NOT pick up the new values. Verify with
+> `docker compose exec backend printenv ADMIN_EMAILS`.
 
 The backend's `_verify_production_config()` (in `app/main.py`) refuses
 to boot if `ENVIRONMENT=production` and any of `JWT_SECRET`,

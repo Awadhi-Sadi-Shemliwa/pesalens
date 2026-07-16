@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon';
 import { useAuth } from '../data/authStore';
 import { Eyebrow, Tabs, TabPanel, Pager, Skeleton, EmptyState, Badge, ErrorState } from '../components/common';
 import {
+  fetchMe,
   fetchAdminStats,
   fetchAdminUsers,
   fetchAdminErrors,
@@ -100,10 +101,30 @@ const AdminDashboardPage = () => {
     }
   };
 
-  // Non-admins never need to load the panels — bounce as soon as /auth/me says so.
+  // Non-admins never need to load the panels — but the locally cached user may
+  // predate the `is_admin` flag (signin payloads from older deploys omit it),
+  // so landing directly on #/admin used to bounce a genuine admin before the
+  // first /auth/me could merge the flag in. Confirm with a fresh /auth/me
+  // before bouncing: a confirmed admin flips user.is_admin via updateUser,
+  // re-running this effect into load(); a confirmed non-admin is bounced.
   useEffect(() => {
-    if (knownNonAdmin) { navigate('/dashboard'); return; }
-    load(); /* eslint-disable-next-line */
+    let cancelled = false;
+    if (user?.is_admin) {
+      load();
+    } else {
+      fetchMe()
+        .then((me) => {
+          if (cancelled) return;
+          if (me && !me.is_admin) { navigate('/dashboard'); return; }
+          // `me` empty/unreadable → fall through to the panel loads and let
+          // their own error handling decide (it only bounces on a 404 for a
+          // KNOWN non-admin), rather than silently bouncing a possible admin.
+          if (!me) load();
+        })
+        .catch(() => { if (!cancelled) load(); });
+    }
+    return () => { cancelled = true; };
+    /* eslint-disable-next-line */
   }, [user?.is_admin]);
 
   const tabs = [
