@@ -309,28 +309,52 @@ class BusinessEntry(Base):
 
 # ----------------------------- helpers -----------------------------
 
+def _add_missing_columns(conn, inspector, table: str, cols: dict[str, str], is_postgres: bool) -> None:
+    """Idempotently `ALTER TABLE … ADD COLUMN` every column not yet present.
+
+    Postgres: `ADD COLUMN IF NOT EXISTS` (race-proof even beyond the advisory
+    lock in init_db) with `DATETIME` mapped to `TIMESTAMP` — Postgres has no
+    DATETIME type. SQLite: plain `ADD COLUMN` guarded by the inspector check,
+    since SQLite lacks IF NOT EXISTS on ADD COLUMN.
+    """
+    existing = {col["name"] for col in inspector.get_columns(table)}
+    for name, ddl in cols.items():
+        if name in existing:
+            continue
+        if is_postgres:
+            pg_ddl = ddl.replace("DATETIME", "TIMESTAMP")
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {name} {pg_ddl}"))
+        else:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
 def init_db() -> None:
     """Create tables and apply lightweight column migrations.
 
-    On Postgres (production), `Base.metadata.create_all` is sufficient — a
-    fresh deploy gets every column from the SQLAlchemy models, and schema
-    changes after launch go through Alembic. The in-boot ALTER block below
-    is SQLite-only because Postgres + multiple workers race on concurrent
-    DDL, and a Render redeploy spins several workers simultaneously.
+    `Base.metadata.create_all` handles brand-new tables but never adds
+    columns to tables that already exist — so every column added to a model
+    after launch is ALSO listed in the ALTER dictionaries below and healed
+    here at boot. There is no Alembic in this repo; this boot-time backfill
+    IS the migration story, and it runs on both SQLite (dev) and Postgres
+    (production). Multi-worker deploys can't race the DDL: on Postgres the
+    whole block is serialized with a transaction-scoped advisory lock and
+    each ADD COLUMN uses IF NOT EXISTS.
     """
     Base.metadata.create_all(bind=engine)
 
-    if not engine.url.drivername.startswith("sqlite"):
-        # Non-SQLite path: rely on create_all for the initial schema and
-        # Alembic for any future column additions. Skip the legacy backfill.
-        return
-
+    is_postgres = engine.url.drivername.startswith("postgres")
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     with engine.begin() as conn:
+        if is_postgres:
+            # Fixed arbitrary key (0x50534C31, "PSL1"). All workers contend
+            # on it; the first runs the DDL, the rest find every column
+            # already present. Auto-released at COMMIT/ROLLBACK.
+            conn.execute(text("SELECT pg_advisory_xact_lock(1347571761)"))
+
         if "users" in tables:
-            existing_users = {col["name"] for col in inspector.get_columns("users")}
-            # name -> SQL definition (kept minimal, SQLite-friendly).
+            # name -> SQL definition (kept minimal, portable across
+            # SQLite/Postgres — see _add_missing_columns for dialect quirks).
             user_cols: dict[str, str] = {
                 "plan":                     "VARCHAR(20) NOT NULL DEFAULT 'trial'",
                 "trial_started_at":         "DATETIME",
@@ -348,10 +372,7 @@ def init_db() -> None:
                 "pwd_change_revoke_until":  "DATETIME",
                 "pwd_change_at":            "DATETIME",
             }
-            for name, ddl in user_cols.items():
-                if name in existing_users:
-                    continue
-                conn.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
+            _add_missing_columns(conn, inspector, "users", user_cols, is_postgres)
             # Backfill trial_started_at for any pre-existing users so they
             # get a real 14-day grace period from "now" (not the epoch).
             conn.execute(text(
@@ -363,19 +384,14 @@ def init_db() -> None:
             ))
 
         if "payments" in tables:
-            existing_payments = {col["name"] for col in inspector.get_columns("payments")}
             payment_cols: dict[str, str] = {
                 "confirm_token_hash":       "VARCHAR(64)",
                 "confirm_token_expires_at": "DATETIME",
                 "confirm_requested_at":     "DATETIME",
             }
-            for name, ddl in payment_cols.items():
-                if name in existing_payments:
-                    continue
-                conn.execute(text(f"ALTER TABLE payments ADD COLUMN {name} {ddl}"))
+            _add_missing_columns(conn, inspector, "payments", payment_cols, is_postgres)
 
         if "uploads" in tables:
-            existing_uploads = {col["name"] for col in inspector.get_columns("uploads")}
             upload_cols: dict[str, str] = {
                 # Extraction job state — see Upload model. Older rows get a
                 # sensible default: they already succeeded, so status=done.
@@ -394,22 +410,15 @@ def init_db() -> None:
                 "period_start":    "VARCHAR(10)",
                 "period_end":      "VARCHAR(10)",
             }
-            for name, ddl in upload_cols.items():
-                if name in existing_uploads:
-                    continue
-                conn.execute(text(f"ALTER TABLE uploads ADD COLUMN {name} {ddl}"))
+            _add_missing_columns(conn, inspector, "uploads", upload_cols, is_postgres)
 
         if "personal_entries" in tables:
-            existing_entries = {col["name"] for col in inspector.get_columns("personal_entries")}
             entry_cols: dict[str, str] = {
                 # Epic-2 per-statement scoping — see PersonalEntry model. Older
                 # rows stay NULL and resolve to the newest statement at read time.
                 "statement_job_id": "VARCHAR(40)",
             }
-            for name, ddl in entry_cols.items():
-                if name in existing_entries:
-                    continue
-                conn.execute(text(f"ALTER TABLE personal_entries ADD COLUMN {name} {ddl}"))
+            _add_missing_columns(conn, inspector, "personal_entries", entry_cols, is_postgres)
 
 
 def get_db() -> Iterator[Session]:
