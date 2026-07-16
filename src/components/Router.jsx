@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { isAuthenticated, isBootComplete, useAuth } from '../data/authStore';
+import { trackPageView } from '../data/analytics';
 
 const RouterCtx = createContext(null);
 
@@ -112,6 +113,17 @@ const Router = ({ children }) => {
       window.removeEventListener('hashchange', onHashChange);
     };
   }, []);
+
+  // GA4 page_view on every route change. `path` is the single choke point —
+  // pushState navigations, Back/Forward, and the #/admin hash all funnel into
+  // it — so one effect covers everything. The FIRST render is skipped: the
+  // initial load is already counted by the gtag('config', …) call in
+  // index.html, and firing here too would double-count it.
+  const firstPageView = useRef(true);
+  useEffect(() => {
+    if (firstPageView.current) { firstPageView.current = false; return; }
+    trackPageView(path);
+  }, [path]);
 
   return <RouterCtx.Provider value={{ path, navigate }}>{children}</RouterCtx.Provider>;
 };

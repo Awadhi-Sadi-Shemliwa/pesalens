@@ -1220,7 +1220,7 @@ const LandingInner = () => {
               <h4 className="font-mono text-[10px] uppercase tracking-ticker text-txt-3 mb-4">{t('foot.legal')}</h4>
               <div className="space-y-2.5 text-sm text-txt-2">
                 <p className="text-txt-3">Terms of Service — coming soon</p>
-                <p className="text-txt-3">Privacy Policy — coming soon</p>
+                <Link to="/privacy" className="block hover:text-txt-1 transition">Privacy Policy</Link>
               </div>
             </div>
           </div>

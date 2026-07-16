@@ -15,6 +15,7 @@ import ReconciliationPage from './pages/ReconciliationPage';
 import UpgradePage from './pages/UpgradePage';
 import SettingsPage from './pages/SettingsPage';
 import AdminDashboardPage from './pages/AdminDashboardPage';
+import PrivacyPage from './pages/PrivacyPage';
 import NotFoundPage from './pages/NotFoundPage';
 import PWAInstallPrompt from './components/PWAInstallPrompt';
 import { ToastProvider } from './components/common';
@@ -62,6 +63,9 @@ const App = () => {
         <PublicOnlyRoute path="/" component={LandingPage} />
         <PublicOnlyRoute path="/signin" component={SignInPage} />
         <PublicOnlyRoute path="/signup" component={SignUpPage} />
+        {/* Legal pages — plain Route (no protected, no PublicOnly): readable
+            whether signed in or out, and required by Google Ads policy. */}
+        <Route path="/privacy" component={PrivacyPage} />
         <Route path="/upgrade" component={UpgradePage} protected />
         <Route path="/dashboard" component={DashboardPage} protected />
         <Route path="/analysis" component={AnalysisPage} protected />

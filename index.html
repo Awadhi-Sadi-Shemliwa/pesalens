@@ -7,6 +7,52 @@
     <title>PesaLens — Financial Intelligence for Tanzania</title>
     <meta name="description" content="Read your bank statement like an analyst. Tanzania-first personal finance." />
 
+    <!-- SEO / social sharing. og:image must be an ABSOLUTE URL — scrapers
+         (WhatsApp, Facebook, Twitter) don't resolve relative paths. -->
+    <link rel="canonical" href="https://pesalens.com/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PesaLens" />
+    <meta property="og:title" content="PesaLens — Financial Intelligence for Tanzania" />
+    <meta property="og:description" content="Read your bank statement like an analyst. Tanzania-first personal finance." />
+    <meta property="og:url" content="https://pesalens.com/" />
+    <meta property="og:image" content="https://pesalens.com/pesalens-lockup.png" />
+    <meta property="og:image:alt" content="PesaLens — rising market chart inside a lens" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="PesaLens — Financial Intelligence for Tanzania" />
+    <meta name="twitter:description" content="Read your bank statement like an analyst. Tanzania-first personal finance." />
+    <meta name="twitter:image" content="https://pesalens.com/pesalens-lockup.png" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "PesaLens",
+        "url": "https://pesalens.com/",
+        "description": "Read your bank statement like an analyst. Tanzania-first personal finance: statement analysis, bookkeeping, markets, and an AI assistant.",
+        "applicationCategory": "FinanceApplication",
+        "operatingSystem": "Web, Android",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "TZS", "description": "Free trial" }
+      }
+    </script>
+
+    <!-- Google Analytics (GA4, gtag.js) — production only. The hostname gate
+         keeps localhost/dev/preview traffic out of the property. SPA route
+         changes are tracked from src/components/Router.jsx via
+         src/data/analytics.js (initial load comes from this config call). -->
+    <script>
+      (function () {
+        if (!/(^|\.)pesalens\.com$/.test(location.hostname)) return;
+        var s = document.createElement('script');
+        s.async = true;
+        s.src = 'https://www.googletagmanager.com/gtag/js?id=G-9Y6834CTPK';
+        document.head.appendChild(s);
+        window.dataLayer = window.dataLayer || [];
+        function gtag() { dataLayer.push(arguments); }
+        window.gtag = gtag;
+        gtag('js', new Date());
+        gtag('config', 'G-9Y6834CTPK');
+      })();
+    </script>
+
     <!-- PWA wiring — Chrome only fires `beforeinstallprompt` when the
          manifest, a registered service worker, and a 192/512 icon set
          are all present. -->
