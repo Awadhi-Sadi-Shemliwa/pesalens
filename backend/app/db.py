@@ -432,20 +432,39 @@ def init_db() -> None:
     here at boot. There is no Alembic in this repo; this boot-time backfill
     IS the migration story, and it runs on both SQLite (dev) and Postgres
     (production). Multi-worker deploys can't race the DDL: on Postgres the
-    whole block is serialized with a transaction-scoped advisory lock and
-    each ADD COLUMN uses IF NOT EXISTS.
-    """
-    Base.metadata.create_all(bind=engine)
+    ENTIRE block — table creation included — is serialized with a
+    transaction-scoped advisory lock, and each ADD COLUMN uses IF NOT EXISTS.
 
+    `create_all` runs INSIDE that lock, which it did not always do. It is not
+    atomic: it checks whether a table exists and then creates it, so two
+    gunicorn workers booting together both saw a new table missing and both
+    issued CREATE TABLE. One won; the other died on Postgres's catalog
+    uniqueness (`pg_type_typname_nsp_index`), and gunicorn treats a worker
+    that fails to boot as fatal and takes the master down with it. Observed in
+    production on the release that added `category_cache`: the container
+    crashed, Docker restarted it, and the second boot succeeded because the
+    table existed by then. Self-healing, but ~15s of downtime on any deploy
+    that introduces a table, and an alarming traceback for whoever is watching.
+
+    Holding the lock across create_all costs nothing — losers wait a few
+    milliseconds and then find every table already there.
+    """
     is_postgres = engine.url.drivername.startswith("postgres")
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
     with engine.begin() as conn:
         if is_postgres:
             # Fixed arbitrary key (0x50534C31, "PSL1"). All workers contend
             # on it; the first runs the DDL, the rest find every column
             # already present. Auto-released at COMMIT/ROLLBACK.
             conn.execute(text("SELECT pg_advisory_xact_lock(1347571761)"))
+
+        Base.metadata.create_all(bind=conn)
+        # Inspect the SAME connection, not the engine: on Postgres, DDL is
+        # transactional, so the tables just created are visible here but not
+        # yet to anyone outside this transaction. Reading through the engine
+        # would open a second connection that cannot see them, and every heal
+        # block below would be skipped on a fresh database.
+        inspector = inspect(conn)
+        tables = set(inspector.get_table_names())
 
         if "users" in tables:
             # name -> SQL definition (kept minimal, portable across

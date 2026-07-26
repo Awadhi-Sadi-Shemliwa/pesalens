@@ -216,6 +216,37 @@ sudo certbot renew --dry-run
 Then open https://pesalens.com in a browser and confirm the SPA loads
 with a valid padlock and its `/api/...` calls return 200.
 
+## Production is one commit behind `main` (read this before deploying)
+
+**As of 26 July 2026, `main` contains exactly one backend commit that is NOT
+running in production**: the `init_db` DDL-race fix in `backend/app/db.py`.
+Everything else on `main` at that date IS deployed. This is deliberate, not
+drift — do not "fix" it by reverting, and do not assume production matches
+`main` when debugging.
+
+What happened: the release that added the `feedback` and `category_cache`
+tables was deployed successfully, but `Base.metadata.create_all()` sat OUTSIDE
+the Postgres advisory lock that guards the rest of the migration. Both gunicorn
+workers raced to create `category_cache`; the loser died on
+`pg_type_typname_nsp_index`, gunicorn treats a worker that fails to boot as
+fatal, and the container went down. Docker restarted it and the second boot was
+clean because the table existed by then. Total impact: ~15 seconds of downtime,
+self-healed, no data affected.
+
+Why the fix was committed but NOT deployed: the project is in a deliberate
+feature freeze until ~100 users have exercised the system, and the bug can only
+fire on a deploy that introduces a NEW TABLE. No new tables are coming during
+the freeze, so the fix has nothing to act on until the next release — while
+redeploying to land it would mean another production rollout, with its own
+restart, to fix a fault that cannot recur in the meantime. It ships with
+whatever goes out next.
+
+**If you are the next deploy**: you get this fix automatically by following the
+steps below. Expect the first boot after it lands to be quiet — no crash, no
+restart. If you are instead debugging live behaviour before that deploy, the
+running image predates the fix; check `git log backend/app/db.py` to see where
+the boundary is.
+
 ## Updating
 
 The GitHub Actions `deploy` workflow handles backend updates on tag
