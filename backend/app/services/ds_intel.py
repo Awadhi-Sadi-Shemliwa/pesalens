@@ -20,6 +20,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
+from app.services.fx import receipt_amount_tzs
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -344,7 +345,7 @@ def vendor_analytics(receipts: list[dict]) -> dict:
         last_visit = ""
         for r in items:
             try:
-                total += float(r.get("total") or 0)
+                total += receipt_amount_tzs(r)
             except (TypeError, ValueError):
                 pass
             visits += 1

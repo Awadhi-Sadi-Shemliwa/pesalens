@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 
+from app.services.fx import receipt_amount_tzs
+
 # TRA-style category → tax-code line mapping. Aligns with the chart-of-
 # accounts breakdown in BUSINESS_VALUE_PROPOSITION.md (Pillar 1.4).
 TAX_CODE_MAP: dict[str, dict[str, str]] = {
@@ -118,7 +120,7 @@ def compliance_summary(receipts: list[dict]) -> dict:
     non_compliant_examples: list[dict] = []
     for r in receipts:
         info = annotate(dict(r))  # avoid mutating caller's copy
-        amt = float(r.get("total") or 0)
+        amt = receipt_amount_tzs(r)
         if info["efd_compliant"]:
             compliant += 1
         elif len(non_compliant_examples) < 5:

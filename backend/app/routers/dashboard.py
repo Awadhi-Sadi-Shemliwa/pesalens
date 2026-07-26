@@ -1,4 +1,15 @@
-"""Dashboard + analysis aggregation endpoints (auth-scoped)."""
+"""Dashboard + analysis aggregation endpoints (auth-scoped).
+
+Read-only by design. Extracted transaction rows are NOT user-editable: the
+product promise is that PesaLens reads the statement for you, so an edit box on
+an extracted figure hands that job back to the user and reads as the software
+admitting it cannot do the one thing it exists to do. Uncertainty is surfaced
+honestly (see `analytics._quality_block`) and the user's remedy is to upload a
+cleaner copy or delete the statement — never to retype the bank's numbers.
+
+A `PATCH /analysis/{job_id}/transactions/{row_index}` endpoint was built and
+then deliberately removed for that reason. Do not reintroduce it.
+"""
 
 from typing import Optional
 
@@ -80,3 +91,4 @@ def analysis(
     if payload is None:
         raise HTTPException(status_code=404, detail="No result found")
     return APIResponse(success=True, message="ok", data=payload)
+

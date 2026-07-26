@@ -11,6 +11,7 @@ aggregate insights (fuel cadence, frequent groceries, etc.).
 
 import base64
 import json
+import os
 import re
 import time
 import uuid
@@ -26,8 +27,16 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import User, get_db
 from app.deps import get_current_user, require_active_plan
+from app.services.activity import record_activity, record_error
 from app.rate_limit import limiter
 from app.schemas.response import APIResponse
+from app.services.fx import (
+    get_rate_to_tzs,
+    normalize_currency,
+    receipt_amount_tzs,
+    receipt_printed_amount,
+)
+from app.utils.storage import delete_receipt_files
 from app.services.tax_codes import annotate as annotate_tax, compliance_summary
 from app.utils.logger import get_logger
 from app.utils.sanitize import sanitize_user_text
@@ -190,6 +199,39 @@ def _receipts_dir(user_id=None) -> Path:
     target = base / str(user_id) if user_id else base
     target.mkdir(parents=True, exist_ok=True)
     return target
+
+
+# Client-generated idempotency key for a scan attempt. The client may abort
+# (timeout, network drop) AFTER the server has already saved the receipt —
+# the marker file lets a retried upload or a reconciliation poll find the
+# receipt that the "failed" attempt actually produced, instead of saving a
+# duplicate or reporting a false failure.
+_SCAN_ID_RX = re.compile(r"^[A-Fa-f0-9-]{8,40}$")
+
+
+def _clean_scan_id(raw: str | None) -> str | None:
+    raw = (raw or "").strip()
+    return raw if raw and _SCAN_ID_RX.match(raw) else None
+
+
+def _scan_marker_path(user_id: int, scan_id: str) -> Path:
+    return _receipts_dir(user_id) / f".scan-{scan_id}"
+
+
+def _receipt_for_scan(user_id: int, scan_id: str) -> dict | None:
+    """Load the receipt a previous attempt with this scan_id saved, if any."""
+    marker = _scan_marker_path(user_id, scan_id)
+    try:
+        receipt_id = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not receipt_id:
+        return None
+    json_path = _receipts_dir(user_id) / f"{receipt_id}.json"
+    try:
+        return json.loads(json_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - marker without JSON = treat as absent
+        return None
 
 
 def _user_image_bytes(user_id: int) -> int:
@@ -719,6 +761,30 @@ def _call_openrouter_text(text: str) -> dict | None:
     return parsed
 
 
+def _resolve_statement_job(raw: str | None) -> str | None:
+    """The statement a new receipt belongs to — the caller's word, or nothing.
+
+    There is a real contradiction here worth naming: `list_receipts` DISPLAYS a
+    receipt with no `statement_job_id` under the user's newest statement, while
+    `delete_statement`'s cascade matches an explicit id only. So the gallery
+    files a receipt under a statement that deleting that statement won't remove.
+
+    It is tempting to close that gap by stamping the newest statement onto every
+    unscoped scan. Don't: it resolves the contradiction in the destructive
+    direction. A receipt scanned outside any statement context would become a
+    child of whatever was uploaded last, and deleting that statement would take
+    the user's image files with it. It also permanently pins
+    `_start_over_state` to reason='attached', disabling the one escape hatch
+    that can clear unattached data.
+
+    NULL therefore keeps its meaning — "general, belongs to no statement" — and
+    the client sends an explicit id when the user is actually working inside a
+    statement. Displaying an unowned receipt in a convenient place costs nothing
+    when it is wrong; deleting one does.
+    """
+    return (raw or "").strip()[:40] or None
+
+
 def _bank_for_job(user_id: int, statement_job_id: str | None) -> str | None:
     """Best-effort provider label for the statement a receipt is scoped to.
 
@@ -739,13 +805,53 @@ def _bank_for_job(user_id: int, statement_job_id: str | None) -> str | None:
     return None
 
 
+def _write_receipt_json(path: Path, data: dict) -> None:
+    """Write a receipt JSON so a concurrent writer can never leave it torn.
+
+    Two requests CAN target the same file: `_heal_fx` runs off a GET, so a web
+    tab and the phone app refreshing the gallery together — or one double-fired
+    pull-to-refresh — both see the same receipt as due and both rewrite it. A
+    plain `write_text` truncates first, so an interleaved or half-finished write
+    leaves invalid JSON, and `_load_receipts` then silently skips it: the
+    receipt vanishes from the gallery and every aggregate, permanently.
+
+    Serialize into a per-writer temp file, then `os.replace` it into place —
+    atomic on POSIX and on Windows, both of which this project runs on. The
+    temp name carries pid + a random suffix so two writers do not collide on
+    the temp file either, and ends in `.tmp` so `_load_receipts`' `*.json` glob
+    cannot pick up a partial one.
+    """
+    payload = json.dumps(data, indent=2, default=str)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        # Never leave a temp behind on failure — this directory is globbed.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _save_receipt(
     parsed: dict,
     image_bytes: bytes,
     filename: str,
     user_id: int,
     statement_job_id: str | None = None,
+    scan_id: str | None = None,
 ) -> str:
+    # Idempotency: a retry of a scan that already saved (client aborted after
+    # the server finished) must return the existing receipt, not save twice.
+    if scan_id:
+        existing = _receipt_for_scan(user_id, scan_id)
+        if existing and existing.get("id"):
+            log.info("Scan %s already saved receipt %s — skipping duplicate save",
+                     scan_id, existing["id"])
+            return existing["id"]
+
     receipt_id = uuid.uuid4().hex[:12]
     target_dir = _receipts_dir(user_id)
     suffix = Path(filename).suffix or ".bin"
@@ -759,6 +865,8 @@ def _save_receipt(
         "image_filename": image_path.name if image_bytes else None,
         "source_filename": filename,
     }
+    if scan_id:
+        parsed["client_scan_id"] = scan_id
     # Per-statement scoping (Epic-2): stamp the association only when present so
     # existing receipt JSONs are byte-for-byte unaffected. `bank` mirrors the
     # statement's provider for the money map.
@@ -770,9 +878,15 @@ def _save_receipt(
     # Stamp TRA tax code + EFD compliance fields at save time so they are
     # cheap to read later (no recompute on every dashboard render).
     annotate_tax(parsed)
-    (target_dir / f"{receipt_id}.json").write_text(
-        json.dumps(parsed, indent=2, default=str), encoding="utf-8"
-    )
+    _write_receipt_json(target_dir / f"{receipt_id}.json", parsed)
+    if scan_id:
+        try:
+            _scan_marker_path(user_id, scan_id).write_text(
+                receipt_id, encoding="utf-8"
+            )
+        except OSError as exc:
+            # Marker is an optimization — the receipt itself is saved.
+            log.warning("Could not write scan marker %s: %s", scan_id, exc)
     return receipt_id
 
 
@@ -853,8 +967,75 @@ def _build_failure_message(errors: list[str]) -> str:
     )
 
 
+def _needs_fx(r: dict) -> bool:
+    """Does this receipt still need a currency conversion stamped?
+
+    True for a receipt saved during an FX outage (`fx_pending`), and for a
+    LEGACY receipt saved before _apply_fx existed — foreign currency read off
+    the page, but no `amount_tzs` ever written. The second case has no flag of
+    its own, so it must be recognised by its shape: not TZS, no TZS amount.
+
+    A receipt with nothing to convert (an unreadable total, so 0) must answer
+    False even though it is foreign and has no TZS amount. `_apply_fx` short-
+    circuits on a non-positive total and leaves `amount_tzs` at 0, so claiming
+    it still needs work makes the pair loop forever: every GET /receipts would
+    re-enter the threadpool and rewrite that receipt's JSON to disk, for good.
+    """
+    if r.get("fx_pending"):
+        return True
+    if normalize_currency(r.get("currency")) == "TZS":
+        return False
+    try:
+        if float(r.get("amount_tzs") or 0) > 0:
+            return False
+    except (TypeError, ValueError):
+        return True
+    # No TZS amount recorded — worth converting only if something was read.
+    return receipt_printed_amount(r) > 0
+
+
+def _apply_fx(parsed: dict) -> None:
+    """Stamp currency + TZS-equivalent fields on a parsed receipt.
+
+    TZS receipts (the default) get `amount_tzs = total` and nothing else.
+    Foreign-currency receipts keep the printed amount as `original_amount`
+    and record the conversion (`fx_rate`, `fx_as_of`, `amount_tzs`) at the
+    current market rate — a 140 USD receipt counts as ~TZS 373,000 in every
+    aggregate instead of a bogus TZS 140. When no rate is reachable the
+    receipt is saved with `fx_pending: true` and back-filled on the next
+    list_receipts (see the lazy backfill there).
+
+    Idempotent: this now also runs on receipts it did not create (the legacy
+    heal path), so it must never convert an already-converted amount. It reads
+    `receipt_printed_amount` — the figure ON the page — and never
+    `_receipt_amount`, which returns the TZS VALUE and would hand this
+    function an already-converted number to multiply by the rate a second
+    time (140 USD -> 364,000 -> 946,400,000).
+    """
+    cur = normalize_currency(parsed.get("currency"))
+    parsed["currency"] = cur
+    total = receipt_printed_amount(parsed)
+    if cur == "TZS" or total <= 0:
+        parsed["amount_tzs"] = total
+        parsed.pop("fx_pending", None)
+        return
+    parsed["original_amount"] = total
+    rate, as_of = get_rate_to_tzs(cur)
+    if rate:
+        parsed["fx_rate"] = rate
+        parsed["fx_as_of"] = as_of
+        parsed["amount_tzs"] = round(total * rate, 2)
+        parsed.pop("fx_pending", None)
+    else:
+        parsed["fx_pending"] = True
+
+
 def _run_scan_pipeline(
-    image_bytes: bytes, filename: str, user_id: int, statement_job_id: str | None = None
+    image_bytes: bytes,
+    filename: str,
+    user_id: int,
+    statement_job_id: str | None = None,
+    scan_id: str | None = None,
 ) -> dict:
     """Blocking receipt-scan work: quota, mime sniff, vision cascade, save.
 
@@ -864,6 +1045,15 @@ def _run_scan_pipeline(
     was in flight. Returns the `data` dict for the APIResponse; raises
     HTTPException for the fast 4xx client-input cases.
     """
+    # A retried upload whose first attempt already saved (client gave up but
+    # the server finished) short-circuits here — instant answer, zero LLM cost.
+    if scan_id:
+        existing = _receipt_for_scan(user_id, scan_id)
+        if existing and existing.get("id"):
+            log.info("Scan %s: returning already-saved receipt %s",
+                     scan_id, existing["id"])
+            return {**existing, "duplicate": True}
+
     # Cheap garbage-collect of expired images, then enforce per-user quota.
     _cleanup_old_receipt_images(user_id)
     _enforce_receipt_quota(user_id, len(image_bytes))
@@ -916,6 +1106,21 @@ def _run_scan_pipeline(
         # Log the per-model diagnostic server-side only — never bubble
         # vendor / model identifiers up to the browser.
         log.warning("Receipt scan failed for user %s: %s", user_id, all_errors)
+        # ...and persist it. This path returns HTTP 200 with a friendly
+        # message, so nothing here ever raised and the owner console used to
+        # show no trace of it at all: every vision-model outage looked like
+        # silence. The per-model diagnostic is exactly what tells quota
+        # exhaustion apart from a throttle apart from a genuinely unreadable
+        # photo, so it is the message worth keeping — operator-only, still
+        # never returned to the client.
+        record_error(
+            "receipt_scan_failed",
+            "; ".join(all_errors) or "no vision provider returned a result",
+            user_id=user_id, path="/receipts/scan", method="POST",
+            stage="vision", source="handled",
+        )
+        record_activity(None, "receipt_scan_failed", user_id=user_id,
+                        details={"providers": all_errors[:6]})
         return {
             "is_receipt": False,
             "message": _build_failure_message(all_errors),
@@ -956,10 +1161,21 @@ def _run_scan_pipeline(
         if inferred > 0:
             parsed["total"] = inferred
 
+    # Currency normalization + TZS equivalent (after the total backfill so
+    # the conversion sees the final amount).
+    _apply_fx(parsed)
+
     receipt_id = _save_receipt(
         parsed, image_bytes, filename, user_id=user_id,
-        statement_job_id=statement_job_id,
+        statement_job_id=statement_job_id, scan_id=scan_id,
     )
+    record_activity(None, "receipt_scanned", user_id=user_id, details={
+        "receipt_id": receipt_id,
+        "vendor": parsed.get("vendor"),
+        "total": parsed.get("total"),
+        "currency": parsed.get("currency"),
+        "statement_job_id": statement_job_id,
+    })
     return {**parsed, "id": receipt_id}
 
 
@@ -969,12 +1185,18 @@ async def scan_receipt(
     request: Request,
     file: UploadFile = File(...),
     statement_job_id: str | None = Form(default=None),
+    scan_id: str | None = Form(default=None),
+    # No `db` dependency on purpose: nothing here touches the ORM (the work is
+    # file- and JSON-backed), and require_active_plan already resolves its own
+    # session. Declaring one would hold a connection open for the whole
+    # multi-second vision call — the slowest request in the app.
     user: User = Depends(require_active_plan),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="filename missing")
 
-    statement_job_id = (statement_job_id or "").strip()[:40] or None
+    statement_job_id = _resolve_statement_job(statement_job_id)
+    scan_id = _clean_scan_id(scan_id)
 
     image_bytes = await file.read()
     if not image_bytes:
@@ -988,9 +1210,33 @@ async def scan_receipt(
     # other requests while the vision models grind — freezing the loop here is
     # what produced the Render 503s and "backend didn't respond" symptom.
     data = await run_in_threadpool(
-        _run_scan_pipeline, image_bytes, file.filename, user.id, statement_job_id
+        _run_scan_pipeline, image_bytes, file.filename, user.id,
+        statement_job_id, scan_id,
     )
     return APIResponse(success=True, message="ok", data=data)
+
+
+@router.get("/receipts/by-scan/{scan_id}", response_model=APIResponse)
+async def receipt_by_scan(
+    scan_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Look up the receipt a scan attempt saved, by its client scan_id.
+
+    Used by the client to reconcile a timed-out/aborted scan: the server may
+    have finished and saved after the browser gave up. O(1) marker-file read.
+    Returns {found: false} (HTTP 200) when absent so the client can poll
+    quietly without error noise.
+    """
+    cleaned = _clean_scan_id(scan_id)
+    if not cleaned:
+        return APIResponse(success=True, message="ok", data={"found": False})
+    receipt = _receipt_for_scan(user.id, cleaned)
+    if not receipt:
+        return APIResponse(success=True, message="ok", data={"found": False})
+    receipt.setdefault("amount", _receipt_amount(receipt))
+    return APIResponse(success=True, message="ok",
+                       data={"found": True, "receipt": receipt})
 
 
 @router.post("/receipts/parse-text", response_model=APIResponse)
@@ -998,19 +1244,32 @@ async def scan_receipt(
 async def parse_receipt_text(
     request: Request,
     payload: dict = Body(...),
+    # No `db` dependency — see scan_receipt.
     user: User = Depends(require_active_plan),
 ):
     """Parse already-OCR'd text into the standard receipt JSON via the text model.
 
-    Body: { "text": "...", "save": true|false }
+    Body: { "text": "...", "save": true|false, "statement_job_id": "..." }
     Returns the same shape as /receipts/scan. If save=true, persists the
-    extracted receipt (no source image).
+    extracted receipt (no source image) — scoped to the same statement the
+    image path would use, so a locally-OCR'd capture is not orphaned.
     """
     text = (payload.get("text") or "").strip()
     save = bool(payload.get("save", False))
+    scan_id = _clean_scan_id(payload.get("scan_id"))
+    statement_job_id = _resolve_statement_job(payload.get("statement_job_id"))
 
     if not text:
         raise HTTPException(status_code=400, detail="text missing")
+
+    # Same idempotency short-circuit as the image path: if another pipeline
+    # (e.g. the vision scan of the same camera frame) already saved under
+    # this scan_id, return that receipt instead of saving a duplicate.
+    if save and scan_id:
+        existing = _receipt_for_scan(user.id, scan_id)
+        if existing and existing.get("id"):
+            return APIResponse(success=True, message="ok",
+                               data={**existing, "duplicate": True})
 
     # Body text is concatenated into the LLM prompt below — neutralise the
     # standard "ignore prior instructions" / "show me your prompt" patterns
@@ -1078,9 +1337,21 @@ async def parse_receipt_text(
         if inferred > 0:
             parsed["total"] = inferred
 
+    # Same currency handling as the image path — also for unsaved parses so
+    # the preview already shows the TZS equivalent.
+    #
+    # In a threadpool: `_apply_fx` can reach `get_rate_to_tzs`, which on a cold
+    # or stale cache takes a global lock and blocks on a 10s synchronous
+    # httpx.get. Called straight from this async handler that stalls the whole
+    # event loop — every other request, health probes included, waits behind
+    # one user's USD receipt. That is the Render-503 failure mode the image
+    # path already avoids the same way.
+    await run_in_threadpool(_apply_fx, parsed)
+
     if save:
         receipt_id = _save_receipt(
-            parsed, b"", f"text-{uuid.uuid4().hex[:8]}.txt", user_id=user.id
+            parsed, b"", f"text-{uuid.uuid4().hex[:8]}.txt", user_id=user.id,
+            statement_job_id=statement_job_id, scan_id=scan_id,
         )
         return APIResponse(
             success=True, message="ok",
@@ -1147,32 +1418,77 @@ def _extract_amount_from_text(*chunks: str) -> float:
 
 
 def _receipt_amount(r: dict) -> float:
-    """Best-effort amount for a receipt: total, else subtotal, else summed items."""
-    for key in ("total", "amount", "subtotal"):
-        v = r.get(key)
-        try:
-            f = float(v or 0)
-        except (TypeError, ValueError):
-            f = 0.0
-        if f > 0:
-            return f
-    items_sum = 0.0
-    for item in r.get("items") or []:
-        try:
-            # Schema-guided Gemini returns `line_total` (already row-total).
-            # Prompt-only path (OpenRouter free models, OCR-text fallback)
-            # returns `price` which still needs * quantity. Try the
-            # row-total field first to avoid double-multiplying.
-            line_total = float(item.get("line_total") or 0)
-            if line_total > 0:
-                items_sum += line_total
-                continue
-            unit_price = float(item.get("unit_price") or item.get("price") or 0)
-            qty = float(item.get("quantity") or 1)
-            items_sum += unit_price * qty
-        except (TypeError, ValueError):
+    """Best-effort TZS amount for a receipt.
+
+    A stamped `amount_tzs` (written at save time by _apply_fx — the TZS
+    equivalent for foreign-currency receipts, the plain total for TZS ones)
+    wins outright. Legacy receipts without it fall back to the original
+    chain (total → amount → subtotal → summed items), which is implicitly
+    TZS.
+
+    A foreign receipt with no stamped amount is converted at a CACHED rate, and
+    excluded from the total when no rate is cached — never counted as TZS. See
+    `fx.receipt_amount_tzs`, which is the single definition every aggregate
+    shares so they cannot drift apart.
+    """
+    return receipt_amount_tzs(r)
+
+
+# How long to wait before re-attempting FX conversion for a receipt whose last
+# attempt did not resolve. Without this, a receipt whose rate is permanently
+# unreachable (`fx_pending` never clears) makes EVERY GET /receipts re-run a
+# blocking ~10s httpx fetch under a global lock with no progress — unbounded
+# cost on each gallery load. The cooldown bounds that to one attempt per window.
+_FX_HEAL_COOLDOWN_SECONDS = 6 * 3600
+
+
+def _fx_retry_due(r: dict, now: float | None = None) -> bool:
+    """Should we (re)attempt FX conversion for this receipt right now?
+
+    True only when the receipt still needs conversion (`_needs_fx`) AND we have
+    not tried within `_FX_HEAL_COOLDOWN_SECONDS`. The last failed attempt is
+    remembered on the receipt as an epoch-seconds `fx_last_attempt`, so a rate
+    that stays unreachable is retried at most once per window instead of on
+    every request.
+    """
+    if not _needs_fx(r):
+        return False
+    last = r.get("fx_last_attempt")
+    if last is None:
+        return True
+    try:
+        last_ts = float(last)
+    except (TypeError, ValueError):
+        return True
+    return ((now if now is not None else time.time()) - last_ts) >= _FX_HEAL_COOLDOWN_SECONDS
+
+
+def _heal_fx(user_id: int, receipts: list[dict]) -> None:
+    """Convert + persist any receipt due for an FX (re)attempt.
+
+    Blocking (sync httpx inside get_rate_to_tzs) — callers must run this in a
+    threadpool, never on the event loop. Mutates `receipts` in place. Honours
+    the per-receipt cooldown so an unreachable rate is not re-fetched on every
+    request; when an attempt fails to resolve, the attempt time is stamped and
+    persisted so subsequent requests skip it until the window elapses.
+    """
+    for r in receipts:
+        if not _fx_retry_due(r):
             continue
-    return items_sum
+        _apply_fx(r)
+        if not r.get("id"):
+            continue
+        if r.get("fx_pending"):
+            # Still unresolved: record when we tried so the cooldown holds off
+            # the next blocking fetch. (Persisted below like the success case.)
+            r["fx_last_attempt"] = time.time()
+        else:
+            # Resolved — the attempt marker is now irrelevant; drop it.
+            r.pop("fx_last_attempt", None)
+        try:
+            _write_receipt_json(_receipts_dir(user_id) / f"{r['id']}.json", r)
+        except OSError as exc:
+            log.warning("FX backfill persist failed for %s: %s", r.get("id"), exc)
 
 
 def _receipt_effective_date(r: dict) -> str | None:
@@ -1228,6 +1544,30 @@ async def list_receipts(
                 return True
             receipts = [r for r in receipts if _in_window(r)]
 
+    # Lazy FX backfill — heals TWO populations, not one:
+    #
+    #  * `fx_pending`: saved by current code while no rate was reachable.
+    #  * LEGACY: saved BEFORE _apply_fx existed. The vision model read the
+    #    currency off the receipt ("USD") but nothing ever converted it, so
+    #    there is no amount_tzs AND no fx_pending flag to notice it by.
+    #    _receipt_amount then falls through to the PRINTED total, and a
+    #    140 USD bank slip counts as TZS 140 in every aggregate — the spend
+    #    totals, the category mix, reconciliation. Checking only fx_pending
+    #    skipped these forever, which is exactly the bug a user hit with four
+    #    Absa Bank USD slips.
+    #
+    # OFF THE EVENT LOOP. `get_rate_to_tzs` can fall through to a synchronous
+    # `httpx.get(timeout=10)` under a lock. Running that inline in an `async def`
+    # would stall the whole ASGI loop for every other user — the same failure
+    # mode `scan_receipt` avoids with run_in_threadpool.
+    #
+    # Gate on `_fx_retry_due`, not `_needs_fx`: a receipt whose rate is
+    # permanently unreachable stays `fx_pending` forever, so a bare `_needs_fx`
+    # gate would dispatch this blocking heal on EVERY gallery load with no
+    # progress. The cooldown limits each stuck receipt to one attempt per window.
+    if any(_fx_retry_due(r) for r in receipts):
+        await run_in_threadpool(_heal_fx, user.id, receipts)
+
     # Surface a single `amount` field so the gallery doesn't have to know
     # whether OCR populated `total` vs `subtotal` vs item-line prices.
     # Older receipts saved before tax-code annotation get stamped on read
@@ -1239,6 +1579,67 @@ async def list_receipts(
     return APIResponse(
         success=True, message="ok",
         data={"receipts": receipts},
+    )
+
+
+# A receipt id is always a 12-char hex string minted by _save_receipt. Pinning
+# the shape means a caller can never steer the filesystem lookup below with
+# path segments ("..", "/") — the id is used to build a real path.
+_RECEIPT_ID_RX = re.compile(r"^[a-f0-9]{6,32}$")
+
+
+@router.delete("/receipts/{receipt_id}", response_model=APIResponse)
+async def delete_receipt(
+    request: Request,
+    receipt_id: str,
+    user: User = Depends(get_current_user),
+):
+    """Delete one scanned receipt and every file behind it.
+
+    Until now receipts could be created but never removed — not individually,
+    not in bulk — so a bad scan was permanent. Ownership is inherent in the
+    layout: receipts live under `storage/receipts/<user_id>/`, so resolving
+    inside the caller's own directory cannot reach another user's data.
+    """
+    if not _RECEIPT_ID_RX.match((receipt_id or "").strip().lower()):
+        raise HTTPException(status_code=404, detail="Receipt not found")
+    receipt_id = receipt_id.strip().lower()
+
+    path = _receipts_dir(user.id) / f"{receipt_id}.json"
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="Receipt not found")
+
+    # Deletes the JSON, the captured image AND the `.scan-<id>` idempotency
+    # marker — an orphaned marker would make a later scan reusing that id
+    # resolve to a receipt that no longer exists.
+    failures = delete_receipt_files(user.id, receipt)
+    if failures:
+        # A partial delete leaves the user's data in a state neither of us can
+        # see from the outside — which files survived is precisely what the
+        # operator needs to unstick it by hand.
+        record_error(
+            "receipt_delete_failed", "; ".join(str(f) for f in failures)[:2000],
+            user_id=user.id, path="/receipts/{id}", method="DELETE",
+            source="handled",
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Could not fully remove that receipt. Please try again.",
+        )
+    log.info("User %s deleted receipt %s", user.id, receipt_id)
+    record_activity(None, "receipt_deleted", user_id=user.id, request=request,
+                    details={
+                        "receipt_id": receipt_id,
+                        "vendor": receipt.get("vendor"),
+                        "total": receipt.get("total"),
+                        "currency": receipt.get("currency"),
+                        "date": receipt.get("date"),
+                        "statement_job_id": receipt.get("statement_job_id"),
+                    })
+    return APIResponse(
+        success=True, message="Receipt deleted", data={"id": receipt_id},
     )
 
 
@@ -1271,7 +1672,7 @@ async def receipt_patterns(user: User = Depends(get_current_user)):
                     qty = float(item.get("quantity") or 0)
                     if qty:
                         litres.append(qty)
-            t = float(r.get("total") or 0)
+            t = _receipt_amount(r)
             if t:
                 totals.append(t)
         if totals:
@@ -1299,7 +1700,7 @@ async def receipt_patterns(user: User = Depends(get_current_user)):
                 name = (item.get("name") or "").strip().lower()
                 if name:
                     item_counter[name] += 1
-            total += float(r.get("total") or 0)
+            total += _receipt_amount(r)
         frequent = [name for name, _ in item_counter.most_common(5)]
         avg = total / len(groceries) if groceries else 0
         insights.append({

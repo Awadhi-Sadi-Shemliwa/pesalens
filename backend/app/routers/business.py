@@ -18,7 +18,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from reportlab.lib import colors
@@ -39,7 +39,9 @@ from app.config import settings
 from app.db import BusinessEntry, User, get_db
 from app.deps import get_current_user, require_active_plan
 from app.schemas.response import APIResponse
+from app.services.activity import record_activity
 from app.services.analytics import load_latest_result
+from app.services.fx import receipt_amount_tzs
 from app.services.ds_intel import (
     cash_flow_forecast,
     detect_anomalies,
@@ -67,6 +69,9 @@ class EntryIn(BaseModel):
     description: Optional[str] = Field(default=None, max_length=400)
     amount: float = Field(gt=0)
     account_class: Literal["revenue", "expense", "asset", "liability", "equity"] = "expense"
+    # Multi-currency: a foreign currency converts `amount` to TZS server-side
+    # (the stored amount is always TZS) — see personal.resolve_entry_amount.
+    currency: Optional[str] = Field(default=None, max_length=8)
 
 
 def _validate_date(date_str: str) -> None:
@@ -87,6 +92,9 @@ def _serialize(entry: BusinessEntry) -> dict:
         "description": entry.description,
         "amount": entry.amount,
         "account_class": entry.account_class,
+        "currency": entry.currency or "TZS",
+        "original_amount": entry.original_amount,
+        "fx_rate": entry.fx_rate,
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
     }
 
@@ -112,14 +120,15 @@ def create_entry(
     db: Session = Depends(get_db),
 ):
     _validate_date(payload.entry_date)
+    from app.routers.personal import resolve_entry_amount
     entry = BusinessEntry(
         user_id=user.id,
         entry_date=payload.entry_date,
         vendor=(payload.vendor or "").strip()[:120] or None,
         category=payload.category.strip(),
         description=(payload.description or "").strip() or None,
-        amount=float(payload.amount),
         account_class=payload.account_class,
+        **resolve_entry_amount(payload.amount, payload.currency),
     )
     db.add(entry)
     db.commit()
@@ -129,6 +138,7 @@ def create_entry(
 
 @router.delete("/entries/{entry_id}", response_model=APIResponse)
 def delete_entry(
+    request: Request,
     entry_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -140,8 +150,19 @@ def delete_entry(
     )
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
+    # Snapshot before the delete — see the identical note in personal.py.
+    snapshot = {
+        "id": entry.id,
+        "entry_date": entry.entry_date,
+        "vendor": entry.vendor,
+        "category": entry.category,
+        "amount": entry.amount,
+        "account_class": entry.account_class,
+    }
     db.delete(entry)
     db.commit()
+    record_activity(db, "business_entry_deleted", user_id=user.id,
+                    request=request, details=snapshot)
     return APIResponse(success=True, message="Entry deleted", data={"id": entry_id})
 
 
@@ -207,7 +228,9 @@ def _aggregate(entries: list[BusinessEntry], receipts: list[dict]) -> dict:
 
     for r in receipts:
         cat = (r.get("category") or "other").strip().capitalize() or "Other"
-        amt = float(r.get("total") or 0)
+        # One shared definition of a receipt's TZS value: falling back to
+        # `total` here would book a 140 USD slip as TZS 140.
+        amt = receipt_amount_tzs(r)
         if amt > 0:
             by_class["expense"][cat] += amt
 

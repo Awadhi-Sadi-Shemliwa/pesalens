@@ -99,6 +99,64 @@ def delete_upload_by_job(job_id: str, user_id: Optional[int] = None) -> None:
         log.warning("Could not clean up upload for job %s: %s", job_id, exc)
 
 
+def delete_result(job_id: str, user_id: int) -> None:
+    """Delete a job's saved extraction result. Best-effort; never raises."""
+    try:
+        path = result_path_for(job_id, user_id)
+        if path.exists():
+            path.unlink()
+    except OSError as exc:
+        log.warning("Could not delete result for job %s: %s", job_id, exc)
+
+
+def delete_debug_dir(job_id: str, user_id: Optional[int] = None) -> None:
+    """Delete a job's per-page debug output directory. Best-effort."""
+    import shutil
+    try:
+        root = settings.debug_path / str(user_id) if user_id else settings.debug_path
+        target = root / job_id
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+    except OSError as exc:
+        log.warning("Could not delete debug dir for job %s: %s", job_id, exc)
+
+
+def delete_receipt_files(user_id: int, receipt: dict) -> list[str]:
+    """Delete every file belonging to one scanned receipt.
+
+    A receipt is three files, not one: the JSON, the captured image, and the
+    `.scan-<client_scan_id>` idempotency marker. Leaving the marker behind
+    would make a later scan with a recycled id resolve to a receipt that no
+    longer exists.
+
+    Returns a list of failure messages (empty on success). Unlike the other
+    helpers here this REPORTS failures rather than only logging them, because
+    the caller (statement delete) must not claim success on a partial cascade.
+    """
+    failures: list[str] = []
+    receipt_id = receipt.get("id")
+    if not receipt_id:
+        return failures
+    # Same layout as receipts._receipts_dir.
+    target = settings.storage_path / "receipts" / str(user_id)
+
+    names = [f"{receipt_id}.json"]
+    if receipt.get("image_filename"):
+        names.append(str(receipt["image_filename"]))
+    if receipt.get("client_scan_id"):
+        names.append(f".scan-{receipt['client_scan_id']}")
+
+    for name in names:
+        try:
+            path = target / name
+            if path.exists():
+                path.unlink()
+        except OSError as exc:
+            failures.append(f"{name}: {exc}")
+            log.warning("Could not delete receipt file %s: %s", name, exc)
+    return failures
+
+
 def save_debug(job_id: str, page_num: int, data: dict, user_id: Optional[int] = None) -> Path:
     """Save per-page debug output."""
     ensure_dirs()

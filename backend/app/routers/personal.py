@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db import PersonalEntry, User, get_db
 from app.deps import get_current_user
 from app.schemas.response import APIResponse
+from app.services.activity import record_activity
 from app.services.analytics import newest_job_id
 
 router = APIRouter(tags=["personal"], prefix="/personal")
@@ -30,6 +31,10 @@ class EntryIn(BaseModel):
     # Statement this entry is recorded against (Epic-2 per-statement scoping).
     # Optional — omitted entries resolve to the newest statement at read time.
     statement_job_id: Optional[str] = Field(default=None, max_length=40)
+    # Multi-currency: when a foreign currency is given, `amount` is treated as
+    # the amount in that currency and converted to TZS server-side; the row's
+    # stored `amount` is ALWAYS TZS.
+    currency: Optional[str] = Field(default=None, max_length=8)
 
 
 def _validate_date(date_str: str) -> None:
@@ -50,8 +55,41 @@ def _serialize(entry: PersonalEntry) -> dict:
         "description": entry.description,
         "amount": entry.amount,
         "direction": entry.direction,
+        "currency": entry.currency or "TZS",
+        "original_amount": entry.original_amount,
+        "fx_rate": entry.fx_rate,
         "statement_job_id": entry.statement_job_id,
         "created_at": entry.created_at.isoformat() if entry.created_at else None,
+    }
+
+
+def resolve_entry_amount(amount: float, currency: Optional[str]) -> dict:
+    """Resolve a (possibly foreign-currency) input amount to storage fields.
+
+    Returns kwargs for the entry model: TZS `amount` plus, for foreign
+    currencies, the original amount and rate. Raises 503 when the FX rate is
+    unreachable — a manual entry can't be half-saved and lazily backfilled
+    the way a receipt JSON can.
+    """
+    from app.services.fx import get_rate_to_tzs, normalize_currency
+
+    cur = normalize_currency(currency)
+    if cur == "TZS":
+        return {"amount": float(amount), "currency": "TZS"}
+    rate, _ = get_rate_to_tzs(cur)
+    if not rate:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Could not fetch the {cur}->TZS exchange rate right now. "
+                "Please try again in a moment, or enter the amount in TZS."
+            ),
+        )
+    return {
+        "amount": round(float(amount) * rate, 2),
+        "currency": cur,
+        "original_amount": float(amount),
+        "fx_rate": rate,
     }
 
 
@@ -108,15 +146,28 @@ def create_entry(
     db: Session = Depends(get_db),
 ):
     _validate_date(payload.entry_date)
+    # An entry is scoped to a statement ONLY when the caller says so. Do not
+    # fall back to the newest statement: that would make every entry typed
+    # outside a statement context (the "General" view) a child of a statement
+    # the user never associated it with, and `delete_statement`'s cascade —
+    # which matches statement_job_id exactly — would then destroy hand-typed
+    # data on an unrelated delete. See the SAFETY RULE in routers/upload.py:
+    # a read-time convenience must never become a delete-time claim of
+    # ownership, and stamping at write time is that same claim moved earlier.
+    #
+    # NULL therefore keeps its meaning: "general, belongs to no statement".
+    # list_entries still DISPLAYS NULL rows under the newest statement, which
+    # is a display convenience only and costs nothing if it is wrong.
+    scoped_job = (payload.statement_job_id or "").strip()[:40] or None
     entry = PersonalEntry(
         user_id=user.id,
         entry_date=payload.entry_date,
         vendor=(payload.vendor or "").strip()[:120] or None,
         category=payload.category.strip(),
         description=(payload.description or "").strip() or None,
-        amount=float(payload.amount),
         direction=payload.direction,
-        statement_job_id=(payload.statement_job_id or "").strip()[:40] or None,
+        statement_job_id=scoped_job,
+        **resolve_entry_amount(payload.amount, payload.currency),
     )
     db.add(entry)
     db.commit()
@@ -126,6 +177,7 @@ def create_entry(
 
 @router.delete("/entries/{entry_id}", response_model=APIResponse)
 def delete_entry(
+    request: Request,
     entry_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -137,6 +189,23 @@ def delete_entry(
     )
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
+    # Snapshot WHAT is being destroyed before destroying it — after the delete
+    # + commit the instance is expired and reading it would either re-query a
+    # row that no longer exists or raise. An audit line saying only "an entry
+    # was deleted" cannot answer the question the operator actually has, which
+    # is which money disappeared and whether that explains the total the user
+    # is complaining about.
+    snapshot = {
+        "id": entry.id,
+        "entry_date": entry.entry_date,
+        "vendor": entry.vendor,
+        "category": entry.category,
+        "amount": entry.amount,
+        "direction": entry.direction,
+        "statement_job_id": entry.statement_job_id,
+    }
     db.delete(entry)
     db.commit()
+    record_activity(db, "personal_entry_deleted", user_id=user.id,
+                    request=request, details=snapshot)
     return APIResponse(success=True, message="Entry deleted", data={"id": entry_id})

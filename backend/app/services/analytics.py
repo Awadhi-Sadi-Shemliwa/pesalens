@@ -14,9 +14,12 @@ a database — it matches the rest of the scaffolding.
 
 from __future__ import annotations
 
+import difflib
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,66 +31,210 @@ log = get_logger(__name__)
 
 # ---------- categorization ----------
 
+# NOTE: keywords are matched as SUBSTRINGS against " {description} " (the
+# text is padded with spaces), so a keyword written with surrounding spaces
+# (" tra ") gets word-boundary behaviour — essential for short Tanzanian
+# acronyms that would otherwise fire inside unrelated words ("tra" is in
+# "transfer"). Order matters: first hit wins, so specific categories sit above
+# generic ones. Bank brand names are not in this table at all — they are the
+# weakest signal and live in BANK_BRAND_PATTERNS, checked after the fallbacks.
 CATEGORY_KEYWORDS: list[tuple[str, list[str], str]] = [
-    ("Salary",      ["salary", "payroll", "wage", "emolument"],                  "#10B981"),
+    ("Salary",      ["salary", "payroll", "wage", "emolument", "mshahara"],      "#10B981"),
     ("Income",      ["deposit", "credit transfer", "incoming", "received from",
                      "received money", "client invoice", "freelance", "upwork",
                      "fiverr", "payment received", "cash deposit",
                      "interest earned", "dividend", "refund"],                    "#10B981"),
     ("Housing",     ["rent", "landlord", "mortgage", "lease", "accommodation"],  "#4C6EF5"),
     ("Utilities",   ["tanesco", "luku", "dawasco", "water", "electric",
-                     "umeme", "luku token", "ewura", "power", "electricity"],    "#F59E0B"),
+                     "umeme", "luku token", "ewura", "power", "electricity",
+                     "dawasa", "zawa", "mwauwasa", " maji ", "water bill",
+                     "prepaid token"],                                            "#F59E0B"),
     ("Telecom",     ["airtime", "vodacom", "airtel", "tigo", "halotel", "yas",
                      "mixx by yas", "bundle", "data bundle", "internet",
-                     "safaricom", "m-pesa", "mpesa"],                             "#06B6D4"),
+                     "safaricom", "m-pesa", "mpesa", "halopesa", "tigopesa",
+                     "airtelmoney", "ttcl", "zantel", "smile ", "zuku",
+                     "liquid home", "konnect"],                                   "#06B6D4"),
     ("Groceries",   ["shoprite", "supermarket", "groceries", "food",
                      "tanga chips", "shop", "market", "vegetables",
-                     "provisions"],                                               "#10B981"),
+                     "provisions", " soko ", " duka ", "kariakoo"],               "#10B981"),
     ("Transport",   ["fuel", "petrol", "diesel", "total", "puma", "oryx",
                      "bolt", "uber", "transport", "bajaj", "daladala",
-                     "bus", "taxi", "fare", "parking"],                           "#06B6D4"),
+                     "bus", "taxi", "fare", "parking", "boda", " sgr ",
+                     "tazara", "ferry", "kivuko", "air tanzania",
+                     "precision air", "coastal aviation", "lake oil",
+                     "camel oil", "oilcom", "engen", "gapco", "mount meru"],      "#06B6D4"),
     ("Dining",      ["restaurant", "cafe", "coffee", "kfc", "pizza", "hotel",
-                     "food court", "lunch", "dinner", "eat"],                     "#EC4899"),
+                     "food court", "lunch", "dinner", "eat", "mama lishe",
+                     "nyama choma", "mgahawa"],                                   "#EC4899"),
     ("Health",      ["pharmacy", "hospital", "clinic", "medicare",
-                     "medicine", "doctor", "medical", "lab", "health"],           "#8B5CF6"),
+                     "medicine", "doctor", "medical", "lab", "health",
+                     " aar ", "jubilee", "strategis", " dawa ",
+                     "duka la dawa"],                                             "#8B5CF6"),
     ("Business",    ["aws", "amazon web services", "google cloud", "azure",
                      "stripe", "paypal", "office", "supplier", "invoice",
-                     "stock", "inventory"],                                       "#7C3AED"),
-    ("Debt",        ["loan", "repayment", "instalment", "installment",
-                     "debt", "credit card", "overdraft"],                         "#EF4444"),
+                     "stock", "inventory", "masterpass", "pos purchase",
+                     "merchant payment", "card purchase", "tanqr"],               "#7C3AED"),
+    # Loans & credit. "Mshiko Fasta" is NMB's instant micro-loan: its
+    # disbursement and its repayment are both loan activity, not generic
+    # income/expense, so both spellings sit here.
+    ("Debt",        ["loan", "repayment", "repay", "instalment", "installment",
+                     "debt", "credit card", "overdraft", "mkopo",
+                     "songesha", "halal pesa", "fuliza", "kamilisha",
+                     "mshiko fasta", "mshiko", "fastself", "fasta self",
+                     "self initiated repayment", "disbursement", "disburse",
+                     "advance", "top up loan", "malipo ya mkopo"],                "#EF4444"),
+    ("Education",   ["school", "tuition", "university", "college",
+                     "education", "training", "course", "student",
+                     " karo ", "necta", "heslb", "ada ya shule",
+                     "school fees"],                                              "#0EA5E9"),
+    ("Insurance",   ["insurance", "nhif", "nssf", "pension", "premium",
+                     "bima "],                                                    "#6366F1"),
+    ("Entertainment", ["cinema", "movie", "dstv", "gotv", "netflix",
+                     "subscription", "spotify", "gaming", "azam tv",
+                     "azamtv", "startimes", "showmax", "betting",
+                     "sportpesa", "betway", "premier bet", "meridianbet",
+                     "parimatch"],                                                "#A855F7"),
+    ("Government & Tax", ["gepg", "control number", " tra ",
+                     "tanzania revenue", "revenue authority", "nida",
+                     " rita ", "brela", "immigration", "road licence",
+                     "road license", "motor vehicle", "land rent",
+                     "property tax", "government payment", "gov payment",
+                     "serikali", "malipo ya serikali", "posta ",
+                     # Government levy is a statutory charge, not a bank fee —
+                     # it belongs with tax so users see what the state took.
+                     "government levy", "govt levy", "levy", "ushuru"],           "#B45309"),
     ("Transfers",   ["transfer", "lipa", "send to", "sent to", "tips",
                      "wallet", "paid to", "sent money", "pay to",
-                     "cash out", "send money"],                                   "#94A3B8"),
-    ("Fees & Charges", ["fee", "vat", "excise duty", "charge", "commission",
-                     "transaction charge", "service charge", "stamp duty",
-                     "ledger fee", "sms alert", "maintenance fee"],              "#64748B"),
+                     "cash out", "send money", "wakala", "lipa namba",
+                     " b2c ", " c2b ", "bank2wallet", "wallet2bank",
+                     "bank to wallet", "wallet to bank"],                         "#94A3B8"),
+    ("Fees & Charges", ["fee", "fees", "vat", "excise duty", "charge",
+                     "commission", "transaction charge", "service charge",
+                     "stamp duty", "ledger fee", "sms alert",
+                     "maintenance fee", "excise", "makato", "payable on comm"],   "#64748B"),
     ("Withdrawal",  ["withdraw", "withdrawn", "atm", "cash withdrawal",
                      "agent withdrawal", "cashout"],                              "#F97316"),
-    ("Education",   ["school", "tuition", "university", "college",
-                     "education", "training", "course", "student"],              "#0EA5E9"),
-    ("Insurance",   ["insurance", "nhif", "nssf", "pension", "premium"],         "#6366F1"),
-    ("Entertainment", ["cinema", "movie", "dstv", "gotv", "netflix",
-                     "subscription", "spotify", "gaming"],                        "#A855F7"),
 ]
 
 # Broader fallback patterns. Catches "PAID TO ...", "SENT TO ..." style M-Pesa
 # descriptions that don't include a specific keyword from the table above.
 FALLBACK_PATTERNS: list[tuple[str, list[str], str]] = [
     ("Transfers",   ["paid to", "sent to", "pay ", "send ", "received from",
-                     " to "],                                                     "#94A3B8"),
+                     " to ", "utran", " ft ", " trf ", "neft", "rtgs",
+                     " tiss "],                                                   "#94A3B8"),
     ("Withdrawal",  ["withdraw", "cash"],                                         "#F97316"),
 ]
+
+# Bank brand names, checked AFTER the fallbacks above — its own tier, not the
+# tail of CATEGORY_KEYWORDS. A brand is the weakest possible signal: it names
+# the counterparty's institution, not what the money did. "TO CRDB A/C 0150..."
+# is a transfer that happens to mention a bank, and the " to " rule that catches
+# it lives in FALLBACK_PATTERNS — so sitting last inside CATEGORY_KEYWORDS was
+# not last enough, since the WHOLE keyword table is consulted before the first
+# fallback. Only a narration with no verb and no other signal ("CRDB BANK")
+# should land here.
+BANK_BRAND_PATTERNS: list[tuple[str, list[str], str]] = [
+    ("Bank Services", [" nmb ", " crdb ", " nbc ", "stanbic", " dtb ",
+                     "exim", "akiba", "azania", "equity bank", "mkombozi",
+                     "ecobank", " dcb ", " tpb ", "mwanga hakika",
+                     "maendeleo bank", "absa", " kcb ", "amana bank"],            "#475569"),
+]
+
+# The label for a transaction we could not place. There is deliberately NO
+# "Other" bucket: an "Other Expenses" slice tells the user nothing about
+# where their money went. Anything the keyword and fuzzy passes miss goes to
+# the LLM categorizer at extraction time, which must choose a real category.
+# This label is what remains only when no LLM is configured at all, and it
+# reads as "needs attention" rather than as a legitimate spending category.
+UNCATEGORIZED = "Uncategorized"
+UNCATEGORIZED_COLOUR = "#6B7280"
+
+# Every category name -> colour (for validating LLM/stored categories and
+# keeping colours consistent across read paths).
+CATEGORY_COLOURS: dict[str, str] = {
+    **{name: colour for name, _, colour in CATEGORY_KEYWORDS},
+    # Bank Services lives in its own late tier but is still a real category the
+    # LLM is told to return (llm_categorizer's prompt names it), so it must
+    # carry a colour here or validation would reject the LLM's own answer.
+    **{name: colour for name, _, colour in BANK_BRAND_PATTERNS},
+    UNCATEGORIZED: UNCATEGORIZED_COLOUR,
+}
+
+# ---- fuzzy keyword matching (scanned statements) ----
+# OCR mangles the very words that carry the category: "Government Lavy",
+# "Funds Transter", "Mshiko Fasta Repayntnt", "VAr Payable on Comm anc Faes".
+# Exact substring matching misses every one of them, which is how a third of a
+# scanned statement used to land in "Other". We therefore also match each word
+# of the description against a vocabulary built from the keyword table, by
+# string similarity.
+_FUZZY_MIN_LEN = 4
+_FUZZY_RATIO = 0.75
+
+
+def _build_fuzzy_vocab() -> list[tuple[str, str, str]]:
+    """(word, category, colour) for every distinctive keyword word.
+
+    Only SINGLE-word keywords contribute. A multi-word keyword carries its
+    meaning as a phrase, not word by word: letting "credit transfer" donate
+    "transfer" to Income made every funds transfer look like income, since
+    Income is checked before Transfers. Phrases stay exact-match only.
+    """
+    vocab: dict[str, tuple[str, str]] = {}
+    # Bank brands are included: fuzzy runs AFTER the brand tier, so a correctly
+    # spelled "STANBIC" is already resolved by then and only OCR wreckage
+    # ("STANBJC") reaches here — which is exactly what fuzzy is for.
+    for name, keywords, colour in [*CATEGORY_KEYWORDS, *BANK_BRAND_PATTERNS]:
+        for kw in keywords:
+            word = kw.strip()
+            if " " in word:
+                continue
+            if len(word) >= _FUZZY_MIN_LEN and word.isalpha():
+                vocab.setdefault(word, (name, colour))
+    return [(w, n, c) for w, (n, c) in vocab.items()]
+
+
+_FUZZY_VOCAB = _build_fuzzy_vocab()
+# Strip the punctuation OCR sprinkles inside words ("l.evy", "SHEM.1WA").
+_WORD_CLEAN_RX = re.compile(r"[^a-z]")
+
+
+@lru_cache(maxsize=8192)
+def _fuzzy_categorize(text: str) -> Optional[tuple[str, str]]:
+    """Category for an OCR-garbled description, or None.
+
+    Compares each cleaned word against the keyword vocabulary and keeps the
+    single best match above the similarity threshold. Requiring the first
+    letter to agree keeps short words from colliding ("levy" vs "levu")
+    while still catching the vowel swaps OCR actually produces.
+    """
+    best: Optional[tuple[float, str, str]] = None
+    for raw in text.split():
+        word = _WORD_CLEAN_RX.sub("", raw)
+        if len(word) < _FUZZY_MIN_LEN:
+            continue
+        for vocab_word, name, colour in _FUZZY_VOCAB:
+            if vocab_word[0] != word[0]:
+                continue
+            ratio = difflib.SequenceMatcher(None, word, vocab_word).ratio()
+            if ratio >= _FUZZY_RATIO and (best is None or ratio > best[0]):
+                best = (ratio, name, colour)
+    if best is None:
+        return None
+    return best[1], best[2]
 
 
 def categorize(description: Optional[str]) -> tuple[str, str]:
     """Best-effort category + colour for a transaction description.
 
-    Never returns "Unknown". Falls back to broader verb/preposition patterns,
-    then to "Other Expenses" so every transaction has a meaningful label.
+    Exact keywords first, then the broad verb/preposition fallbacks, then bank
+    brand names, and finally OCR-tolerant fuzzy matching. Returns UNCATEGORIZED
+    when nothing matches — the LLM pass at extraction time is what resolves
+    those, so a real statement should show none.
     """
     if not description:
-        return ("Uncategorized", "#6B7280")
-    text = description.lower()
+        return (UNCATEGORIZED, UNCATEGORIZED_COLOUR)
+    # Space-pad so keywords written with surrounding spaces act word-bounded.
+    text = f" {description.lower()} "
 
     for name, keywords, colour in CATEGORY_KEYWORDS:
         if any(kw in text for kw in keywords):
@@ -97,7 +244,30 @@ def categorize(description: Optional[str]) -> tuple[str, str]:
         if any(p in text for p in patterns):
             return name, colour
 
-    return ("Other Expenses", "#78716C")
+    for name, patterns, colour in BANK_BRAND_PATTERNS:
+        if any(p in text for p in patterns):
+            return name, colour
+
+    fuzzy = _fuzzy_categorize(text)
+    if fuzzy is not None:
+        return fuzzy
+
+    return (UNCATEGORIZED, UNCATEGORIZED_COLOUR)
+
+
+def category_for(t: dict) -> tuple[str, str]:
+    """Category + colour for a stored transaction dict.
+
+    Prefers the category stamped at extraction time (LLM batch pass over
+    rows the keyword matcher couldn't place); falls back to the keyword
+    matcher for legacy results and unstamped rows.
+    """
+    stored = (t.get("category") or "").strip()
+    if stored:
+        colour = CATEGORY_COLOURS.get(stored)
+        if colour:
+            return stored, colour
+    return categorize(t.get("description"))
 
 
 # ---------- result loading ----------
@@ -173,7 +343,7 @@ def _category_breakdown(transactions: list[dict]) -> list[dict]:
         debit = t.get("debit") or 0
         if not debit:
             continue
-        name, colour = categorize(t.get("description"))
+        name, colour = category_for(t)
         totals[name] += float(debit)
         colours[name] = colour
     rows = [
@@ -390,6 +560,83 @@ def _resolve_opening_balance(
     return None
 
 
+def compute_metrics(transactions: list[dict], metadata: dict | None) -> dict:
+    """The extraction's self-check: do the rows add up to the balance movement
+    the statement itself claims?
+
+    THE single implementation. `pipeline._compute_extraction_metrics` delegates
+    here after dumping its Transaction models, and the review-queue PATCH
+    recomputes through the same function — two copies would drift, and this
+    number is what tells the user whether to trust the extraction at all.
+
+    Reads dicts so it works on both a freshly-dumped pipeline result and a
+    result JSON loaded off disk (including ones saved before `amount_inferred`
+    / `edited` existed — hence `.get`).
+    """
+    metadata = metadata or {}
+    debit_rows = [t for t in transactions if t.get("debit")]
+    credit_rows = [t for t in transactions if t.get("credit")]
+    sum_debits = round(sum(float(t["debit"]) for t in debit_rows), 2)
+    sum_credits = round(sum(float(t["credit"]) for t in credit_rows), 2)
+    net_flow = round(sum_credits - sum_debits, 2)
+
+    opening = metadata.get("opening_balance")
+    closing = metadata.get("closing_balance")
+    balance_span = None
+    net_vs_span_diff = None
+    if opening is not None and closing is not None:
+        balance_span = round(float(closing) - float(opening), 2)
+        net_vs_span_diff = round(net_flow - balance_span, 2)
+
+    return {
+        "rows": len(transactions),
+        "debit_rows": len(debit_rows),
+        "credit_rows": len(credit_rows),
+        "sum_debits": sum_debits,
+        "sum_credits": sum_credits,
+        "net_flow": net_flow,
+        "balance_span": balance_span,
+        "net_vs_span_diff": net_vs_span_diff,
+        "needs_review": sum(1 for t in transactions if t.get("needs_review")),
+        "inferred_rows": sum(1 for t in transactions if t.get("amount_inferred")),
+    }
+
+
+# Tolerance for calling a statement "balanced": below this the net-flow vs
+# balance-span gap is rounding, not an extraction error. Matches the
+# pipeline's own _AMOUNT_EQ_TOL so both sides agree on the verdict.
+_BALANCES_TOLERANCE = 1.0
+
+
+def _quality_block(result: dict, transactions: list[dict]) -> dict:
+    """How much this extraction should be trusted, in a shape the UI can render.
+
+    The pipeline has always computed this (metrics, validation_errors) and
+    written it to the result JSON, where nothing read it: a statement would
+    announce its own error and still look clean on screen. This surfaces it so
+    the Analysis page can state its reading confidence instead of presenting a
+    confident wrong total.
+
+    Read-only, deliberately. The user's remedy for a poor read is a cleaner
+    upload or deleting the statement — never editing the bank's figures by
+    hand. See the module docstring in routers/dashboard.py.
+    """
+    metadata = result.get("metadata") or {}
+    metrics = compute_metrics(transactions, metadata)
+    diff = metrics.get("net_vs_span_diff")
+    return {
+        "metrics": metrics,
+        "validation_passed": bool(result.get("validation_passed")),
+        "validation_errors": result.get("validation_errors") or [],
+        "needs_review_rows": metrics["needs_review"],
+        "inferred_rows": metrics["inferred_rows"],
+        # None = the statement never told us its opening/closing balances, so
+        # there is nothing to check against — distinct from "checked, failed".
+        "balances": None if diff is None else abs(diff) <= _BALANCES_TOLERANCE,
+        "net_vs_span_diff": diff,
+    }
+
+
 def _period_balances(result: dict) -> dict:
     """Opening + period-end (closing) balance for the statement.
 
@@ -488,10 +735,15 @@ def _charges_and_interest(result: dict) -> dict:
         an amount the bank added that wasn't itemised (guarded by debit == 0
         so we don't mistake an under-listed debit for interest).
 
-    Caveat: validator.py repairs rows where BOTH debit & credit were missing
-    by setting them to the full balance delta, which zeroes the gap for
-    *standalone* fee/interest rows. Those are invisible here; charges/interest
-    on rows that already carry a listed debit/credit are still detected.
+    Blind spot, measured rather than ignored: when the amount was
+    RECONSTRUCTED from the balance chain (validator's balance-delta repair, or
+    the chain solver deriving/repairing an amount) the row's gap is zero by
+    construction — any fee bundled into that movement is unrecoverable, because
+    the fee and the transaction amount were never read separately. Such rows
+    carry `amount_inferred` and are excluded from both branches below, then
+    reported as `inferred_rows` / `blind_spot` so the caller can say the fee
+    figure is a floor rather than a total. Charges on rows that carry a
+    genuinely-read debit are detected exactly as before.
 
     Returns a superset of the legacy `transaction_costs` shape
     (`estimated_total`, `fee_occurrences`, `insight`) so existing consumers
@@ -505,12 +757,19 @@ def _charges_and_interest(result: dict) -> dict:
     total_interest = 0.0
     charges: list[dict] = []
     interest: list[dict] = []
+    inferred_rows = 0
 
     for t in transactions:
         balance = t.get("balance")
         debit = t.get("debit") or 0
         credit = t.get("credit") or 0
-        if balance is not None and prev_balance is not None:
+        # An inferred amount absorbed whatever fee was on this row; the gap it
+        # would have shown is gone. Count it, don't read it — and still walk
+        # the balance forward so later rows keep a correct `prev_balance`.
+        inferred = bool(t.get("amount_inferred"))
+        if inferred:
+            inferred_rows += 1
+        if balance is not None and prev_balance is not None and not inferred:
             expected = prev_balance - debit + credit
             diff = expected - balance
             if diff > _BALANCE_GAP_TOLERANCE and debit > 0:
@@ -550,6 +809,14 @@ def _charges_and_interest(result: dict) -> dict:
     insight = " ".join(parts) if parts else (
         "No bank charges or interest detected in this statement."
     )
+    if inferred_rows:
+        # Say the figure is a floor. Quietly reporting a total we know is
+        # incomplete would be the dishonest option.
+        insight += (
+            f" This is a minimum: {inferred_rows} row(s) had their amount "
+            "reconstructed from the running balance, so any fee inside them "
+            "cannot be separated out."
+        )
 
     return {
         # legacy keys (backward-compatible)
@@ -563,6 +830,9 @@ def _charges_and_interest(result: dict) -> dict:
         "interest_occurrences": interest_count,
         "charges": charges,
         "interest": interest,
+        # How much of the statement this method could not see through.
+        "inferred_rows": inferred_rows,
+        "blind_spot": inferred_rows > 0,
     }
 
 
@@ -734,6 +1004,7 @@ def build_dashboard_summary(
             "forecast": {"available": False},
             "anomalies": [],
             "treasury": {"available": False},
+            "quality": _quality_block({}, []),
         }
 
     # Pick the statement to view. `sel_results` is the history up to AND
@@ -799,6 +1070,9 @@ def build_dashboard_summary(
         "forecast": cash_flow_forecast(transactions, horizon_days=30),
         "anomalies": anomalies,
         "treasury": treasury_recommendation(transactions),
+        # Enough for the Dashboard to nudge the user toward the review queue;
+        # the full breakdown lives on /api/analysis/{job_id}.
+        "quality": _quality_block(latest, transactions),
     }
 
 
@@ -815,7 +1089,7 @@ def build_analysis_payload(job_id: str, user_id: Optional[int] = None) -> Option
     transactions = data.get("transactions") or []
     enriched = []
     for t in transactions:
-        cat, _colour = categorize(t.get("description"))
+        cat, _colour = category_for(t)
         enriched.append({**t, "category": cat})
 
     credits, debits = _sum_amounts(transactions)
@@ -842,6 +1116,7 @@ def build_analysis_payload(job_id: str, user_id: Optional[int] = None) -> Option
         "categories": _category_breakdown(transactions),
         "balance_comparison": _balance_comparison(data),
         "transaction_costs": _charges_and_interest(data),
+        "quality": _quality_block(data, transactions),
         "time_series": {
             "daily": _daily_series(transactions),
             "weekly": _weekly_series(transactions),
