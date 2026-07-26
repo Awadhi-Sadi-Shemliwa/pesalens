@@ -53,7 +53,29 @@ class Transaction(BaseModel):
     raw_text: str = Field("", description="Original raw text for this row")
     needs_review: bool = Field(False, description="Flagged for manual review")
     review_reason: Optional[str] = Field(None, description="Why this row needs review")
+    # Amount provenance. True when debit/credit was RECONSTRUCTED from the
+    # balance chain rather than read off the page — validator's balance-delta
+    # repair, or the chain solver deriving/repairing an amount. It matters
+    # because such a row's balance gap is zero BY CONSTRUCTION, so the
+    # bank-charges detector (analytics._charges_and_interest) cannot see a
+    # silent fee hiding inside it. Read with .get(): results saved before this
+    # field existed have no such key.
+    amount_inferred: bool = Field(
+        False, description="Amount was derived from the balance chain, not read"
+    )
     page_number: int = Field(0, description="PDF page this row was found on")
+    # Category stamped at extraction time (keyword pass, or LLM batch pass
+    # for rows keywords couldn't place). Read paths prefer this over
+    # re-running the keyword matcher — see analytics.category_for.
+    category: Optional[str] = Field(None, description="Spending category")
+    category_source: Optional[str] = Field(
+        None,
+        description=(
+            "How the category was assigned: keywords|llm|unmatched "
+            "('unmatched' = keywords left it uncategorized and the LLM pass "
+            "could not place it either)"
+        ),
+    )
 
 
 class PageResult(BaseModel):
@@ -104,8 +126,23 @@ class ExtractionResult(BaseModel):
     transactions: list[Transaction] = []
     total_pages: int = 0
     total_transactions: int = 0
+    # OCR diagnostics — lets the caller distinguish WHY an extraction came
+    # back empty (scan with no OCR engine vs. scan OCR'd but unreadable vs.
+    # a genuinely empty digital document).
+    scanned_pages: int = Field(
+        0, description="Pages routed through OCR (incl. garbled re-routes)"
+    )
+    garbled_pages: int = Field(
+        0, description="Pages whose embedded text layer was junk (re-routed to OCR)"
+    )
+    ocr_unavailable: bool = Field(
+        False, description="Scanned pages were present but the OCR engine was unavailable"
+    )
     validation_passed: bool = False
     validation_errors: list[str] = Field(default_factory=list)
+    # Post-extraction self-check numbers (row/direction counts, sums, net
+    # flow vs balance span) — see pipeline._compute_extraction_metrics.
+    metrics: Optional[dict] = None
     processing_time_seconds: float = 0.0
     created_at: dt.datetime = Field(
         default_factory=lambda: dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
@@ -124,3 +161,7 @@ class ClassificationResult(BaseModel):
     )
     total_pages: int = 0
     sample_text: str = Field("", description="First extracted text for debugging")
+    garbled_pages: list[int] = Field(
+        default_factory=list,
+        description="Pages re-routed to OCR because their embedded text layer was junk",
+    )

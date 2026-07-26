@@ -19,10 +19,11 @@ pipeline doesn't crash (matching prior stub behavior).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 import pdfplumber
 
+from app.config import settings
 from app.schemas.transaction import DocumentType
 from app.services.digital_extractor import PageExtraction
 from app.services.image_preprocess import preprocess_for_ocr, render_pdf_page
@@ -36,6 +37,22 @@ _ocr_engine: Any = None
 _table_engine: Any = None
 _ocr_unavailable: bool = False
 _table_unavailable: bool = False
+
+
+class OcrPageLimitExceeded(Exception):
+    """Raised when a document has more scanned pages than ocr_max_pages allows."""
+
+    def __init__(self, scanned_pages: int, limit: int):
+        self.scanned_pages = scanned_pages
+        self.limit = limit
+        super().__init__(
+            f"{scanned_pages} scanned pages exceeds the OCR limit of {limit}"
+        )
+
+
+def is_ocr_available() -> bool:
+    """Whether the OCR engine can be used (loads it on first call)."""
+    return _get_ocr_engine() is not None
 
 
 def _get_ocr_engine():
@@ -242,14 +259,29 @@ def _ocr_page(
 
 
 def extract_scanned_pdf(
-    file_path: Path, page_types: list[DocumentType],
+    file_path: Path,
+    page_types: list[DocumentType],
+    progress_cb: Optional[Callable[[str, int], None]] = None,
 ) -> list[PageExtraction]:
     """
     OCR-extract the scanned pages of a PDF. Digital pages are left for
     digital_extractor. Emits the same PageExtraction shape so pipeline.py
     can merge scanned and digital results seamlessly.
+
+    `progress_cb(stage, pct)` fires before each page: OCR runs ~40s/page, so
+    per-page pings both keep the job's heartbeat fresh (orphan recovery would
+    otherwise kill a long scan at 600s of silence) and let the client render
+    "Reading scanned pages (12/100)". Percent maps into the pipeline's
+    20→55 extraction band.
+
+    Raises OcrPageLimitExceeded when the scanned-page count is over
+    settings.ocr_max_pages — bounding worst-case worker occupancy.
     """
     extractions: list[PageExtraction] = []
+    scanned_total = sum(1 for t in page_types if t == DocumentType.SCANNED)
+    if scanned_total > settings.ocr_max_pages:
+        raise OcrPageLimitExceeded(scanned_total, settings.ocr_max_pages)
+    done = 0
 
     try:
         with pdfplumber.open(file_path) as pdf:
@@ -257,6 +289,16 @@ def extract_scanned_pdf(
                 page_num = i + 1
                 if i >= len(page_types) or page_types[i] != DocumentType.SCANNED:
                     continue
+
+                if progress_cb:
+                    try:
+                        progress_cb(
+                            f"Reading scanned pages ({done + 1}/{scanned_total})",
+                            20 + int(34 * done / max(scanned_total, 1)),
+                        )
+                    except Exception:  # noqa: BLE001 - progress must never break OCR
+                        log.debug("progress_cb raised (ignored)", exc_info=True)
+                done += 1
 
                 log.info("OCR: processing scanned page %d", page_num)
                 try:

@@ -29,6 +29,13 @@ log = get_logger(__name__)
 # accuracy gain on printed statements.
 RENDER_DPI = 300
 
+# Cap the rendered long edge. A4 at 300 DPI is ~3508px, so normal statement
+# pages are untouched; oversized page geometries (posters, raw phone-photo
+# PDFs) would otherwise render 6000px+ images that multiply OCR time for no
+# accuracy gain.
+MAX_RENDER_EDGE_PX = 3500
+MIN_RENDER_DPI = 150
+
 
 def render_pdf_page(page, dpi: int = RENDER_DPI) -> np.ndarray:
     """
@@ -37,6 +44,11 @@ def render_pdf_page(page, dpi: int = RENDER_DPI) -> np.ndarray:
     Uses pdfplumber's built-in pdfium-based rasterizer so we don't need
     poppler/Ghostscript on Windows.
     """
+    long_edge_pts = max(float(page.width or 0), float(page.height or 0))
+    if long_edge_pts > 0 and long_edge_pts * dpi / 72 > MAX_RENDER_EDGE_PX:
+        capped = max(MIN_RENDER_DPI, int(MAX_RENDER_EDGE_PX * 72 / long_edge_pts))
+        log.info("Capping render DPI %d -> %d for oversized page", dpi, capped)
+        dpi = capped
     pil_img = page.to_image(resolution=dpi).original
     if pil_img.mode != "RGB":
         pil_img = pil_img.convert("RGB")

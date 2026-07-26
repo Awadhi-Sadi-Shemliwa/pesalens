@@ -49,7 +49,7 @@ from app.schemas.reconciliation import (
 )
 from app.services.analytics import (
     _infer_period,
-    categorize,
+    category_for,
     charges_and_interest_in_range,
     effective_stmt,
     load_all_results,
@@ -297,7 +297,7 @@ def classify_debits(txns: list[dict]) -> tuple[list[dict], list[dict], list[dict
         if debit <= 0:
             continue
         desc_lower = (t.get("description") or "").lower()
-        category, _ = categorize(t.get("description"))
+        category, _ = category_for(t)
 
         if _has_token(desc_lower, _WITHDRAWAL_TOKENS) or category.lower().startswith("withdrawal"):
             withdrawals.append(t)

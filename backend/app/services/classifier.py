@@ -35,6 +35,87 @@ log = get_logger(__name__)
 # Minimum characters on a page to consider it "digital" (has embedded text)
 MIN_TEXT_LENGTH = 50
 
+# --- Embedded-text-layer quality gate -------------------------------------
+# Some scans ship with a text layer produced by the scanner's own (bad) OCR:
+# the page renders fine visually but extract_text() yields mojibake like
+# "CL}STOM HR AGC*{J $-;? STATE F*I H}dT". Such pages pass the MIN_TEXT_LENGTH
+# check and would be treated as digital, feeding garbage to the row builder
+# and bank detector. The quality score below separates them: it is the ratio
+# of tokens that look like real content (words, dates, amounts). Mojibake
+# scores ~0.25-0.35; clean statement text scores 0.75+.
+_GOOD_WORD_RX = re.compile(r"^[A-Za-z]{2,}$")
+_GOOD_DATE_RX = re.compile(r"^\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}$")
+_GOOD_AMT_RX = re.compile(r"^-?[\d,]+(?:\.\d{1,2})?$")
+# Reference codes, account numbers and product names are real statement
+# content even though they are neither words nor amounts: "FT26183ABCD01",
+# "M-PESA", "A/C", "01-2345-6789". They are recognised by what they DON'T
+# contain — mojibake is distinguished by stray symbols ("H}dT", "q@w", "*{J"),
+# so a token built only from letters, digits and the separators a bank
+# actually prints counts as content. Without this a reference-dense statement
+# scores as junk and has its perfectly good text layer thrown away.
+_GOOD_CODE_RX = re.compile(r"^[A-Za-z0-9]+(?:[/\-][A-Za-z0-9]+)+$|^[A-Za-z0-9]{3,}$")
+_TOKEN_TRIM = ".,:;()[]{}%*'\"«»"
+
+# Below this the page's text layer is junk regardless of anything else.
+GARBLED_QUALITY_MIN = 0.45
+# Below this AND the page is dominated by a single full-page image (i.e. it is
+# visually a scan), the text layer is not trusted either.
+GARBLED_BORDERLINE = 0.65
+FULL_PAGE_IMAGE_COVERAGE = 0.80
+# Scores need a minimum token count to be meaningful.
+_MIN_QUALITY_TOKENS = 10
+
+
+def text_quality(text: str) -> float:
+    """Score an embedded text layer 0..1 by the ratio of recognizable tokens.
+
+    A token counts as recognizable when (after trimming surrounding
+    punctuation) it is a plain alphabetic word, a date, an amount, or a
+    reference/account code. Returns 1.0 for very short inputs
+    (< _MIN_QUALITY_TOKENS tokens) — too little signal to condemn a page, and
+    short pages are cheap to parse anyway.
+
+    Erring towards "readable" is deliberate: a false GARBLED verdict discards
+    a page's real text, and if OCR is unavailable that turns a statement which
+    used to extract into one that fails.
+    """
+    tokens = text.split()
+    if len(tokens) < _MIN_QUALITY_TOKENS:
+        return 1.0
+    good = 0
+    for tok in tokens:
+        tok = tok.strip(_TOKEN_TRIM)
+        if not tok:
+            continue
+        if (
+            _GOOD_WORD_RX.match(tok)
+            or _GOOD_DATE_RX.match(tok)
+            or _GOOD_AMT_RX.match(tok)
+            or _GOOD_CODE_RX.match(tok)
+        ):
+            good += 1
+    return good / len(tokens)
+
+
+def _page_image_coverage(page) -> float:
+    """Largest single embedded image's area as a fraction of the page area.
+
+    A page that is one big photo (a scan) scores ~1.0; a digital statement
+    with a small logo scores near 0.
+    """
+    try:
+        page_area = float(page.width) * float(page.height)
+        if page_area <= 0:
+            return 0.0
+        best = 0.0
+        for img in page.images or []:
+            w = abs(float(img.get("x1", 0)) - float(img.get("x0", 0)))
+            h = abs(float(img.get("bottom", 0)) - float(img.get("top", 0)))
+            best = max(best, (w * h) / page_area)
+        return best
+    except Exception:  # noqa: BLE001 - defensive: never let scoring break classify
+        return 0.0
+
 # Header area size: look for bank name in the first N chars of page 1
 # (the part above the transaction table — usually logo, title, customer info).
 HEADER_CHARS = 600
@@ -214,6 +295,7 @@ def classify_document(file_path: Path) -> ClassificationResult:
     """
     page_types: list[DocumentType] = []
     all_text_parts: list[str] = []
+    garbled_pages: list[int] = []
     total_pages = 0
 
     try:
@@ -228,8 +310,24 @@ def classify_document(file_path: Path) -> ClassificationResult:
                     text = ""
 
                 if len(text.strip()) >= MIN_TEXT_LENGTH:
-                    page_types.append(DocumentType.DIGITAL)
-                    all_text_parts.append(text)
+                    quality = text_quality(text)
+                    if quality < GARBLED_QUALITY_MIN or (
+                        quality < GARBLED_BORDERLINE
+                        and _page_image_coverage(page) >= FULL_PAGE_IMAGE_COVERAGE
+                    ):
+                        # Scanner-embedded junk text layer: route to OCR and
+                        # keep the mojibake away from bank detection.
+                        log.info(
+                            "Page %d text layer is garbled (quality=%.2f) — "
+                            "treating as scanned",
+                            i + 1, quality,
+                        )
+                        page_types.append(DocumentType.SCANNED)
+                        garbled_pages.append(i + 1)
+                        all_text_parts.append("")
+                    else:
+                        page_types.append(DocumentType.DIGITAL)
+                        all_text_parts.append(text)
                 else:
                     page_types.append(DocumentType.SCANNED)
                     all_text_parts.append("")
@@ -275,15 +373,17 @@ def classify_document(file_path: Path) -> ClassificationResult:
         page_types=page_types,
         total_pages=total_pages,
         sample_text=sample_text,
+        garbled_pages=garbled_pages,
     )
 
     log.info(
-        "Classification: type=%s, bank=%s, pages=%d (digital=%d, scanned=%d)",
+        "Classification: type=%s, bank=%s, pages=%d (digital=%d, scanned=%d, garbled=%d)",
         doc_type.value,
         bank_format.value,
         total_pages,
         digital_count,
         scanned_count,
+        len(garbled_pages),
     )
 
     return result

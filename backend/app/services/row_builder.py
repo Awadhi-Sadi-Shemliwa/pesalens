@@ -24,6 +24,7 @@ Design principles:
   - Confidence scoring reflects extraction quality
 """
 
+import difflib
 import re
 from datetime import date
 from dataclasses import dataclass, field
@@ -124,7 +125,24 @@ _CLEAN_AMOUNT = re.compile(r"[^\d.\-]")
 
 
 def parse_amount(text: str) -> float | None:
-    """Parse monetary amount from text. Handles 'TZS 1,234.00', '1234', '0.00'."""
+    """Parse monetary amount from text. Handles 'TZS 1,234.00', '1234', '0.00'.
+
+    Strict: a dot is always a decimal point. This is the DIGITAL path, where the
+    cell is machine-readable and '1.234' means one-point-two-three-four. The
+    dot-as-thousands-separator repairs live in `parse_amount_ocr`, which is the
+    only place a period can be assumed to be a misread comma.
+    """
+    return _parse_amount(text, ocr_grouping=False)
+
+
+def _parse_amount(text: str, *, ocr_grouping: bool) -> float | None:
+    """Shared amount parse. `ocr_grouping` enables dot-as-thousands repair.
+
+    With `ocr_grouping`, a period may be a comma that OCR misread, so
+    '51.266.685.17' reads as 51,266,685.17 and '366.100' as 366,100. Applying
+    that to a digital cell would silently multiply a genuine 3-decimal value
+    (a unit price, an FX rate) by 1000 — hence the flag.
+    """
     if not text:
         return None
     # Take first line only
@@ -133,11 +151,203 @@ def parse_amount(text: str) -> float | None:
     cleaned = cleaned.replace(",", "").strip()
     if not cleaned or cleaned == "-" or cleaned == "—":
         return None
+    if ocr_grouping and cleaned.count(".") > 1:
+        parts = cleaned.split(".")
+        # Genuine thousands grouping: every middle group has exactly 3 digits
+        # ("51.266.685.17"). Anything else (e.g. the date "07.06.2026") is NOT
+        # an amount — bail out rather than fabricate a number.
+        has_decimals = len(parts[-1]) <= 2
+        groups = parts[1:-1] if has_decimals else parts[1:]
+        if not all(len(g) == 3 and g.isdigit() for g in groups):
+            return None
+        cleaned = (
+            "".join(parts[:-1]) + "." + parts[-1] if has_decimals
+            else "".join(parts)
+        )
+    elif ocr_grouping and cleaned.count(".") == 1:
+        # "366.100": statement amounts never carry 3 decimal places, so a
+        # single dot followed by exactly 3 digits is a thousands separator
+        # (OCR reads the grouping comma as a period).
+        whole, frac = cleaned.split(".")
+        if len(frac) == 3 and frac.isdigit() and whole.lstrip("-").isdigit():
+            cleaned = whole + frac
     try:
         val = float(cleaned)
         return val if val != 0.0 else None
     except ValueError:
         return None
+
+
+# ────────────────────────────────────────────────────────────────────
+# OCR-TOLERANT PRIMITIVES — used only on scanned pages (is_scanned=True)
+# ────────────────────────────────────────────────────────────────────
+
+# OCR letter→digit confusions seen in scanned Tanzanian statements.
+_OCR_DIGIT_FIX = str.maketrans({
+    "O": "0", "o": "0", "l": "1", "I": "1", "S": "5",
+    "Z": "2", "B": "8", "G": "6", "q": "9",
+})
+
+# '0310712026' — OCR read the two '/' of 03/07/2026 as '1'. Search (not
+# fullmatch) so dates buried in merged blobs are found too:
+# '021071202602107/2026' = "02/07/2026 02/07/2026" with lost separators.
+_SLASH_AS_ONE_RX = re.compile(r"(\d{2})[1/](\d{2})[1/](\d{4})")
+
+_NUMERIC_TOKEN_RX = re.compile(r"^-?[\d.,]+$")
+
+# A COMPLETE grouped integer — thousands separators placed with every group
+# terminated ('1,000', '12,345', '1,000,000'). A number OCR split mid-value
+# leaves an *incomplete* left fragment instead (e.g. '2,00', a comma group of
+# only two digits), so a fragment matching this is a finished number that needs
+# no more digits appended.
+_COMPLETE_GROUPED_INT_RX = re.compile(r"^-?\d{1,3}(?:,\d{3})+$")
+
+
+def _plausible_date(d: date | None) -> date | None:
+    """Clamp fuzzy-recovered dates to a sane statement window."""
+    if d is None:
+        return None
+    from datetime import date as _date, timedelta
+    if _date(2000, 1, 1) <= d <= _date.today() + timedelta(days=31):
+        return d
+    return None
+
+
+def parse_date_fuzzy(text: str) -> tuple[date | None, bool]:
+    """Parse a date from possibly OCR-garbled text.
+
+    Returns (date, fuzzy) — fuzzy=True when recovery needed OCR digit fixes
+    or separator reconstruction, so the caller can lower the row confidence.
+    Strict parses are returned untouched (fuzzy=False) and NOT plausibility-
+    clamped here (the normalizer's guard covers those).
+    """
+    strict = parse_date(text)
+    if strict is not None:
+        return strict, False
+    if not text:
+        return None, False
+
+    token = text.strip().split("\n")[0].strip()
+    fixed = token.translate(_OCR_DIGIT_FIX)
+    d = _plausible_date(parse_date(fixed))
+    if d is not None:
+        return d, True
+
+    # Separators read as '1' (or dropped into digit blobs): scan each
+    # whitespace chunk for a dd?mm?yyyy pattern.
+    for chunk in fixed.split():
+        if len(chunk) < 8:
+            continue
+        for m in _SLASH_AS_ONE_RX.finditer(chunk):
+            try:
+                d = _plausible_date(date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
+            except ValueError:
+                d = None
+            if d is not None:
+                return d, True
+    return None, False
+
+
+def _merge_numeric_fragments(texts: list[str]) -> str:
+    """Join amount fragments that OCR split across boxes ('2,00' + '0.000').
+
+    Only fires when every token is numeric-like AND the tokens plausibly form
+    ONE amount: at most one fragment may carry a decimal point, and it must be
+    the last (a real split number is grouping fragments left of a single
+    decimal tail). Otherwise returns the plain space-join, so descriptions that
+    strayed into an amount cell — or two genuinely separate numeric cells
+    (a reference count and an amount) — keep their pieces separate rather than
+    being concatenated into a bogus, inflated value. Concatenating '2,000' with
+    a separate '.000' would otherwise synthesise '2,000.000' -> 2,000,000.
+    """
+    if len(texts) <= 1:
+        return texts[0] if texts else ""
+    if not all(_NUMERIC_TOKEN_RX.match(t) for t in texts):
+        return " ".join(texts)
+    # A single split amount has its decimal point only in the trailing piece;
+    # any dot in an earlier fragment (or dots in two of them) means these are
+    # not one number's grouped fragments — don't fuse them.
+    if any("." in t for t in texts[:-1]):
+        return " ".join(texts)
+    # If the trailing piece carries the decimal point, its fractional part must
+    # look like a real decimal tail (1-2 digits). A 3-digit tail ('0.000') is
+    # grouping-shaped: concatenating '2,000' with a separate '0.000' would make
+    # '2,000.000', which parse_amount_ocr then promotes to 2,000,000 — a 1000x
+    # inflation from what are almost certainly two separate cells. Keep them
+    # apart and let the chain solver derive the real amount.
+    last = texts[-1]
+    if "." in last:
+        frac = last.split(".", 1)[1]
+        if len(frac) not in (1, 2):
+            return " ".join(texts)
+    elif any(_COMPLETE_GROUPED_INT_RX.match(t) for t in texts):
+        # No decimal point anywhere to key the split on: these are integer
+        # fragments. A fragment that is already a complete grouped integer
+        # ('1,000') is a finished number needing no more digits — concatenating
+        # it with a neighbouring numeric (a stray '500' -> '1,000500' ->
+        # 1,000,500) inflates it ~1000x. That is two separate amount cells that
+        # snapped to the same column, not one split number, so keep them apart
+        # and let the chain solver derive the real amount. (Checked across ALL
+        # fragments so the guard fires regardless of which side the complete
+        # number landed on; a genuine split has only incomplete fragments.)
+        return " ".join(texts)
+    return "".join(texts)
+
+
+def parse_amount_ocr(text: str) -> float | None:
+    """OCR-tolerant amount parse: strict first, then mixed-separator repair.
+
+    Handles '56.846,403.27' (OCR mixes '.' and ',' as grouping) by treating
+    the LAST separator as the decimal point iff it is followed by 1-2
+    digits, and the rest as grouping iff the resulting groups are 1-3
+    digits (first) / exactly 3 (rest) — which still rejects dates like
+    '07.06.2026'. Unrepairable numbers ('52.5223576') return None and are
+    left to the balance-chain solver.
+    """
+    if not text:
+        return None
+    probe = _CURRENCY_PREFIX.sub("", text.strip().split("\n")[0].strip())
+    # 4+ digits after a lone decimal point is never a real money amount —
+    # it's a balance whose separators OCR dropped ('52.5223576'). Reject so
+    # the chain solver derives the true value instead of trusting 52.52.
+    # Test the numeric CORE (drop any trailing suffix like ' CR'/' DR'): the
+    # strict parse below strips such suffixes too, so keying the guard on the
+    # full probe would let '52.5223576 CR' slip past the $-anchor and be
+    # truncated to 52.52 instead of rejected.
+    core = re.sub(r"[^\d.,\-].*$", "", probe).strip()
+    if re.match(r"^-?\d+\.\d{4,}$", core):
+        return None
+    # Dot-as-thousands repair is enabled here and ONLY here: on a scanned page
+    # a period is as likely to be a misread comma as a decimal point.
+    strict = _parse_amount(text, ocr_grouping=True)
+    if strict is not None:
+        return strict
+    cleaned = probe.translate(_OCR_DIGIT_FIX)
+    if not re.match(r"^-?[\d.,]+$", cleaned):
+        return None
+    neg = cleaned.startswith("-")
+    digits_seps = cleaned.lstrip("-")
+    # Split on BOTH separators, preserving order.
+    parts = re.split(r"[.,]", digits_seps)
+    if len(parts) < 2 or not all(p.isdigit() for p in parts if p != ""):
+        return None
+    if any(p == "" for p in parts):
+        return None
+    decimal = None
+    groups = parts
+    if len(parts[-1]) <= 2:
+        decimal = parts[-1]
+        groups = parts[:-1]
+    if not (1 <= len(groups[0]) <= 3) or not all(len(g) == 3 for g in groups[1:]):
+        return None
+    joined = "".join(groups) + (f".{decimal}" if decimal is not None else "")
+    try:
+        val = float(joined)
+    except ValueError:
+        return None
+    if neg:
+        val = -val
+    return val if val != 0.0 else None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -628,10 +838,112 @@ def _row_to_transaction(
 # ────────────────────────────────────────────────────────────────────
 
 @dataclass
+class AmountColumnCalibration:
+    """Data-driven right edges of the amount columns on a scanned page.
+
+    OCR'd statements right-align their numbers, so a value's x1 (right
+    edge) clusters tightly per column while its x0 wanders with the number
+    width — header-derived x0 territories systematically misassign wide
+    amounts (a debit that starts past the debit/credit midpoint lands in
+    credit). Clustering the observed right edges and snapping numeric words
+    to the nearest cluster fixes direction assignment at the source.
+    """
+    edges: list[tuple[str, float]]  # (role, right_edge_x1), ascending x1
+    snap_tol: float = 25.0
+
+    def role_for_x1(self, x1: float) -> str | None:
+        best_role, best_d = None, None
+        for role, edge in self.edges:
+            d = abs(x1 - edge)
+            if best_d is None or d < best_d:
+                best_role, best_d = role, d
+        if best_d is not None and best_d <= self.snap_tol:
+            return best_role
+        return None
+
+
+AMOUNT_ROLES = {"debit", "credit", "balance", "amount"}
+
+
+def calibrate_amount_columns(
+    words: list[dict],
+    wcmap: "WordColumnMap",
+    header_y: float | None,
+    y_tolerance: float,
+) -> AmountColumnCalibration | None:
+    """Learn the amount columns' right edges from the page's own numbers.
+
+    1-D gap clustering over the x1 of numeric-looking words below the
+    header; the rightmost N clusters (N = amount roles in the header) map
+    to those roles in x-order. Guarded: sparse clusters are dropped, and
+    any geometric inconsistency returns None so the caller falls back to
+    the existing x0-territory logic — a bad calibration must never be
+    worse than no calibration.
+    """
+    amount_headers = sorted(
+        [(role, x0) for role, x0, _ in wcmap.columns if role in AMOUNT_ROLES],
+        key=lambda c: c[1],
+    )
+    if not amount_headers:
+        return None
+    leftmost_x0 = amount_headers[0][1]
+
+    xs: list[float] = []
+    for w in words:
+        if header_y is not None and w["top"] <= header_y + y_tolerance:
+            continue
+        text = w["text"]
+        if len(text) < 3 or not _NUMERIC_TOKEN_RX.match(text):
+            continue
+        if sum(ch.isdigit() for ch in text) < 3:
+            continue
+        if w["x1"] < leftmost_x0 - 15:
+            continue  # dates/reference numerals living far left of the amounts
+        xs.append(w["x1"])
+    if len(xs) < 3 * len(amount_headers) // 2:
+        return None
+
+    xs.sort()
+    clusters: list[list[float]] = [[xs[0]]]
+    for x in xs[1:]:
+        if x - clusters[-1][-1] > 12.0:
+            clusters.append([x])
+        else:
+            clusters[-1].append(x)
+    clusters = [c for c in clusters if len(c) >= 3]
+    if len(clusters) < len(amount_headers):
+        return None
+
+    # Rightmost N clusters, in x-order, correspond to the amount roles in
+    # header x-order (debit < credit < balance on every layout seen).
+    chosen = clusters[-len(amount_headers):]
+    edges: list[tuple[str, float]] = []
+    for (role, role_x0), cluster in zip(amount_headers, chosen):
+        edge = cluster[len(cluster) // 2]  # median
+        if not (role_x0 - 10 <= edge <= role_x0 + 100):
+            return None
+        edges.append((role, edge))
+    for (_, a), (_, b) in zip(edges, edges[1:]):
+        if b - a < 20.0:
+            return None
+
+    gaps = [b - a for (_, a), (_, b) in zip(edges, edges[1:])]
+    snap_tol = min(min(gaps) * 0.5, 25.0) if gaps else 25.0
+    log.info(
+        "Amount-column calibration: %s (snap tol %.1f)",
+        [(r, round(e, 1)) for r, e in edges], snap_tol,
+    )
+    return AmountColumnCalibration(edges=edges, snap_tol=snap_tol)
+
+
+@dataclass
 class WordColumnMap:
     """Column boundaries detected from header words in text mode."""
     columns: list[tuple[str, float, float]] = field(default_factory=list)
     # Each entry: (role, x_start, x_end)
+    # Data-driven right edges for amount columns on scanned pages (None on
+    # digital pages / until calibrated). Rides page-to-page continuity.
+    amount_calibration: AmountColumnCalibration | None = None
 
     @property
     def is_empty(self):
@@ -755,6 +1067,88 @@ def _group_header_cells(row_words: list[dict]) -> list[list[dict]]:
     return cells
 
 
+# ── OCR-tolerant header detection ───────────────────────────────────
+# OCR of scanned statements garbles header keywords ("Nartation" for
+# Narration, "Groedit" for Credit, "Balanct" for Balance), so the exact
+# regex patterns above miss them. The fuzzy pass below matches individual
+# header words against a canonical vocabulary by string similarity. It is
+# ONLY used when the strict pass finds nothing, and it demands a stronger
+# signal (date + >=3 meaningful roles incl. an amount-ish one) so garbled
+# non-header rows can't fake a header.
+_FUZZY_ROLE_VOCAB: list[tuple[str, str]] = [
+    ("date", "date"), ("tarehe", "date"),
+    ("narration", "description"), ("description", "description"),
+    ("details", "description"), ("particulars", "description"),
+    ("maelezo", "description"), ("remarks", "description"),
+    ("reference", "reference"), ("cheque", "reference"),
+    ("debit", "debit"), ("withdrawal", "debit"),
+    ("credit", "credit"), ("deposit", "credit"),
+    ("balance", "balance"), ("salio", "balance"),
+    ("amount", "amount"), ("kiasi", "amount"),
+]
+_FUZZY_MIN_RATIO = 0.72
+_AMOUNTISH_ROLES = {"debit", "credit", "balance", "amount"}
+
+
+def _fuzzy_role_for_word(text: str) -> str | None:
+    """Best fuzzy role for a single (possibly OCR-garbled) header word."""
+    t = re.sub(r"[^a-z]", "", (text or "").lower())
+    if len(t) < 4:
+        return None
+    best_role, best_ratio = None, 0.0
+    for vocab, role in _FUZZY_ROLE_VOCAB:
+        ratio = difflib.SequenceMatcher(None, t, vocab).ratio()
+        if ratio > best_ratio:
+            best_role, best_ratio = role, ratio
+    return best_role if best_ratio >= _FUZZY_MIN_RATIO else None
+
+
+def _detect_header_words_fuzzy(
+    words: list[dict], y_tolerance: float
+) -> tuple[float | None, WordColumnMap]:
+    """Fuzzy per-word header scan for OCR'd pages.
+
+    Scans the same first rows as the strict pass, scores each row by how many
+    distinct roles its words fuzzy-match, and picks the best row that has a
+    date column, at least three meaningful roles, and at least one
+    amount-like column. Per-word matching (instead of per-cell) sidesteps
+    OCR's unreliable inter-word gaps entirely — each matched word's own x0
+    anchors its column.
+    """
+    y_groups: dict[float, list[dict]] = {}
+    for w in words:
+        y_key = round(w["top"] / y_tolerance) * y_tolerance
+        y_groups.setdefault(y_key, []).append(w)
+
+    best: tuple[int, float, list[tuple[str, float, float]]] | None = None
+    for y in sorted(y_groups.keys())[:30]:
+        row_words = sorted(y_groups[y], key=lambda w: w["x0"])
+        matched: list[tuple[str, float, float]] = []
+        assigned: set[str] = set()
+        for w in row_words:
+            role = _fuzzy_role_for_word(w["text"])
+            if role and role not in assigned:
+                matched.append((role, w["x0"], w["x1"]))
+                assigned.add(role)
+        meaningful = {r for r, _, _ in matched if r not in ("seq", "from", "to")}
+        if (
+            "date" in assigned
+            and len(meaningful) >= 3
+            and meaningful & _AMOUNTISH_ROLES
+        ):
+            if best is None or len(meaningful) > best[0]:
+                best = (len(meaningful), y, matched)
+
+    if best is None:
+        return None, WordColumnMap()
+    _, y, matched = best
+    log.info(
+        "Fuzzy header detected at y=%.1f: %s",
+        y, [(r, round(x, 1)) for r, x, _ in matched],
+    )
+    return y, WordColumnMap(columns=matched)
+
+
 def detect_header_words(
     words: list[dict], y_tolerance: float = 5.0
 ) -> tuple[float | None, WordColumnMap]:
@@ -818,7 +1212,10 @@ def detect_header_words(
         if "date" in assigned and len(meaningful) >= 2:
             return y, WordColumnMap(columns=matched_roles)
 
-    return None, WordColumnMap()
+    # Strict pass found nothing — try the OCR-tolerant fuzzy pass (higher
+    # role-count bar, so it can't misfire on pages the strict pass rightly
+    # rejected as headerless).
+    return _detect_header_words_fuzzy(words, y_tolerance)
 
 
 def build_from_words(
@@ -826,7 +1223,9 @@ def build_from_words(
     page_number: int,
     row_offset: int,
     known_word_columns: WordColumnMap | None = None,
-) -> tuple[list[Transaction], list[str], WordColumnMap | None]:
+    is_scanned: bool = False,
+    carry_in: dict | None = None,
+) -> tuple[list[Transaction], list[str], WordColumnMap | None, dict | None]:
     """
     Build transactions using word-level extraction with x-coordinates.
 
@@ -834,9 +1233,17 @@ def build_from_words(
     2. Group words into rows by y-position
     3. For each row, assign words to columns by x-position
     4. Merge continuation lines (rows without a date)
+
+    Scanned pages (is_scanned=True) additionally get: data-driven amount-
+    column calibration, OCR-tolerant amount/date parsing, and cross-page
+    transaction continuity — `carry_in` is the still-open transaction from
+    the previous page (its top-of-page continuation lines merge in), and
+    the trailing open transaction is returned as the 4th element instead
+    of being finalized, so the NEXT page (or the pipeline's final flush)
+    completes it. Digital pages behave exactly as before (carry unused).
     """
     if not words:
-        return [], [], known_word_columns
+        return [], [], known_word_columns, carry_in
 
     Y_TOLERANCE = 3.0  # Words within 3 units of y are on the same line
 
@@ -848,7 +1255,19 @@ def build_from_words(
             wcmap = known_word_columns
             header_y = -1  # Process all words
         else:
-            return [], [], known_word_columns
+            return [], [], known_word_columns, carry_in
+    elif known_word_columns is not None and known_word_columns.amount_calibration:
+        # A freshly-detected header on a later page starts uncalibrated —
+        # inherit the document's calibration.
+        wcmap.amount_calibration = known_word_columns.amount_calibration
+
+    # Data-driven amount-column calibration (scanned pages only). Learned
+    # once and carried across pages on the WordColumnMap.
+    if is_scanned and wcmap.amount_calibration is None:
+        wcmap.amount_calibration = calibrate_amount_columns(
+            words, wcmap, header_y if (header_y or 0) >= 0 else None, Y_TOLERANCE,
+        )
+    calib = wcmap.amount_calibration if is_scanned else None
 
     # Group all words into rows by y-position
     y_groups: dict[float, list[dict]] = {}
@@ -873,16 +1292,35 @@ def build_from_words(
         if not raw_text.strip() or is_skip_line(raw_text):
             continue
 
-        # Assign each word to a column
+        # Assign each word to a column. Numeric words on calibrated scanned
+        # pages snap to the amount column whose observed right edge is
+        # nearest their own right edge (right-aligned columns); everything
+        # else uses the classic x0 territory.
         col_values: dict[str, list[str]] = {}
         for w in row_words:
-            role = wcmap.assign_word(w["x0"])
+            role = None
+            if (
+                calib is not None
+                and len(w["text"]) >= 3
+                and _NUMERIC_TOKEN_RX.match(w["text"])
+                and sum(ch.isdigit() for ch in w["text"]) >= 3
+            ):
+                role = calib.role_for_x1(w["x1"])
+            if role is None:
+                role = wcmap.assign_word(w["x0"])
             if role:
                 if role not in col_values:
                     col_values[role] = []
                 col_values[role].append(w["text"])
 
-        row_data = {role: " ".join(texts) for role, texts in col_values.items()}
+        row_data = {
+            role: (
+                _merge_numeric_fragments(texts)
+                if is_scanned and role in AMOUNT_ROLES
+                else " ".join(texts)
+            )
+            for role, texts in col_values.items()
+        }
         row_data["_y"] = str(y)
         row_data["_raw"] = raw_text
         raw_rows.append(row_data)
@@ -891,22 +1329,35 @@ def build_from_words(
     # A new transaction starts when a row has a parseable date
     transactions: list[Transaction] = []
     skipped: list[str] = []
-    current: dict | None = None
+    current: dict | None = dict(carry_in) if carry_in else None
     row_idx = row_offset
 
     for row_data in raw_rows:
-        has_date = parse_date(row_data.get("date", "")) is not None
+        if is_scanned:
+            date_obj, date_fuzzy = parse_date_fuzzy(row_data.get("date", ""))
+            has_date = date_obj is not None
+        else:
+            date_obj, date_fuzzy = None, False
+            has_date = parse_date(row_data.get("date", "")) is not None
 
         if has_date:
             # Save previous transaction
             if current:
-                txn = _finalize_word_txn(current, row_idx + 1, page_number)
+                txn = _finalize_word_txn(
+                    current, row_idx + 1,
+                    int(current.get("_page", page_number)), ocr=is_scanned,
+                )
                 if txn:
                     row_idx += 1
                     txn.row_index = row_idx
                     transactions.append(txn)
 
             current = dict(row_data)
+            current["_page"] = str(page_number)
+            if date_obj is not None:
+                current["_date_obj"] = date_obj.isoformat()
+                if date_fuzzy:
+                    current["_date_fuzzy"] = "1"
         elif current:
             # Continuation line — merge description and back-fill any amount
             # columns that were empty on the date line. Some statements render
@@ -924,6 +1375,33 @@ def build_from_words(
             # amount columns, its _raw is safe to use and preserves content
             # on statements where word-header detection missed the
             # description column entirely.
+            # An amount COLLISION means this is not a continuation at all:
+            # one transaction cannot carry two different debits (or two
+            # credits/balances). It is the next transaction, whose date
+            # column OCR couldn't read. Close the current row and open a
+            # new dateless one so the movement isn't silently swallowed —
+            # the chain solver dates and verifies it downstream.
+            # Only a MOVEMENT collision proves a new transaction: a repeated
+            # balance is usually OCR noise, and splitting on it would mint
+            # movement-less phantom rows.
+            if is_scanned and any(
+                row_data.get(role) and current.get(role)
+                and row_data[role] != current[role]
+                for role in ("debit", "credit", "amount")
+            ):
+                txn = _finalize_word_txn(
+                    current, row_idx + 1,
+                    int(current.get("_page", page_number)), ocr=True,
+                )
+                if txn:
+                    row_idx += 1
+                    txn.row_index = row_idx
+                    transactions.append(txn)
+                current = dict(row_data)
+                current["_page"] = str(page_number)
+                current["_date_fuzzy"] = "1"
+                continue
+
             extra_desc = row_data.get("description", "")
             if not extra_desc:
                 line_has_amounts = any(
@@ -943,33 +1421,82 @@ def build_from_words(
         else:
             skipped.append(row_data.get("_raw", ""))
 
-    # Last transaction
+    # Last transaction: on scanned pages the trailing open transaction is
+    # RETURNED as carry (its continuation lines may sit atop the next page);
+    # digital pages finalize at page end exactly as before.
+    carry_out: dict | None = None
     if current:
-        txn = _finalize_word_txn(current, row_idx + 1, page_number)
-        if txn:
-            row_idx += 1
-            txn.row_index = row_idx
-            transactions.append(txn)
+        if is_scanned:
+            carry_out = current
+        else:
+            txn = _finalize_word_txn(current, row_idx + 1, page_number)
+            if txn:
+                row_idx += 1
+                txn.row_index = row_idx
+                transactions.append(txn)
 
     learned = wcmap if not wcmap.is_empty else known_word_columns
-    return transactions, skipped, learned
+    return transactions, skipped, learned, carry_out
 
 
-def _finalize_word_txn(data: dict, row_idx: int, page_number: int) -> Transaction | None:
+def _prepend_carried_txn(
+    all_txns: list[Transaction],
+    carry: dict,
+    row_offset: int,
+    page_number: int,
+) -> None:
+    """Finalize a carried transaction and put it ahead of this page's rows.
+
+    The carried transaction OPENED on an earlier page, so it sorts before
+    everything built here. Inserting it shifts every following row by one, so
+    the page is renumbered from `row_offset + 1` afterwards: without that the
+    carried row keeps `row_offset`, which is the index the PREVIOUS page's last
+    row already holds. The pipeline renumbers globally before anything reads
+    these values, so today the duplicate is invisible — but handing out an
+    index that is already taken is a trap for the next reader, and the fix
+    costs one pass over a page's rows.
+    """
+    carried = _finalize_word_txn(
+        carry, row_offset, int(carry.get("_page", page_number)), ocr=True,
+    )
+    if not carried:
+        return
+    all_txns.insert(0, carried)
+    for i, txn in enumerate(all_txns, start=row_offset + 1):
+        txn.row_index = i
+
+
+def finalize_carried_word_txn(carry: dict, row_idx: int) -> Transaction | None:
+    """Finalize the document's last open word-mode transaction (the carry
+    left over after the final page). Pipeline calls this once after the
+    per-page loop."""
+    return _finalize_word_txn(
+        carry, row_idx, int(carry.get("_page", 0)), ocr=True,
+    )
+
+
+def _finalize_word_txn(
+    data: dict, row_idx: int, page_number: int, ocr: bool = False,
+) -> Transaction | None:
     """Convert word-mode row data into a Transaction."""
-    txn_date = parse_date(data.get("date", ""))
+    if data.get("_date_obj"):
+        txn_date = date.fromisoformat(data["_date_obj"])
+    else:
+        txn_date = parse_date(data.get("date", ""))
+    date_was_fuzzy = bool(data.get("_date_fuzzy"))
     # Time from the date field first (shared "Date & Time" cell), else the raw
     # row. Best-effort, tiebreaker only.
     txn_time = parse_time(data.get("date", "")) or parse_time(data.get("_raw", ""))
     description = re.sub(r"\s+", " ", data.get("description", "")).strip()
 
     # Handle single "amount" column
-    debit = parse_amount(data.get("debit", ""))
-    credit = parse_amount(data.get("credit", ""))
-    balance = parse_amount(data.get("balance", ""))
+    parse_amt = parse_amount_ocr if ocr else parse_amount
+    debit = parse_amt(data.get("debit", ""))
+    credit = parse_amt(data.get("credit", ""))
+    balance = parse_amt(data.get("balance", ""))
 
     if debit is None and credit is None:
-        amount = parse_amount(data.get("amount", ""))
+        amount = parse_amt(data.get("amount", ""))
         if amount:
             direction = classify_direction_from_text(data.get("direction", ""))
             if direction is None:
@@ -999,6 +1526,17 @@ def _finalize_word_txn(data: dict, row_idx: int, page_number: int) -> Transactio
         confidence -= 0.3
         needs_review = True
         review_reason = "Could not parse date"
+    elif date_was_fuzzy:
+        # A date RECONSTRUCTED from garbled OCR ('0310712026' -> 03/07/2026) is
+        # a guess that happens to be plausible, so it is flagged like any other
+        # guess. Recording the reason without the flag hid it twice over: the
+        # review surface renders a reason only when `needs_review` is set, so
+        # the user was never told the date was inferred — and the chain solver
+        # would then overwrite the unguarded reason with None the moment the
+        # segment's arithmetic checked out, erasing the provenance entirely.
+        confidence = min(confidence, 0.85)
+        needs_review = True
+        review_reason = "Date recovered from OCR-garbled text"
     if debit is None and credit is None:
         confidence -= 0.2
         needs_review = True
@@ -1181,7 +1719,9 @@ def build_rows(
     row_offset: int = 0,
     known_table_columns: ColumnMap | None = None,
     known_word_columns: WordColumnMap | None = None,
-) -> tuple[PageResult, ColumnMap | None, WordColumnMap | None]:
+    is_scanned: bool = False,
+    word_carry_in: dict | None = None,
+) -> tuple[PageResult, ColumnMap | None, WordColumnMap | None, dict | None]:
     """
     Build transaction rows for a page.
 
@@ -1189,13 +1729,15 @@ def build_rows(
     Tier 2: Fall back to word-position extraction
 
     Returns:
-        (updated PageResult, learned table ColumnMap, learned WordColumnMap)
-        The learned maps should be passed to the next page for continuity.
+        (updated PageResult, learned table ColumnMap, learned WordColumnMap,
+        open word-mode transaction carried to the next page — scanned only)
+        The learned maps (and carry) should be passed to the next page.
     """
     all_txns: list[Transaction] = []
     all_skipped: list[str] = []
     out_tcmap = known_table_columns
     out_wcmap = known_word_columns
+    word_carry_out: dict | None = None
 
     # ── Tier 1: Tables ──
     if tables:
@@ -1245,15 +1787,18 @@ def build_rows(
     )
 
     if needs_preview:
-        txns, skips, learned = build_from_words(
+        txns, skips, learned, carry = build_from_words(
             words, page_result.page_number, row_offset,
             known_word_columns=out_wcmap,
+            is_scanned=is_scanned,
+            carry_in=word_carry_in if is_scanned else None,
         )
 
         if not all_txns:
             # No Tier 1 output — take whatever Tier 2 produced.
             all_txns.extend(txns)
             all_skipped.extend(skips)
+            word_carry_out = carry
             if learned and not learned.is_empty:
                 out_wcmap = learned
         else:
@@ -1274,8 +1819,31 @@ def build_rows(
                 )
                 all_txns = list(txns)
                 all_skipped = list(skips)
+                word_carry_out = carry
                 if learned and not learned.is_empty:
                     out_wcmap = learned
+            elif is_scanned and word_carry_in:
+                # Tier 2 output discarded but it consumed the incoming carry:
+                # finalize the carried transaction so it isn't lost.
+                #
+                # Prefer Tier 2's carry over the one we came in with. When it
+                # met no dated row (`txns` empty) its carry IS word_carry_in
+                # with this page's continuation lines merged in — the same
+                # transaction, only more complete. Flushing the raw incoming
+                # carry instead would throw that description and any
+                # back-filled amounts away. Once Tier 2 has closed a
+                # transaction, though, its carry is a DIFFERENT row that lives
+                # in the output we just discarded, so it must not be used.
+                pending = carry if (carry and not txns) else word_carry_in
+                _prepend_carried_txn(
+                    all_txns, pending, row_offset, page_result.page_number,
+                )
+    elif is_scanned and word_carry_in:
+        # Word mode didn't run on this page (tier 1 satisfied it) — flush the
+        # incoming carry so the previous page's open transaction survives.
+        _prepend_carried_txn(
+            all_txns, word_carry_in, row_offset, page_result.page_number,
+        )
 
     page_result.transactions = all_txns
     page_result.skipped_lines = all_skipped
@@ -1286,4 +1854,4 @@ def build_rows(
         page_result.page_number, len(all_txns), mode, len(all_skipped),
     )
 
-    return page_result, out_tcmap, out_wcmap
+    return page_result, out_tcmap, out_wcmap, word_carry_out
