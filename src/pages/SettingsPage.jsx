@@ -10,10 +10,13 @@ import {
   exportMyData,
   fetchActivity,
   fetchMe,
+  fetchStartOverEligibility,
   sendVerifyEmail,
   signOut,
+  startOver,
 } from '../data/api';
 import { Button, EmptyState, PasswordField, Skeleton, toast } from '../components/common';
+import { signOutWithFeedback, openFeedback } from '../components/FeedbackGate';
 import { passwordRulesMet } from '../data/password';
 import { useT } from '../data/i18n';
 
@@ -24,6 +27,37 @@ const ACTIVITY_ICON = {
   email_verified: 'check', email_verified_via_signin: 'check', data_export: 'download',
   upload_succeeded: 'upload', upload_failed: 'alert',
   manual_payment_confirmed: 'zap', manual_payment_confirm_requested: 'wallet',
+  receipt_scanned: 'camera', receipt_scan_failed: 'alert',
+  receipt_deleted: 'trash', personal_entry_deleted: 'trash',
+  business_entry_deleted: 'trash', statement_delete: 'trash',
+  data_start_over: 'alert', account_deleted: 'alert',
+  feedback_submitted: 'check', client_error: 'alert',
+};
+
+/* A one-line "what was this about" for a timeline row.
+   Reads the `details` snapshot the backend records alongside each event, so a
+   deletion says WHICH entry went and a failed extraction says how far it got.
+   Returns null when there is nothing worth adding — an empty sub-line is worse
+   than none, because it implies information is missing rather than absent. */
+const activityContext = (a) => {
+  if (a.kind === 'issue') {
+    const bits = [];
+    if (a.stage) bits.push(`Stopped at: ${a.stage}`);
+    if (a.progress != null) bits.push(`${a.progress}% complete`);
+    return bits.join(' · ') || null;
+  }
+  const d = a.details;
+  if (!d) return null;
+  const bits = [];
+  if (d.vendor) bits.push(d.vendor);
+  if (typeof d.amount === 'number') bits.push(`TZS ${d.amount.toLocaleString()}`);
+  else if (typeof d.total === 'number') bits.push(`${d.currency || 'TZS'} ${d.total.toLocaleString()}`);
+  if (d.entry_date || d.date) bits.push(d.entry_date || d.date);
+  if (d.filename) bits.push(d.filename);
+  if (typeof d.receipts === 'number' || typeof d.personal_entries === 'number') {
+    bits.push(`${d.receipts || 0} receipts, ${d.personal_entries || 0} entries removed`);
+  }
+  return bits.join(' · ') || null;
 };
 
 const SectionHeader = ({ eyebrow, title, sub }) => (
@@ -70,6 +104,40 @@ const SettingsPage = () => {
   useEffect(() => {
     fetchMe().catch(() => { /* ignore */ });
   }, []);
+
+  // ---------- Start over (bulk clear of unlinked receipts + entries) ----------
+  const [startOverState, setStartOverState] = useState(null);
+  const [soConfirm, setSoConfirm] = useState('');
+  const [soBusy, setSoBusy] = useState(false);
+  const [soErr, setSoErr] = useState('');
+
+  const loadStartOver = () =>
+    fetchStartOverEligibility()
+      .then(setStartOverState)
+      // Non-critical: if this fails the card simply doesn't render.
+      .catch(() => setStartOverState(null));
+
+  useEffect(() => { loadStartOver(); }, []);
+
+  const runStartOver = async () => {
+    setSoBusy(true);
+    setSoErr('');
+    try {
+      const res = await startOver();
+      toast.success(
+        `Cleared ${res.receipts} receipt(s) and ${res.personal_entries} entry(ies).`,
+        { title: 'Start over complete' },
+      );
+      setSoConfirm('');
+      await loadStartOver();   // reflects the new 30-day cooldown
+    } catch (err) {
+      // 409/429 carry the server's explanation — show it verbatim rather than
+      // a generic failure, since the reason is the useful part.
+      setSoErr(err?.message || 'Could not clear your data.');
+    } finally {
+      setSoBusy(false);
+    }
+  };
 
   // ---------- Change password ----------
   const [pw, setPw] = useState({ current: '', next: '', confirm: '' });
@@ -160,6 +228,12 @@ const SettingsPage = () => {
 
   // ---------- Activity history + owner-console capability check ----------
   const [activity, setActivity] = useState(null); // null = loading
+  // "Show me only what went wrong" — the reason most people open this panel.
+  const [issuesOnly, setIssuesOnly] = useState(false);
+  const issueCount = (activity || []).filter((a) => a.failed).length;
+  const visibleActivity = issuesOnly
+    ? (activity || []).filter((a) => a.failed)
+    : (activity || []);
   // Owner-console visibility comes from the server-provided is_admin flag on
   // /auth/me (fetched on mount above) — no probe. Probing an admin endpoint hid
   // the console on any transient failure and ran COUNT queries just to decide
@@ -196,7 +270,9 @@ const SettingsPage = () => {
 
   // ---------- Sign out ----------
   const handleSignOut = async () => {
-    await signOut();
+    // Shared with the header menu and the Back-from-Dashboard confirmation, so
+    // the one-time feedback prompt cannot depend on which button was pressed.
+    await signOutWithFeedback();
     toast.success('Signed out');
     navigate('/signin');
   };
@@ -313,9 +389,12 @@ const SettingsPage = () => {
       <Card>
         <SectionHeader
           eyebrow="03"
-          title="Account activity"
-          sub="A timestamped log of what your account did — sign-ins, password changes, uploads and payments."
+          title="Activity and issues"
+          sub="Everything your account did, and everything that went wrong for it — sign-ins, uploads, deletions and failures, each with a timestamp."
         />
+        {/* Failures are shown to you on purpose. A receipt scan that quietly
+            did nothing is the most confusing thing this app can do, so it gets
+            a line here saying so, with a reference you can quote to us. */}
         {activity === null ? (
           <div className="space-y-2">
             {[0, 1, 2].map((i) => <Skeleton key={i} className="h-10" />)}
@@ -324,22 +403,62 @@ const SettingsPage = () => {
           <EmptyState
             kind="first-run"
             title="Nothing to show yet"
-            desc="Sign-ins, password changes, uploads and payments will be listed here with a timestamp."
+            desc="Sign-ins, uploads, deletions and any problems will be listed here with a timestamp."
           />
         ) : (
-          <div className="divide-y divide-bdr/50 -my-1">
-            {activity.slice(0, 12).map((a) => (
-              <div key={a.id} className="py-2.5 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <Icon name={ACTIVITY_ICON[a.event] || 'bell'} size={14} className="text-txt-3 flex-shrink-0" />
-                  <span className="text-sm text-txt-1 truncate">{a.title}</span>
-                </div>
-                <span className="font-mono text-[11px] text-txt-3 whitespace-nowrap">
-                  {a.created_at ? new Date(a.created_at).toLocaleString() : ''}
-                </span>
+          <>
+            {issueCount > 0 && (
+              <div className="mb-3 flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={() => setIssuesOnly((v) => !v)}
+                  aria-pressed={issuesOnly}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition active:scale-95 focus-ring ${
+                    issuesOnly
+                      ? 'bg-exp/15 text-exp border-exp/30'
+                      : 'bg-surface-3 text-txt-2 border-bdr hover:bg-surface-4'
+                  }`}
+                >
+                  <Icon name="alert" size={12} />
+                  {issuesOnly ? 'Showing problems only' : `${issueCount} problem${issueCount === 1 ? '' : 's'}`}
+                </button>
+                {issuesOnly && (
+                  <span className="text-xs text-txt-3">Tap again to see everything</span>
+                )}
               </div>
-            ))}
-          </div>
+            )}
+            <div className="divide-y divide-bdr/50 -my-1">
+              {visibleActivity.slice(0, 20).map((a) => (
+                <div key={a.id} className="py-2.5 flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <Icon
+                      name={a.failed ? 'alert' : (ACTIVITY_ICON[a.event] || 'bell')}
+                      size={14}
+                      className={`flex-shrink-0 mt-0.5 ${a.failed ? 'text-exp' : 'text-txt-3'}`}
+                    />
+                    <div className="min-w-0">
+                      <span className={`text-sm truncate ${a.failed ? 'text-exp' : 'text-txt-1'}`}>
+                        {a.title}
+                      </span>
+                      {/* What it was about — the vendor and amount of a deleted
+                          entry, the stage an extraction stopped at. Without
+                          this, "Receipt deleted" cannot answer "which one?". */}
+                      {activityContext(a) && (
+                        <p className="text-xs text-txt-3 mt-0.5 break-words">{activityContext(a)}</p>
+                      )}
+                      {a.ref && (
+                        <p className="font-mono text-[10px] text-txt-3 mt-0.5">
+                          Reference {a.ref} — quote this if you contact us
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <span className="font-mono text-[11px] text-txt-3 whitespace-nowrap flex-shrink-0">
+                    {a.created_at ? new Date(a.created_at).toLocaleString() : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </>
         )}
         {isAdmin && (
           <button
@@ -351,9 +470,26 @@ const SettingsPage = () => {
         )}
       </Card>
 
+      {/* The permanent door to the feedback form.
+          Whatever the prompt state says — snoozed, three times declined,
+          already answered — this button always opens it. That is the promise
+          that makes declining safe: the auto-prompt can stop asking precisely
+          because saying no never takes the option away. `force` is what
+          guarantees it (see components/FeedbackGate.jsx). */}
       <Card>
         <SectionHeader
           eyebrow="04"
+          title="Send us feedback"
+          sub="Tell us how PesaLens is working, what to improve, and who else could use it. Open any time, as often as you like."
+        />
+        <Button size="sm" icon="send" onClick={() => openFeedback({ force: true })}>
+          Open the feedback form
+        </Button>
+      </Card>
+
+      <Card>
+        <SectionHeader
+          eyebrow="05"
           title="Export your data"
           sub="A JSON copy of your profile, uploads, ledger entries, and payment history. Yours to keep."
         />
@@ -365,9 +501,66 @@ const SettingsPage = () => {
         </div>
       </Card>
 
+      {/* Start over — the escape hatch for data captured before statements
+          could be linked to it. Those receipts/entries are excluded from the
+          statement delete cascade (it must never take hand-typed entries), so
+          without this they can only be removed one at a time. Shown always,
+          with the reason it's unavailable, so it never looks broken. */}
+      {startOverState && (
+        <Card className="border-exp/30">
+          <SectionHeader
+            eyebrow="06"
+            title="Start over"
+            sub="Clears every receipt and manual entry when none of them belong to a statement. Your statements and business ledger are kept. Available once every 30 days."
+          />
+          <div className="text-sm text-txt-2 mb-3">
+            {startOverState.eligible ? (
+              <>
+                This will remove{' '}
+                <span className="text-txt-1 font-medium">
+                  {startOverState.receipts} receipt{startOverState.receipts === 1 ? '' : 's'}
+                </span>{' '}and{' '}
+                <span className="text-txt-1 font-medium">
+                  {startOverState.personal_entries} manual{' '}
+                  {startOverState.personal_entries === 1 ? 'entry' : 'entries'}
+                </span>. This cannot be undone.
+              </>
+            ) : startOverState.reason === 'attached' ? (
+              <>Some of your receipts or entries belong to a statement. Delete that
+              statement instead — it takes its own data with it.</>
+            ) : startOverState.reason === 'cooldown' ? (
+              <>Already used. Available again after{' '}
+              <span className="text-txt-1 font-medium">
+                {String(startOverState.next_available_at || '').slice(0, 10)}
+              </span>.</>
+            ) : (
+              <>There is nothing to clear.</>
+            )}
+          </div>
+          {startOverState.eligible && (
+            <>
+              <Field label='Type "DELETE" in capital letters to confirm'>
+                <input
+                  value={soConfirm} onChange={(e) => setSoConfirm(e.target.value)}
+                  placeholder="DELETE" autoComplete="off" spellCheck={false}
+                  className="w-full bg-surface-3 border border-exp/30 rounded-xl px-4 py-3 text-sm font-mono tracking-widest"
+                />
+              </Field>
+              {soErr ? <div className="mt-3"><Banner tone="dng">{soErr}</Banner></div> : null}
+              <button
+                onClick={runStartOver} disabled={soBusy || soConfirm !== 'DELETE'}
+                className="mt-3 bg-exp text-white text-sm font-semibold px-4 py-2 rounded-lg disabled:opacity-60 disabled:cursor-not-allowed hover:bg-exp/90 transition"
+              >
+                {soBusy ? 'Clearing…' : 'Clear receipts and entries'}
+              </button>
+            </>
+          )}
+        </Card>
+      )}
+
       <Card className="border-dng/30">
         <SectionHeader
-          eyebrow="05"
+          eyebrow="07"
           title={<span className="text-dng">Delete account</span>}
           sub="Removes your account, every uploaded statement, every receipt, and your payment history. Permanent."
         />

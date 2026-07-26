@@ -17,14 +17,19 @@ const TONE_TXT = { accent: 'text-txt-1', exp: 'text-exp', inc: 'text-inc', net: 
 import {
   fetchReceiptPatterns,
   scanReceipt,
+  fetchReceiptByScan,
+  deleteReceipt,
   fmtTZS,
   fmtTZSFull,
+  fmtAmount,
+  fmtInCurrency,
   fetchBusinessEntries,
   createBusinessEntry,
   deleteBusinessEntry,
   fetchBusinessSummary,
   downloadBusinessReport,
 } from '../data/api';
+import { getActiveStatement } from '../data/activeStatement';
 
 // Account-class → suggested category list. Mirrors the chart-of-accounts
 // in BUSINESS_VALUE_PROPOSITION.md so monthly P&L / Balance Sheet roll up
@@ -62,11 +67,18 @@ const BookkeepingPage = () => {
   const { t } = useT();
   const [showCamera, setShowCamera] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
-  const [scanning, setScanning] = useState(false);
+  // 'idle' | 'scanning' | 'reconciling'. `reconciling` means the request died
+  // but the server may still have saved — see handleScan.
+  const [scanPhase, setScanPhase] = useState('idle');
+  const scanning = scanPhase !== 'idle';
+  // The last attempt, so a retry reuses its scan_id and the backend returns
+  // the already-saved receipt instead of scanning (and charging) twice.
+  const lastScanRef = useRef(null);
   const [downloading, setDownloading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [latest, setLatest] = useState(null);
+  const [delBusy, setDelBusy] = useState(false);
   const [entries, setEntries] = useState([]);
   const [draft, setDraft] = useState(blankEntry());
   const [month, setMonth] = useState(currentMonth());
@@ -211,26 +223,80 @@ const BookkeepingPage = () => {
     }
   };
 
-  const handleScan = async (file) => {
+  const finishScanSuccess = async (data) => {
+    setLatest(data);
+    setError(null);
+    lastScanRef.current = null;
+    await Promise.all([loadPatterns(), loadSummary(month)]);
+    toast.success('Receipt captured');
+  };
+
+  // A timed-out/aborted request does NOT mean the scan failed: the server may
+  // have saved the receipt after the browser gave up. Declaring failure here
+  // is what produced the old "failed… then the receipt appears anyway"
+  // whiplash, so poll the by-scan lookup before admitting defeat.
+  const reconcileScan = async (scanId, originalErr) => {
+    setScanPhase('reconciling');
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const res = await fetchReceiptByScan(scanId);
+        if (res?.found && res.receipt) {
+          await finishScanSuccess(res.receipt);
+          return true;
+        }
+      } catch {
+        // The lookup itself failing (still offline) — keep trying until the
+        // window closes rather than turning it into a scan failure.
+      }
+    }
+    setError(originalErr?.message || 'Receipt scan failed.');
+    toast.error(originalErr?.message || 'Receipt scan failed.');
+    return false;
+  };
+
+  const handleScan = async (file, existingScanId = null) => {
     if (!file) return;
-    setScanning(true);
+    // Idempotency key for this attempt; a retry reuses it.
+    const scanId = existingScanId
+      || (window.crypto?.randomUUID ? window.crypto.randomUUID()
+          : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`);
+    lastScanRef.current = { file, scanId };
+    setScanPhase('scanning');
     setError(null);
     try {
-      const data = await scanReceipt(file);
+      // Scope the receipt to the statement the user is focused on. Without
+      // this, every Bookkeeping scan was saved unattached — it still SHOWED
+      // under the newest statement, but deleting that statement left it
+      // behind. A null focus stays null: the backend does NOT substitute the
+      // newest statement (see _resolve_statement_job), because that would make
+      // a receipt scanned outside any statement a child of whatever was
+      // uploaded last, and deleting that statement would take its image with
+      // it. Unattached is the honest answer when the user has picked nothing.
+      const data = await scanReceipt(file, { statementJobId: getActiveStatement(), scanId });
       if (data?.is_receipt === false) {
         setError(data.message || 'That image is not a receipt.');
         toast.warning(data.message || 'That image is not a receipt.');
         return;
       }
-      setLatest(data);
-      await Promise.all([loadPatterns(), loadSummary(month)]);
-      toast.success('Receipt captured');
+      await finishScanSuccess(data);
     } catch (err) {
+      // Timeout / network drop: the server may have finished after we gave up.
+      // Clean HTTP error responses (4xx/5xx) are decisive and fail at once.
+      if (err?.code === 'scan_timeout' || err?.transient) {
+        await reconcileScan(scanId, err);
+        return;
+      }
       setError(err?.message || 'Receipt scan failed.');
       toast.error(err?.message || 'Receipt scan failed.');
     } finally {
-      setScanning(false);
+      setScanPhase('idle');
     }
+  };
+
+  const retryScan = () => {
+    const last = lastScanRef.current;
+    if (last?.file) handleScan(last.file, last.scanId);
   };
 
   const onPick = (event) => {
@@ -530,11 +596,32 @@ const BookkeepingPage = () => {
               <p className="text-xs text-txt-3">Pick an image from your device</p>
             </button>
           </div>
-          {scanning && (
+          {scanPhase === 'scanning' && (
             <p className="text-xs text-txt-3 mt-3">Scanning… reading the image with vision AI.</p>
           )}
-          {error && (
-            <div className="mt-4 p-3 bg-exp/10 border border-exp/30 rounded-xl text-sm text-exp">{error}</div>
+          {scanPhase === 'reconciling' && (
+            <div className="mt-3 flex items-start gap-2">
+              <span className="w-2 h-2 rounded-full bg-exp anim-pulse-soft mt-1.5 flex-shrink-0" />
+              <p className="text-xs text-txt-3">
+                <span className="text-txt-2 font-medium">Still processing.</span>{' '}
+                The connection dropped before we got an answer — checking whether your
+                receipt was saved anyway. Don’t re-scan yet.
+              </p>
+            </div>
+          )}
+          {error && !scanning && (
+            <div className="mt-4 p-3 bg-exp/10 border border-exp/30 rounded-xl text-sm text-exp flex items-center justify-between gap-3 flex-wrap">
+              <span>{error}</span>
+              {lastScanRef.current?.file && (
+                <button
+                  type="button"
+                  onClick={retryScan}
+                  className="press focus-ring text-xs font-medium px-3 py-1.5 rounded-lg bg-exp/15 border border-exp/30 hover:bg-exp/25 transition-colors"
+                >
+                  Try again
+                </button>
+              )}
+            </div>
           )}
         </div>
 
@@ -553,9 +640,9 @@ const BookkeepingPage = () => {
                 {'efd_compliant' in latest && (
                   <div className="flex justify-between"><span className="text-txt-3">EFD</span><Badge color={latest.efd_compliant ? 'income' : 'expense'}>{latest.efd_compliant ? 'Compliant' : 'Missing'}</Badge></div>
                 )}
-                <div className="flex justify-between"><span className="text-txt-3">Subtotal</span><span className="font-medium">{fmtTZSFull(latest.subtotal)}</span></div>
-                <div className="flex justify-between"><span className="text-txt-3">Tax</span><span className="font-medium">{fmtTZSFull(latest.tax)}</span></div>
-                <div className="flex justify-between text-txt-1"><span>Total</span><span className="font-bold">{fmtTZSFull(latest.total)}</span></div>
+                <div className="flex justify-between"><span className="text-txt-3">Subtotal</span><span className="font-medium">{fmtInCurrency(latest.subtotal, latest.currency)}</span></div>
+                <div className="flex justify-between"><span className="text-txt-3">Tax</span><span className="font-medium">{fmtInCurrency(latest.tax, latest.currency)}</span></div>
+                <div className="flex justify-between text-txt-1"><span>Total</span><span className="font-bold">{fmtAmount(latest, { full: true })}</span></div>
               </div>
               <div>
                 <p className="text-xs text-txt-3 mb-2">Line items</p>
@@ -563,7 +650,7 @@ const BookkeepingPage = () => {
                   {(latest.items || []).map((item, idx) => (
                     <div key={idx} className="flex items-center justify-between py-1 border-b border-bdr/30 last:border-0 text-xs">
                       <span className="text-txt-2">{item.name || '—'} {item.quantity ? `×${item.quantity}` : ''} {item.unit || ''}</span>
-                      <span className="font-medium">{fmtTZSFull(item.price)}</span>
+                      <span className="font-medium">{fmtInCurrency(item.price, latest.currency)}</span>
                     </div>
                   ))}
                   {(!latest.items || latest.items.length === 0) && (
@@ -572,6 +659,33 @@ const BookkeepingPage = () => {
                 </div>
               </div>
             </div>
+            {/* A misread scan used to be permanent — there was no delete path
+                for a receipt anywhere in the product. */}
+            {latest.id && (
+              <div className="mt-4 pt-4 border-t border-bdr/30">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (delBusy) return;
+                    setDelBusy(true);
+                    try {
+                      await deleteReceipt(latest.id);
+                      toast.success('Receipt deleted');
+                      setLatest(null);
+                      await Promise.all([loadPatterns(), loadSummary(month)]);
+                    } catch (err) {
+                      toast.error(err?.message || 'Could not delete that receipt.');
+                    } finally {
+                      setDelBusy(false);
+                    }
+                  }}
+                  disabled={delBusy}
+                  className="press focus-ring text-xs font-medium px-3.5 py-2 rounded-lg bg-surface-3 text-dng border border-dng/25 hover:bg-dng/10 transition-colors disabled:opacity-50"
+                >
+                  {delBusy ? 'Deleting…' : 'Delete this receipt'}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

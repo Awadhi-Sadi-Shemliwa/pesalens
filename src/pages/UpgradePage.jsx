@@ -3,6 +3,7 @@ import { AppShell } from '../components/navigation';
 import { Icon } from '../components/Icon';
 import { Badge, Button, Eyebrow, Skeleton, toast } from '../components/common';
 import { TiltCard } from '../components/motion';
+import { openFeedback } from '../components/FeedbackGate';
 import {
   cancelSubscription,
   fetchBillingStatus,
@@ -352,6 +353,34 @@ const UpgradePage = () => {
               </div>
             ))}
           </div>
+        </div>
+
+        {/* An INLINE card, never a modal. A dialog thrown in front of someone
+            comparing prices interrupts the one decision this page exists for,
+            and would cost conversions to buy feedback. This sits below the
+            plans and waits to be noticed.
+
+            It also reaches a group the other triggers miss: someone weighing
+            Pro has formed a real opinion about whether the product is worth
+            money, which is the most useful thing anyone can tell us — and they
+            may never upgrade, so waiting until after payment would lose it. */}
+        <div className="bento p-3 sm:p-5 lg:p-6 flex items-start gap-3 flex-wrap sm:flex-nowrap">
+          <div className="p-2 rounded-lg bg-accent/10 text-accent flex-shrink-0">
+            <Icon name="send" size={14} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-txt-1">Not sure yet? Tell us why.</h3>
+            <p className="text-xs sm:text-sm text-txt-2 mt-1 leading-relaxed">
+              What is missing, what would make this worth paying for, and who else you think
+              needs it. It shapes what we build next — and you do not have to upgrade to say so.
+            </p>
+          </div>
+          <button
+            onClick={() => openFeedback({ force: true })}
+            className="px-4 py-2 rounded-lg border border-accent/40 text-accent text-sm font-medium hover:bg-accent/10 transition active:scale-95 focus-ring whitespace-nowrap"
+          >
+            Share feedback
+          </button>
         </div>
 
         {subscription?.is_pro && (

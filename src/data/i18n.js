@@ -68,6 +68,7 @@ const dict = {
     'common.method':        'Method',
     'hint.netFlow':         'Money in minus money out for this period. It excludes your opening balance.',
     'hint.savingsRate':     'The share of the money you received that you did not spend this period.',
+    'hint.openingBalance':  'Your account balance at the start of the statement period, before any of this period’s transactions.',
     'hint.closingBalance':  'Your account balance at the end of the statement period.',
     'common.type':          'Type',
     'common.vendor':        'Vendor',
@@ -224,6 +225,18 @@ const dict = {
     'an.tx.detail':         'Transaction detail',
     'an.reference':         'Reference',
     'an.pageNo':            'Page',
+
+    /* Reading confidence — how well WE read the statement. Read-only by
+       design: the copy owns the shortfall and offers the two remedies the
+       user actually has. It must never ask them to correct the figures. */
+    'an.rev.eyebrow':       'Reading confidence',
+    'an.rev.flagged':       'This statement is a scan, and we could not read {n} row(s) with full confidence.',
+    'an.rev.gap':           'The totals below may be off by about {amt}.',
+    'an.rev.remedy':        "For an exact read, upload a digital PDF from your bank's app, or delete this statement and try again.",
+    'an.rev.open':          'Show these rows',
+    'an.rev.tab':           'Low confidence',
+    'an.rev.badge':         'Low confidence',
+    'an.rev.why':           'What we could not read',
 
     /* Assistant */
     'ai.title':             'PesaLens AI',
@@ -511,6 +524,12 @@ const dict = {
     'auth.signup.fine':     '14-day trial · No card required · Cancel any time',
     'auth.haveAccount':     'Already have an account?',
     'auth.terms':           'I agree to the Terms of Service and Privacy Policy',
+    /* Split so both documents can be rendered as real links — consent to
+       terms you cannot open is not consent. */
+    'auth.termsPrefix':     'I agree to the',
+    'auth.termsLink':       'Terms of Service',
+    'auth.privacyLink':     'Privacy Policy',
+    'common.and':           'and',
 
     /* Markets */
     'mk.eyebrow':           'Markets',
@@ -664,6 +683,7 @@ const dict = {
     'common.method':        'Njia',
     'hint.netFlow':         'Pesa zilizoingia toa pesa zilizotoka kwa kipindi hiki. Haijumuishi salio la awali.',
     'hint.savingsRate':     'Sehemu ya pesa ulizopokea ambazo hukutumia kipindi hiki.',
+    'hint.openingBalance':  'Salio la akaunti yako mwanzoni mwa kipindi cha taarifa, kabla ya miamala ya kipindi hiki.',
     'hint.closingBalance':  'Salio la akaunti yako mwishoni mwa kipindi cha taarifa.',
     'common.type':          'Aina',
     'common.vendor':        'Muuzaji',
@@ -820,6 +840,16 @@ const dict = {
     'an.tx.detail':         'Maelezo ya muamala',
     'an.reference':         'Marejeo',
     'an.pageNo':            'Ukurasa',
+
+    /* Uhakika wa usomaji */
+    'an.rev.eyebrow':       'Uhakika wa usomaji',
+    'an.rev.flagged':       'Taarifa hii ni skani, na hatukuweza kusoma safu {n} kwa uhakika kamili.',
+    'an.rev.gap':           'Jumla zilizo hapa chini zinaweza kutofautiana kwa takribani {amt}.',
+    'an.rev.remedy':        'Kwa usomaji sahihi, pakia PDF ya kidijitali kutoka programu ya benki yako, au futa taarifa hii na ujaribu tena.',
+    'an.rev.open':          'Onyesha safu hizi',
+    'an.rev.tab':           'Uhakika mdogo',
+    'an.rev.badge':         'Uhakika mdogo',
+    'an.rev.why':           'Tusichoweza kusoma',
 
     /* Assistant */
     'ai.title':             'PesaLens AI',
@@ -1102,6 +1132,10 @@ const dict = {
     'auth.signup.fine':     'Jaribio la siku 14 · Bila kadi · Ghairi wakati wowote',
     'auth.haveAccount':     'Tayari una akaunti?',
     'auth.terms':           'Nakubali Masharti ya Huduma na Sera ya Faragha',
+    'auth.termsPrefix':     'Nakubali',
+    'auth.termsLink':       'Masharti ya Huduma',
+    'auth.privacyLink':     'Sera ya Faragha',
+    'common.and':           'na',
 
     /* Markets */
     'mk.eyebrow':           'Soko',

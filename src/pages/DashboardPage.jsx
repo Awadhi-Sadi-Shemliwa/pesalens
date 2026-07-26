@@ -2,13 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AppShell } from '../components/navigation';
 import { useRouter } from '../components/Router';
 import { Icon } from '../components/Icon';
-import { Badge, EmptyState, Eyebrow, Sparkline, CountUp, Segmented, ProgressBar, ErrorState, InfoHint, Skeleton, toast } from '../components/common';
+import { Badge, EmptyState, Eyebrow, Sparkline, CountUp, Segmented, ProgressBar, ErrorState, InfoHint, Modal, Skeleton, toast } from '../components/common';
 import { ChartJS, chartTheme } from '../components/ChartJS';
 import { TiltCard } from '../components/motion';
 import ActionPlan from '../components/ActionPlan';
 import TextType from '../components/reactbits/TextType';
 import SignOutConfirm from '../components/SignOutConfirm';
-import { fetchDashboardSummary, fetchStatementIndex, fetchBankIntel, uploadStatement, fetchUploadStatus, fmtTZS, fmtTZSFull } from '../data/api';
+import { openFeedback } from '../components/FeedbackGate';
+import { fetchDashboardSummary, fetchStatementIndex, fetchBankIntel, uploadStatement, fetchUploadStatus, fetchDeleteImpact, deleteStatement, fmtTZS, fmtTZSFull } from '../data/api';
 import { useTheme } from '../data/theme';
 import { setActiveStatement } from '../data/activeStatement';
 import { bankLabel as sharedBankLabel } from '../data/bankLabels';
@@ -189,10 +190,16 @@ const UploadZone = ({ onFile, busy, error }) => {
    decisive completion state and a real, timestamped failure state + retry.
    (design corpus §84–89, error-states.md #3)
    ---------------------------------------------------------------- */
-// Cap on how long we poll a job before calling it a (retryable) timeout, so a
-// stranded backend job can't spin the overlay forever. Extraction incl. LLM
-// repair is normally far quicker; this is a generous safety net.
-const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+// A scanned statement OCRs at ~30-60s per page, so total extraction time is
+// legitimately unbounded by a small wall clock (a 10-page scan runs 5-8 min,
+// and 100 pages is supported). The client therefore fails on STALL, not on
+// elapsed time: the backend emits per-page progress pings, so a live job
+// advances its stage/progress at least every couple of minutes, and the
+// backend's own orphan recovery converts genuinely dead jobs to status
+// 'failed' within 10 minutes — which the poll loop then surfaces honestly.
+const POLL_STALL_MS = 4 * 60 * 1000;      // no stage/progress change for 4 min
+const POLL_ERROR_MS = 2 * 60 * 1000;      // status endpoint unreachable for 2 min
+const POLL_CEILING_MS = 45 * 60 * 1000;   // absolute safety ceiling
 
 const fmtBytes = (n) => {
   if (!n && n !== 0) return '';
@@ -235,7 +242,9 @@ const UploadOverlay = ({ job, onRetry, onClose }) => {
               sublabel={
                 uploading && job.rate
                   ? `${fmtBytes(job.rate)}/s · ${job.eta != null ? `${job.eta}s ${t('dash.upload.left')}` : ''}`
-                  : t('dash.upload.keepOpen')
+                  : /scanned pages/i.test(job.stage || '')
+                    ? 'This statement is a scan — reading it page by page can take several minutes. It’s safe to keep this open.'
+                    : t('dash.upload.keepOpen')
               }
             />
           </>
@@ -481,10 +490,123 @@ const MoneyMap = ({ intel, focus, onFocus }) => {
 };
 
 /* ----------------------------------------------------------------
+   DeleteStatementModal — type-to-confirm, with the real blast radius.
+
+   Deleting a statement also removes the receipts filed against it and the
+   entries scoped to it, so the dialog states those COUNTS (fetched, not
+   guessed) before the user can proceed. Typing DELETE is deliberate friction:
+   this is irreversible and one stray tap on a phone should not trigger it.
+   ---------------------------------------------------------------- */
+const CONFIRM_WORD = 'DELETE';
+
+const DeleteStatementModal = ({ statement, onClose, onDeleted }) => {
+  const [impact, setImpact] = useState(null);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!statement) return;
+    setImpact(null); setTyped(''); setError(null);
+    let cancelled = false;
+    fetchDeleteImpact(statement.job_id)
+      .then((d) => { if (!cancelled) setImpact(d); })
+      // Counts are a courtesy, not a gate — if the lookup fails the user can
+      // still delete, they just don't get the breakdown.
+      .catch(() => { if (!cancelled) setImpact({}); });
+    return () => { cancelled = true; };
+  }, [statement]);
+
+  if (!statement) return null;
+  const armed = typed.trim().toUpperCase() === CONFIRM_WORD && !busy;
+
+  const confirm = async () => {
+    if (!armed) return;
+    setBusy(true); setError(null);
+    try {
+      await deleteStatement(statement.job_id);
+      toast.success('Statement deleted');
+      onDeleted(statement.job_id);
+      onClose();
+    } catch (err) {
+      setError(err?.message || 'Could not delete this statement.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const label = statement.period_start
+    ? `${statement.period_start} → ${statement.period_end || '—'}`
+    : (statement.filename || 'this statement');
+
+  return (
+    <Modal open={!!statement} onClose={busy ? () => {} : onClose} title="Delete this statement?">
+      <div className="space-y-4">
+        <div className="p-3.5 rounded-xl surface-inset">
+          <div className="flex items-center gap-2 mb-1">
+            <Badge color="muted">{bankLabel(statement.bank)}</Badge>
+            <span className="text-[13px] font-medium text-txt-1 truncate">{label}</span>
+          </div>
+          <p className="text-[11px] text-txt-3 font-mono">{statement.filename || statement.job_id}</p>
+        </div>
+
+        <div className="p-3.5 rounded-xl border border-dng/25 bg-dng/8">
+          <p className="text-sm text-txt-2 leading-relaxed">
+            This permanently deletes the statement
+            {impact?.transactions ? ` and its ${impact.transactions} transactions` : ''}
+            {impact?.receipts ? `, ${impact.receipts} receipt scan${impact.receipts === 1 ? '' : 's'}` : ''}
+            {impact?.personal_entries ? ` and ${impact.personal_entries} personal ${impact.personal_entries === 1 ? 'entry' : 'entries'}` : ''}
+            . <span className="text-dng font-medium">This cannot be undone.</span>
+          </p>
+          {!impact && <p className="text-[11px] text-txt-3 mt-2">Checking what’s attached…</p>}
+        </div>
+
+        <label className="block">
+          <span className="text-[11px] font-mono uppercase tracking-ticker text-txt-3">
+            Type {CONFIRM_WORD} to confirm
+          </span>
+          <input
+            type="text"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') confirm(); }}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={CONFIRM_WORD}
+            className="mt-1 w-full bg-surface-3 border border-bdr rounded-lg px-3 py-2 text-sm text-txt-1 tracking-widest font-mono"
+          />
+        </label>
+
+        {error && <p className="text-sm text-dng">{error}</p>}
+
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={!armed}
+            className="press focus-ring flex-1 text-sm font-medium px-4 py-2.5 rounded-lg bg-dng/15 text-dng border border-dng/30 hover:bg-dng/25 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {busy ? 'Deleting…' : 'Delete permanently'}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="press focus-ring text-sm font-medium px-4 py-2.5 rounded-lg bg-surface-3 text-txt-2 border border-bdr hover:bg-surface-4 transition-colors disabled:opacity-50"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+};
+
+/* ----------------------------------------------------------------
    StatementTimeline — statement history grouped Recent vs Past, then by bank
    (Slice 3, Part K). Tapping a row focuses that statement and opens Analysis.
    ---------------------------------------------------------------- */
-const StatementTimeline = ({ statements, onOpen }) => {
+const StatementTimeline = ({ statements, onOpen, onDelete }) => {
   if (!statements || statements.length === 0) return null;
   const groups = [
     { key: 'recent', label: 'Recent', rows: statements.filter((s) => s.recency === 'recent') },
@@ -506,21 +628,37 @@ const StatementTimeline = ({ statements, onOpen }) => {
             <div className="text-[10px] text-txt-3 font-mono uppercase tracking-ticker mb-2">{g.label}</div>
             <div className="space-y-2">
               {g.rows.map((s) => (
-                <button
+                /* Row is a button; the delete control sits BESIDE it, not
+                   inside — nesting a button in a button is invalid HTML and
+                   makes the destructive action fire on a normal row tap. */
+                <div
                   key={s.job_id}
-                  type="button"
-                  onClick={() => onOpen(s.job_id)}
-                  className="press focus-ring w-full text-left flex items-center gap-3 surface-inset rounded-xl p-3 hover:bg-surface-4/50 transition-colors"
+                  className="flex items-center gap-2 surface-inset rounded-xl pr-2 hover:bg-surface-4/50 transition-colors"
                 >
-                  <Badge color={g.key === 'recent' ? 'accent' : 'muted'}>{bankLabel(s.bank)}</Badge>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-medium text-txt-1 truncate">
-                      {s.period_start ? `${s.period_start} → ${s.period_end || '—'}` : (s.filename || 'Statement')}
+                  <button
+                    type="button"
+                    onClick={() => onOpen(s.job_id)}
+                    className="press focus-ring flex-1 min-w-0 text-left flex items-center gap-3 p-3 rounded-xl"
+                  >
+                    <Badge color={g.key === 'recent' ? 'accent' : 'muted'}>{bankLabel(s.bank)}</Badge>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-medium text-txt-1 truncate">
+                        {s.period_start ? `${s.period_start} → ${s.period_end || '—'}` : (s.filename || 'Statement')}
+                      </div>
+                      <div className="text-[10px] text-txt-3 font-mono">{s.txn_count || 0} transactions · {fmtDay(s.created_at)}</div>
                     </div>
-                    <div className="text-[10px] text-txt-3 font-mono">{s.txn_count || 0} transactions · {fmtDay(s.created_at)}</div>
-                  </div>
-                  <Icon name="chevRight" size={14} className="text-txt-4 flex-shrink-0" />
-                </button>
+                    <Icon name="chevRight" size={14} className="text-txt-4 flex-shrink-0" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDelete(s)}
+                    aria-label={`Delete statement ${s.filename || s.job_id}`}
+                    title="Delete this statement"
+                    className="press focus-ring flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-txt-4 hover:text-dng hover:bg-dng/10 transition-colors"
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                </div>
               ))}
             </div>
           </div>
@@ -540,6 +678,8 @@ const DashboardPage = () => {
   // Statement selector / history: null selection = latest upload (default).
   const [statements, setStatements] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState(null);
+  // The statement queued for deletion (null = modal closed).
+  const [pendingDelete, setPendingDelete] = useState(null);
   // Per-bank money map (Slice 3). `bankFocus` = which service the panel is
   // focused on ('all' = the full leaderboard).
   const [bankIntel, setBankIntel] = useState(null);
@@ -601,13 +741,21 @@ const DashboardPage = () => {
 
   useEffect(() => { refresh(null); loadStatements(); loadBankIntel(); }, []);
 
-  // Poll lifecycle guard: a ref-held timer + generation token. Bumping the
+  // Poll lifecycle guard: ref-held timers + generation token. Bumping the
   // generation cancels any in-flight poll — on unmount, and whenever a new
   // upload supersedes an older one — so we never leak an endless timer chain.
-  const pollRef = useRef({ timer: null, gen: 0 });
+  // All armed timers are tracked, not just the most recent: the "done" branch
+  // arms two at once (clear the card, then the feedback prompt), and a single
+  // slot would orphan the earlier one — it would still fire and wipe the
+  // progress overlay of whatever upload came next.
+  const pollRef = useRef({ timers: new Set(), gen: 0 });
+  const clearTimers = () => {
+    pollRef.current.timers.forEach((id) => clearTimeout(id));
+    pollRef.current.timers.clear();
+  };
   useEffect(() => () => {
     pollRef.current.gen += 1;
-    if (pollRef.current.timer) clearTimeout(pollRef.current.timer);
+    clearTimers();
   }, []);
 
   // Drive the full honest flow: byte upload → poll extraction stages →
@@ -647,10 +795,22 @@ const DashboardPage = () => {
     // newer upload starts; the deadline turns a job that never resolves into an
     // honest, retryable failure instead of an infinite spinner.
     const gen = ++pollRef.current.gen;
-    if (pollRef.current.timer) clearTimeout(pollRef.current.timer);
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    const schedule = (fn, ms) => { pollRef.current.timer = setTimeout(fn, ms); };
+    clearTimers();
+    const startedAt = Date.now();
+    // Timers drop themselves once they fire, so the chained poll loop does not
+    // accumulate dead handles over a long extraction.
+    const schedule = (fn, ms) => {
+      const id = setTimeout(() => { pollRef.current.timers.delete(id); fn(); }, ms);
+      pollRef.current.timers.add(id);
+    };
     const alive = () => pollRef.current.gen === gen;
+    // Stall detection state: the job is alive as long as its stage/progress
+    // keeps changing (per-page OCR pings advance every page). A flat elapsed-
+    // time cap is wrong here — it declared big scans "failed" at ~5 min while
+    // the backend went on to finish them successfully.
+    let lastAdvanceAt = Date.now();
+    let lastKey = '';
+    let errorSince = null;
 
     setJob((j) => ({ ...(j || {}), phase: 'processing', file, pct: 0, stage: 'Queued' }));
     // Turn a job that never resolves into an honest, retryable failure. Shared so
@@ -678,11 +838,13 @@ const DashboardPage = () => {
         if (!alive()) return;
         // A persistently unreachable status endpoint must still time out, or the
         // overlay spins forever on a dead network.
-        if (Date.now() > deadline) { failTimeout(null); return; }
+        errorSince = errorSince ?? Date.now();
+        if (Date.now() - errorSince > POLL_ERROR_MS) { failTimeout(null); return; }
         schedule(poll, 1500); // transient — keep polling
         return;
       }
       if (!alive()) return;
+      errorSince = null;
       if (status?.status === 'done') {
         setJob((j) => ({ ...(j || {}), phase: 'done', pct: 100, total: status.total_transactions }));
         toast.success('Statement extracted');
@@ -692,6 +854,14 @@ const DashboardPage = () => {
         await refresh(null);
         await loadStatements();
         schedule(() => setJob(null), 1400); // let the success state land (§85)
+        // The best moment to ask: they have just watched the product read their
+        // own statement, so they have both goodwill and something concrete to
+        // say. It also reaches the majority who never press Sign out at all —
+        // closing the tab ends the session via a pagehide beacon with no UI, so
+        // the sign-out prompt alone would never find them. Self-gating on
+        // /feedback/pending and delayed past the success animation; it does
+        // nothing if this account is snoozed, capped, or has already answered.
+        schedule(() => { openFeedback(); }, 2600);
         return;
       }
       if (status?.status === 'failed') {
@@ -708,7 +878,14 @@ const DashboardPage = () => {
         toast.error(status.error_message || 'Extraction failed');
         return;
       }
-      if (Date.now() > deadline) { failTimeout(status); return; }
+      // Still processing: fail only when the job stops advancing (stall) or
+      // hits the absolute ceiling — never on healthy long-running OCR.
+      const key = `${status?.stage || ''}|${status?.progress ?? ''}`;
+      if (key !== lastKey) { lastKey = key; lastAdvanceAt = Date.now(); }
+      if (
+        Date.now() - lastAdvanceAt > POLL_STALL_MS
+        || Date.now() - startedAt > POLL_CEILING_MS
+      ) { failTimeout(status); return; }
       setJob((j) => (j ? { ...j, phase: 'processing', pct: status?.progress ?? j.pct, stage: status?.stage || j.stage } : j));
       schedule(poll, 1000);
     };
@@ -995,7 +1172,10 @@ const DashboardPage = () => {
         </div>
 
         {/* ==================================================== B · KPI TILES */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-5">
+        {/* Ordered as the period's story: where the money started, what came
+            in and went out, what was kept, where it ended. */}
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-4 sm:gap-5">
+          <MiniTile label={t('common.openingBalance')} value={fmtTZS(k.opening_balance || 0)} tone="net" spark={seededSeries(k.opening_balance)} hint={t('hint.openingBalance')} />
           <MiniTile label={t('common.moneyIn')}  value={fmtTZS(k.money_in || 0)}  tone="inc" spark={inSpark} />
           <MiniTile label={t('common.moneyOut')} value={fmtTZS(k.money_out || 0)} tone="exp" spark={outSpark} />
           {k.savings_rate != null
@@ -1145,12 +1325,29 @@ const DashboardPage = () => {
         <StatementTimeline
           statements={statements}
           onOpen={(jobId) => { setActiveStatement(jobId); navigate('/analysis'); }}
+          onDelete={(s) => setPendingDelete(s)}
         />
 
         {/* ================================================ F · ACTION ENGINE */}
         <ActionPlan summary={data} />
       </div>
       <UploadOverlay job={job} onRetry={() => startUpload(job?.file)} onClose={() => setJob(null)} />
+      <DeleteStatementModal
+        statement={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onDeleted={(jobId) => {
+          // The dashboard may be scoped to the statement that just vanished —
+          // drop back to "latest" rather than re-requesting a dead job_id.
+          if (selectedJobId === jobId) {
+            setSelectedJobId(null);
+            setActiveStatement(null);
+            refresh(null);
+          } else {
+            refresh(selectedJobId);
+          }
+          loadStatements();
+        }}
+      />
       <SignOutConfirm />
     </AppShell>
   );

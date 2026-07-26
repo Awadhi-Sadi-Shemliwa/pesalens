@@ -16,8 +16,10 @@ import UpgradePage from './pages/UpgradePage';
 import SettingsPage from './pages/SettingsPage';
 import AdminDashboardPage from './pages/AdminDashboardPage';
 import PrivacyPage from './pages/PrivacyPage';
+import TermsPage from './pages/TermsPage';
 import NotFoundPage from './pages/NotFoundPage';
 import PWAInstallPrompt from './components/PWAInstallPrompt';
+import FeedbackGate from './components/FeedbackGate';
 import { ToastProvider } from './components/common';
 import { bootAuth, API_URL } from './data/api';
 import { subscribeUnload } from './data/authStore';
@@ -66,6 +68,7 @@ const App = () => {
         {/* Legal pages — plain Route (no protected, no PublicOnly): readable
             whether signed in or out, and required by Google Ads policy. */}
         <Route path="/privacy" component={PrivacyPage} />
+        <Route path="/terms" component={TermsPage} />
         <Route path="/upgrade" component={UpgradePage} protected />
         <Route path="/dashboard" component={DashboardPage} protected />
         <Route path="/analysis" component={AnalysisPage} protected />
@@ -89,6 +92,10 @@ const App = () => {
       {/* Global toast stack — severity-scaled, dismissible, capped at 3.
           Mounted once here so any page (or the api client) can fire toasts. */}
       <ToastProvider />
+      {/* One-time feedback prompt, shared by every sign-out path. Mounted once
+          outside <Router> so all three buttons behave identically — see
+          components/FeedbackGate.jsx. */}
+      <FeedbackGate />
     </ErrorBoundary>
   );
 };

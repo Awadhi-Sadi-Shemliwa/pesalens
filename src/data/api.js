@@ -264,6 +264,11 @@ export const fetchStatementIndex = async () => {
   return data?.statements || [];
 };
 
+// Extracted transactions are READ-ONLY — there is no update call by design.
+// PesaLens's promise is that it reads the statement for you; an edit box on an
+// extracted figure hands that job back to the user. Low-confidence rows are
+// surfaced (payload.quality) so the user can upload a cleaner copy or delete
+// the statement, never so they can retype the bank's numbers.
 export const fetchAnalysis = (jobId) =>
   requestData(`/analysis/${encodeURIComponent(jobId)}`);
 
@@ -276,6 +281,31 @@ export const fetchBankIntel = () => requestData('/banks/intel');
 // and would 404 on /analysis).
 export const fetchUploads = (status) =>
   requestData(`/uploads${status ? `?status=${encodeURIComponent(status)}` : ''}`);
+
+// What deleting a statement would remove: { transactions, receipts,
+// personal_entries }. Always call this BEFORE offering the delete, so the
+// confirmation states real counts instead of a vague warning.
+export const fetchDeleteImpact = (jobId) =>
+  requestData(`/uploads/${encodeURIComponent(jobId)}/impact`);
+
+// Delete a statement AND everything derived from it — the receipts filed
+// against it and the manual entries scoped to it. Irreversible; the caller
+// must have confirmed. Entries the user added outside any statement are never
+// touched (see the safety note in backend/app/routers/upload.py).
+export const deleteStatement = (jobId) =>
+  requestData(`/uploads/${encodeURIComponent(jobId)}`, { method: 'DELETE' });
+
+// Is the once-per-30-days bulk clear available, and what would it remove?
+// → { eligible, reason, receipts, personal_entries, next_available_at, ... }
+// `reason` is 'attached' | 'cooldown' | 'nothing_to_clear' | null.
+export const fetchStartOverEligibility = () =>
+  requestData('/data/start-over/eligibility');
+
+// Clear every receipt and manual personal entry. Statements and the business
+// ledger are NOT touched. Only for accounts where nothing is linked to a
+// statement — the server refuses otherwise (409) and enforces the cooldown (429).
+export const startOver = () =>
+  requestData('/data/start-over', { method: 'POST' });
 
 // Per-user activity history (timestamped): sign-ins, password changes,
 // uploads, payments.
@@ -339,11 +369,82 @@ export const fetchUploadStatus = (jobId) =>
 
 // ---------- admin / owner dashboard ----------
 
+// Build a querystring from an object, dropping empty values so an unset filter
+// never reaches the server as `?code=` (which would match nothing rather than
+// everything — the opposite of what an empty filter chip means).
+const adminQuery = (params = {}) => {
+  const parts = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '' && v !== false)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`);
+  return parts.length ? `?${parts.join('&')}` : '';
+};
+
 export const fetchAdminStats = () => requestData('/admin/stats');
-export const fetchAdminUsers = () => requestData('/admin/users');
-export const fetchAdminErrors = (code) =>
-  requestData(`/admin/errors${code ? `?code=${encodeURIComponent(code)}` : ''}`);
-export const fetchAdminActivity = () => requestData('/admin/activity');
+export const fetchAdminUsers = (params = {}) => requestData(`/admin/users${adminQuery(params)}`);
+// `code` stays positional-compatible with the original single-argument call so
+// existing callers keep working; everything else arrives in the options bag.
+export const fetchAdminErrors = (code, params = {}) =>
+  requestData(`/admin/errors${adminQuery({ code, ...params })}`);
+export const fetchAdminActivity = (params = {}) => requestData(`/admin/activity${adminQuery(params)}`);
+export const fetchAdminFeedback = (params = {}) => requestData(`/admin/feedback${adminQuery(params)}`);
+export const fetchAdminUserTimeline = (userId) =>
+  requestData(`/admin/users/${encodeURIComponent(userId)}/timeline`);
+
+// ---------- feedback + client-side error reporting ----------
+
+// Asked once per account, on the first sign-out. Checked BEFORE the sign-out
+// flow opens so a returning user never sees the form flash on screen.
+export const fetchFeedbackPending = () => requestData('/feedback/pending');
+
+export const submitFeedback = (payload) =>
+  requestData('/feedback', { method: 'POST', body: JSON.stringify({ ...payload, client: 'web' }) });
+
+// An explicit "Skip" — worth one of three chances, snoozes for 3 days.
+export const skipFeedback = () => requestData('/feedback/skip', { method: 'POST' });
+
+// An INCIDENTAL close — backdrop click, Escape, navigating away. Snoozes for a
+// day and spends none of the three chances. Keeping this separate from skip is
+// the whole fix for the original defect: the modal's onClose used to call skip,
+// so mis-clicking beside the dialog opted you out of the form permanently.
+export const dismissFeedback = () => requestData('/feedback/dismiss', { method: 'POST' });
+
+// Report a crash the BROWSER saw. A React render error or a failed fetch never
+// reaches the server's exception handler, so without this the owner console
+// shows nothing however often it fires.
+//
+// Deliberately swallows its own failure: this is called from error paths (an
+// error boundary, a catch block), and a reporter that can throw would replace
+// the original error with its own and lose the thing we were trying to record.
+export const reportClientError = async (message, { code, path } = {}) => {
+  // Deliberately NOT routed through `request()`. That helper reacts to a 401 by
+  // clearing the session and redirecting to /signin — correct for a user
+  // action, catastrophic here. This runs from the ErrorBoundary, so it would
+  // turn any render crash into a silent bounce to sign-in instead of the
+  // boundary's own recovery screen: on a public page (landing, /terms,
+  // /privacy, /signin, /signup) where there is no token at all, and equally on
+  // an expired session whose refresh fails. The try/catch below cannot save us
+  // either way — the redirect happens inside `request()`, before the error ever
+  // propagates back here. A bare fetch has no such side effects: it reports
+  // when it can, and is silently dropped by the server when it cannot.
+  const token = getAccessToken();
+  if (!token) return; // endpoint requires auth — nothing to send
+  try {
+    await fetch(`${API_URL}/telemetry/client-error`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        message: String(message ?? 'unknown').slice(0, 2000),
+        error_code: code || 'client_error',
+        path: path || (typeof window !== 'undefined' ? window.location.hash || window.location.pathname : null),
+        client: 'web',
+      }),
+    });
+  } catch {
+    // Nothing to do — an unreported error is strictly better than a crash
+    // inside the reporter.
+  }
+};
 
 // ---------- assistant ----------
 
@@ -364,12 +465,17 @@ export const sendAssistantMessage = async (message, history = []) => {
 // ~80s. This abort is deliberately set above that budget so the backend wins the
 // race — the client only aborts if the request truly hangs (dead network), and
 // the caller shows the classified failure with a retry.
-export const scanReceipt = async (file, { timeoutMs = 110000, statementJobId } = {}) => {
+export const scanReceipt = async (file, { timeoutMs = 110000, statementJobId, scanId } = {}) => {
   const formData = new FormData();
   formData.append('file', file);
   // Associate the scanned receipt with the statement the user is focused on
-  // (Epic-2 per-statement scoping). Omitted → backend resolves to newest.
+  // (Epic-2 per-statement scoping). Omitted → the receipt is saved general,
+  // belonging to no statement; the backend does not substitute the newest one.
   if (statementJobId) formData.append('statement_job_id', statementJobId);
+  // Idempotency key: lets the backend recognise a retry of a scan whose first
+  // attempt already saved (client aborted after the server finished), and lets
+  // the client reconcile a timed-out scan via fetchReceiptByScan.
+  if (scanId) formData.append('scan_id', scanId);
   const controller = new AbortController();
   const timedOut = { v: false };
   const timer = setTimeout(() => { timedOut.v = true; controller.abort(); }, timeoutMs);
@@ -384,13 +490,25 @@ export const scanReceipt = async (file, { timeoutMs = 110000, statementJobId } =
       const e = new Error('The scan is taking longer than expected — the vision AI may be busy. Please try again in a moment.');
       e.code = 'scan_timeout';
       e.status = 0;
+      e.transient = true;
       throw e;
+    }
+    // Transport-level failures (network drop, aborted fetch — status 0, never
+    // a real HTTP response) — the server may still have completed the scan;
+    // callers should reconcile before declaring failure.
+    if (err && err.status === 0) {
+      err.transient = true;
     }
     throw err;
   } finally {
     clearTimeout(timer);
   }
 };
+
+// Reconcile a timed-out/aborted scan: did the server save a receipt for this
+// scan_id after the client gave up? Returns { found, receipt }.
+export const fetchReceiptByScan = (scanId) =>
+  requestData(`/receipts/by-scan/${encodeURIComponent(scanId)}`);
 
 // Scope opts (all optional): { scope:'statement'|'general', jobId, day, start, end }.
 // No opts → the full gallery (unchanged default). See backend list_receipts.
@@ -412,6 +530,10 @@ export const fetchReceipts = async (opts = {}) => {
 };
 
 export const fetchReceiptPatterns = () => requestData('/receipts/patterns');
+
+// Delete one scanned receipt (its JSON, image and scan marker).
+export const deleteReceipt = (receiptId) =>
+  requestData(`/receipts/${encodeURIComponent(receiptId)}`, { method: 'DELETE' });
 
 export const parseReceiptText = (text, { save = false } = {}) =>
   requestData('/receipts/parse-text', {
@@ -561,6 +683,70 @@ export const fmtTZS = (value) => {
 export const fmtTZSFull = (value) => {
   if (value == null || Number.isNaN(value)) return '—';
   return 'TZS ' + Number(value).toLocaleString();
+};
+
+// What a receipt is worth in TZS for AGGREGATES (spend rollups, totals). The
+// single front-end definition — mirrors the backend's receipt_amount_tzs so the
+// two never disagree. A stamped `amount_tzs` wins; a TZS receipt uses its
+// printed total; a foreign receipt with no amount_tzs (FX was unreachable at
+// scan/heal time — it carries fx_pending) is valued at 0, NOT its printed
+// foreign figure. Counting a 140-USD slip's `total` as TZS 140 would corrupt
+// the sum by ~2600x; under-counting a known-unknown is recoverable, a silently
+// wrong total is not. The row still DISPLAYS correctly via fmtAmount ('140 USD')
+// — only the rollup drops it until the rate heals.
+export const receiptAmountTZS = (r) => {
+  if (r == null) return 0;
+  const stamped = Number(r.amount_tzs);
+  if (Number.isFinite(stamped) && stamped > 0) return stamped;
+  if ((r.currency || 'TZS').toUpperCase() !== 'TZS') return 0;
+  // First POSITIVE candidate wins, mirroring fx.receipt_printed_amount. A
+  // receipt whose printed `total` was read as literal 0 (no total line on the
+  // page) is still worth its subtotal, or the amount the backend computed by
+  // summing the line items. `total ?? amount` only falls through on
+  // null/undefined, so it would stop at that 0 and value the receipt at
+  // nothing — and a legacy TZS receipt never gets a stamped `amount_tzs` to
+  // rescue it, because _needs_fx returns False for TZS.
+  const printed = [r.total, r.amount, r.subtotal]
+    .map(Number)
+    .find((v) => Number.isFinite(v) && v > 0);
+  return printed ?? 0;
+};
+
+// Currency-aware amount for a ledger entry / receipt. TZS entries render as
+// before; foreign-currency ones show the printed amount plus the TZS
+// equivalent that actually counts in the totals: "140 USD (≈ TZS 373,100)".
+// Accepts either a projected entry ({ amount, currency, originalAmount,
+// fxPending }) or a raw receipt ({ amount_tzs|total, currency, original_amount,
+// fx_pending }).
+export const fmtAmount = (entry, { full = false } = {}) => {
+  const tz = full ? fmtTZSFull : fmtTZS;
+  if (entry == null) return '—';
+  if (typeof entry === 'number') return tz(entry);
+  const cur = (entry.currency || 'TZS').toUpperCase();
+  const original = Number(entry.originalAmount ?? entry.original_amount);
+  const tzs = Number(
+    entry.amount ?? entry.amount_tzs ?? entry.total ?? entry.subtotal ?? 0,
+  );
+  if (cur === 'TZS' || !Number.isFinite(original) || original <= 0) return tz(tzs);
+  // FX still pending (rate was unreachable at scan time): the record carries an
+  // explicit fx_pending flag and no converted amount_tzs, so `tzs` falls back
+  // to the printed total. Trust that flag (plus a non-positive TZS as a legacy
+  // fallback) — NOT `tzs === original`, which wrongly suppressed the equivalent
+  // whenever a genuine conversion happened to round back to the printed amount
+  // (a near-1 rate or a rounding coincidence).
+  const fxPending = entry.fxPending ?? entry.fx_pending ?? false;
+  if (fxPending || !Number.isFinite(tzs) || tzs <= 0) {
+    return `${original.toLocaleString()} ${cur}`;
+  }
+  return `${original.toLocaleString()} ${cur} (≈ ${tz(tzs)})`;
+};
+
+// Sub-amounts (subtotal, tax, line items) stay in the receipt's printed
+// currency — only the headline total shows the TZS equivalent (fmtAmount).
+export const fmtInCurrency = (value, currency) => {
+  const cur = (currency || 'TZS').toUpperCase();
+  if (cur === 'TZS') return fmtTZSFull(value);
+  return `${Number(value || 0).toLocaleString()} ${cur}`;
 };
 
 // Convert a HTMLCanvasElement to a File so it can be uploaded to /receipts/scan

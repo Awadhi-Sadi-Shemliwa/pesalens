@@ -1,4 +1,5 @@
 import React from 'react';
+import { reportClientError } from '../data/api';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -15,6 +16,16 @@ class ErrorBoundary extends React.Component {
     if (typeof console !== 'undefined') {
       console.error('UI crashed:', error, info);
     }
+    // ...and tell the server. A render crash never reaches the backend's
+    // exception handler, so before this the owner console showed nothing at
+    // all for a bug that took the whole page down — however often it fired.
+    // The component stack is the useful half (it names which component threw),
+    // trimmed because the ledger stores a message, not a full trace.
+    const stack = (info?.componentStack || '').trim().split('\n').slice(0, 6).join(' ');
+    reportClientError(
+      `${error?.name || 'Error'}: ${error?.message || 'unknown'}${stack ? ` | ${stack}` : ''}`,
+      { code: 'render_crash' },
+    );
   }
 
   handleReload = () => {

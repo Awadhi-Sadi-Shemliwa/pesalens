@@ -9,8 +9,12 @@ import {
   fetchReceiptPatterns,
   fetchReceipts,
   scanReceipt,
+  fetchReceiptByScan,
+  deleteReceipt,
   fmtTZS,
-  fmtTZSFull,
+  fmtAmount,
+  fmtInCurrency,
+  receiptAmountTZS,
   fetchPersonalEntries,
   createPersonalEntry,
   deletePersonalEntry,
@@ -24,7 +28,14 @@ import { bankLabel } from '../data/bankLabels';
 const isoDaysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return d.toISOString().slice(0, 10); };
 const todayIso = () => new Date().toISOString().slice(0, 10);
 
-const PERSONAL_CATEGORIES = ['Groceries', 'Transport', 'Dining', 'Utilities', 'Health', 'Housing', 'Entertainment', 'Other'];
+// Manual-entry picker. Mirrors the statement categorizer's vocabulary
+// (backend/app/services/analytics.py) so manual rows and extracted rows roll
+// up together — and carries no "Other": every option names real spending.
+const PERSONAL_CATEGORIES = [
+  'Groceries', 'Transport', 'Dining', 'Utilities', 'Telecom', 'Health',
+  'Housing', 'Education', 'Entertainment', 'Debt', 'Insurance',
+  'Government & Tax', 'Fees & Charges', 'Transfers', 'Business',
+];
 
 // A recognisable glyph per category so transaction rows read like the
 // avatar-led lists in premium finance apps (falls back to a wallet).
@@ -47,15 +58,29 @@ const dayHeading = (isoKey) => {
 };
 
 // Backend receipt categories are lowercase — map onto the Title-Case labels
-// the ledger renders so a grocery receipt files under Groceries, not "other".
+// the ledger renders so a grocery receipt files under Groceries. Every value
+// the vision model can emit is mapped to a real spending category: an "Other"
+// slice tells the user nothing about where their money went, so the map
+// covers the full enum (see the receipt prompt in backend/app/routers/
+// receipts.py) rather than dumping the tail into a catch-all.
 const RECEIPT_CATEGORY_MAP = {
   groceries: 'Groceries',
   restaurant: 'Dining',
   utilities: 'Utilities',
   transport: 'Transport',
   fuel: 'Transport',
-  stock: 'Other',
-  other: 'Other',
+  tax: 'Government & Tax',
+  bank_transfer: 'Transfers',
+  mobile_money: 'Transfers',
+  stock: 'Business',
+  health: 'Health',
+  pharmacy: 'Health',
+  education: 'Education',
+  entertainment: 'Entertainment',
+  telecom: 'Telecom',
+  airtime: 'Telecom',
+  rent: 'Housing',
+  other: 'Uncategorized',
 };
 
 // Fingerprint used to dedup legacy shadow PersonalEntry rows against the
@@ -99,6 +124,7 @@ const blankEntry = () => ({
 const ScanOverlay = ({ job, onRetry, onClose }) => {
   if (!job || job.phase === 'idle') return null;
   const scanning = job.phase === 'scanning';
+  const reconciling = job.phase === 'reconciling';
   const done = job.phase === 'done';
   const failed = job.phase === 'failed';
   const notReceipt = job.failure?.code === 'not_receipt';
@@ -129,6 +155,26 @@ const ScanOverlay = ({ job, onRetry, onClose }) => {
           </>
         )}
 
+        {reconciling && (
+          <>
+            <div className="flex items-center gap-2 mb-4">
+              <span className="w-2 h-2 rounded-full bg-exp anim-pulse-soft" />
+              <span className="font-mono text-[10px] uppercase tracking-ticker text-txt-3">Still processing</span>
+            </div>
+            <h3 className="text-lg font-semibold tracking-tight mb-1 truncate">Taking longer than usual</h3>
+            <p className="text-sm text-txt-2 mb-5">
+              The connection dropped before we got an answer — checking whether your
+              receipt was saved anyway…
+            </p>
+            <ProgressBar
+              indeterminate
+              tone="accent"
+              label="Checking for your receipt"
+              sublabel="This takes a few seconds. Don’t re-scan yet — we’ll tell you either way."
+            />
+          </>
+        )}
+
         {done && (
           <div className="flex flex-col items-center text-center py-2">
             <div className="p-3 rounded-2xl bg-inc/10 border border-inc/25 mb-3">
@@ -136,7 +182,7 @@ const ScanOverlay = ({ job, onRetry, onClose }) => {
             </div>
             <h3 className="text-lg font-semibold text-txt-1">Receipt captured</h3>
             <p className="text-sm text-txt-2 mt-1">
-              {job.vendor || 'Saved'}{job.total != null ? ` · ${fmtTZSFull(job.total)}` : ''}
+              {job.vendor || 'Saved'}{job.total != null ? ` · ${fmtAmount(job.receipt || job.total, { full: true })}` : ''}
             </p>
           </div>
         )}
@@ -211,6 +257,14 @@ const PersonalSpendingPage = () => {
       ? activeJobId
       : (statements[0]?.job_id || null);
   const activeStatement = statements.find((s) => s.job_id === effectiveJobId) || null;
+  // The statement a NEWLY created entry/receipt belongs to. This must follow
+  // what the user is actually looking at, not merely which statement is
+  // newest: in the 'general' view they are working outside any statement, so
+  // the row is general and must stay unscoped. Stamping it anyway would make
+  // deleting that statement destroy hand-typed entries and receipt images —
+  // the delete cascade matches this id exactly.
+  const scopedJobId =
+    (showScope && viewMode === 'statement') ? effectiveJobId : null;
   const scopeOpts = useMemo(() => {
     if (!showScope) return {};                              // no uploads → unscoped (as before)
     if (viewMode === 'general') return { scope: 'general', start: genStart, end: genEnd };
@@ -276,7 +330,7 @@ const PersonalSpendingPage = () => {
         description: draft.description.trim() || null,
         amount: amt,
         direction: 'expense',
-        statement_job_id: effectiveJobId || undefined,
+        statement_job_id: scopedJobId || undefined,
       });
       setManualEntries((prev) => [
         {
@@ -355,15 +409,63 @@ const PersonalSpendingPage = () => {
     else if (intent === 'add') { setError(null); setShowAdd(true); }
   }, []);
 
-  const handleScan = async (file) => {
+  // Success path shared by a normal scan response and a reconciled late save.
+  const finishScanSuccess = async (data, file) => {
+    setLatest(data);
+    setHistory((prev) => [data, ...prev].slice(0, 10));
+    await refreshPatterns();
+    await refreshReceipts();
+    setScanJob({ phase: 'done', file, vendor: data.vendor, total: data.total, receipt: data });
+    toast.success('Receipt captured');
+    // Let the success state land, then dismiss (the Latest card shows below).
+    setTimeout(() => setScanJob((j) => (j?.phase === 'done' ? null : j)), 1400);
+  };
+
+  // A timed-out/aborted request does NOT mean the scan failed: the server may
+  // have saved the receipt after the browser gave up (that race produced the
+  // old "failed… then the receipt appears anyway" behavior). Before declaring
+  // failure, poll the by-scan lookup for the receipt this attempt would have
+  // saved.
+  const reconcileScan = async (file, scanId, originalErr) => {
+    setScanJob({ phase: 'reconciling', file, scanId });
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const res = await fetchReceiptByScan(scanId);
+        if (res?.found && res.receipt) {
+          await finishScanSuccess(res.receipt, file);
+          return;
+        }
+      } catch {
+        // Lookup itself failing (still offline) — keep trying until the window closes.
+      }
+    }
+    setScanJob({
+      phase: 'failed', file, scanId,
+      failure: {
+        message: originalErr?.message || 'Receipt scan failed',
+        code: originalErr?.code || 'scan_error',
+        timestamp: Date.now(),
+      },
+    });
+    toast.error(originalErr?.message || 'Receipt scan failed', { ttl: 10000 });
+  };
+
+  const handleScan = async (file, existingScanId = null) => {
     if (!file) return;
     setError(null);
     setNotice(null);
-    setScanJob({ phase: 'scanning', file });
+    // Idempotency key for this scan attempt. A retry reuses the same id so the
+    // backend can short-circuit to the already-saved receipt instead of
+    // scanning (and saving) twice.
+    const scanId = existingScanId
+      || (window.crypto?.randomUUID ? window.crypto.randomUUID()
+          : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`);
+    setScanJob({ phase: 'scanning', file, scanId });
     try {
       // Associate the receipt with the statement in focus (or newest when
       // viewing General) so it lands in the right per-statement scope.
-      const data = await scanReceipt(file, { statementJobId: effectiveJobId });
+      const data = await scanReceipt(file, { statementJobId: scopedJobId, scanId });
       if (data?.is_receipt === false) {
         // The backend returns 200 + is_receipt:false for TWO different reasons:
         // the model saw a non-receipt image (carries image_description), or every
@@ -372,7 +474,7 @@ const PersonalSpendingPage = () => {
         // case sends the user to pick another image instead.
         const notReceipt = !!data.image_description;
         setScanJob({
-          phase: 'failed', file,
+          phase: 'failed', file, scanId,
           failure: {
             message: data.message || 'That image is not a receipt.',
             code: notReceipt ? 'not_receipt' : 'vision_unavailable',
@@ -382,30 +484,33 @@ const PersonalSpendingPage = () => {
         toast.warning(data.message || 'That image is not a receipt.');
         return;
       }
-      setLatest(data);
-      setHistory((prev) => [data, ...prev].slice(0, 10));
-      await refreshPatterns();
-      await refreshReceipts();
-      setScanJob({ phase: 'done', file, vendor: data.vendor, total: data.total });
-      toast.success('Receipt captured');
-      // Let the success state land, then dismiss (the Latest card shows below).
-      setTimeout(() => setScanJob((j) => (j?.phase === 'done' ? null : j)), 1400);
+      await finishScanSuccess(data, file);
     } catch (err) {
+      // Timeout / network drop: the server may have finished after we gave
+      // up. Reconcile before showing a failure. Clean HTTP error responses
+      // (4xx/5xx) are decisive and fail immediately as before.
+      if (err?.code === 'scan_timeout' || err?.transient) {
+        await reconcileScan(file, scanId, err);
+        return;
+      }
       setScanJob({
-        phase: 'failed', file,
+        phase: 'failed', file, scanId,
         failure: {
           message: err?.message || 'Receipt scan failed',
           code: err?.code || 'scan_error',
           timestamp: Date.now(),
         },
       });
-      toast.error(err?.message || 'Receipt scan failed');
+      toast.error(err?.message || 'Receipt scan failed', { ttl: 10000 });
     }
   };
 
   // Retry from the failure overlay: re-scan the same image for transient
   // failures; for a "not a receipt" verdict, re-open the picker so the user can
   // choose a different image (re-scanning the same one would just fail again).
+  // The retry reuses the failed attempt's scan_id — if the first attempt DID
+  // save server-side, the backend returns that receipt instantly instead of
+  // scanning (and saving) a duplicate.
   const retryScan = () => {
     const job = scanJob;
     if (!job?.file) { setScanJob(null); return; }
@@ -414,8 +519,20 @@ const PersonalSpendingPage = () => {
       galleryRef.current?.click();
       return;
     }
-    handleScan(job.file);
+    handleScan(job.file, job.scanId || null);
   };
+
+  // Late-arrival dismissal: if the overlay is showing "failed" but a refresh
+  // brings in the receipt this very scan saved (it arrived after the polling
+  // window closed), clear the failure — the scan did succeed.
+  useEffect(() => {
+    if (scanJob?.phase !== 'failed' || !scanJob.scanId) return;
+    const match = (receipts || []).find((r) => r.client_scan_id === scanJob.scanId);
+    if (match) {
+      setScanJob(null);
+      toast.success('That receipt was saved after all — it’s in your ledger.');
+    }
+  }, [receipts, scanJob]);
 
   const handleCameraCapture = async (file) => {
     setShowCamera(false);
@@ -455,9 +572,18 @@ const PersonalSpendingPage = () => {
     id: `receipt:${r.id}`,
     date: r.date || (r.scanned_at || '').slice(0, 10),
     vendor: r.vendor || 'Receipt',
-    category: RECEIPT_CATEGORY_MAP[(r.category || 'other').toLowerCase()] || 'Other',
+    category: RECEIPT_CATEGORY_MAP[(r.category || 'other').toLowerCase()] || 'Uncategorized',
     description: (r.items || []).map((it) => it.name).filter(Boolean).join(', '),
-    amount: Number(r.total) || Number(r.amount) || 0,
+    // amount is ALWAYS the TZS value used by the rollups below. receiptAmountTZS
+    // mirrors the backend: a foreign receipt whose FX is still pending (no
+    // amount_tzs) is valued at 0 here rather than having its printed foreign
+    // `total` summed in as TZS — which would inflate the totals ~2600x. The row
+    // still displays its true '140 USD' via fmtAmount.
+    amount: receiptAmountTZS(r),
+    currency: (r.currency || 'TZS').toUpperCase(),
+    originalAmount: r.original_amount ?? null,
+    fxRate: r.fx_rate ?? null,
+    fxPending: r.fx_pending ?? false,
     source: 'receipt',
     receipt: r,
   }));
@@ -834,7 +960,7 @@ const PersonalSpendingPage = () => {
                               {entry.category}{entry.description ? ` · ${entry.description}` : ''}
                             </p>
                           </div>
-                          <div className="text-sm font-semibold text-exp tabular flex-shrink-0">−{fmtTZS(entry.amount)}</div>
+                          <div className="text-sm font-semibold text-exp tabular flex-shrink-0">−{fmtAmount(entry)}</div>
                           {!isReceipt && (
                             <button
                               onClick={(e) => { e.stopPropagation(); removeManualEntry(entry.id); }}
@@ -981,9 +1107,9 @@ const PersonalSpendingPage = () => {
                 <div className="flex justify-between"><span className="text-txt-3">Vendor</span><span className="font-medium">{latest.vendor || '—'}</span></div>
                 <div className="flex justify-between"><span className="text-txt-3">Date</span><span className="font-medium">{latest.date || '—'}</span></div>
                 <div className="flex justify-between"><span className="text-txt-3">Category</span><Badge color="muted">{latest.category || 'other'}</Badge></div>
-                <div className="flex justify-between"><span className="text-txt-3">Subtotal</span><span className="font-medium">{fmtTZSFull(latest.subtotal)}</span></div>
-                <div className="flex justify-between"><span className="text-txt-3">Tax</span><span className="font-medium">{fmtTZSFull(latest.tax)}</span></div>
-                <div className="flex justify-between text-txt-1"><span>Total</span><span className="font-bold">{fmtTZSFull(latest.total)}</span></div>
+                <div className="flex justify-between"><span className="text-txt-3">Subtotal</span><span className="font-medium">{fmtInCurrency(latest.subtotal, latest.currency)}</span></div>
+                <div className="flex justify-between"><span className="text-txt-3">Tax</span><span className="font-medium">{fmtInCurrency(latest.tax, latest.currency)}</span></div>
+                <div className="flex justify-between text-txt-1"><span>Total</span><span className="font-bold">{fmtAmount(latest, { full: true })}</span></div>
               </div>
               <div>
                 <p className="text-xs text-txt-3 mb-2">Line items</p>
@@ -991,7 +1117,7 @@ const PersonalSpendingPage = () => {
                   {(latest.items || []).map((item, idx) => (
                     <div key={idx} className="flex items-center justify-between py-1 border-b border-bdr/30 last:border-0 text-xs">
                       <span className="text-txt-2">{item.name || '—'} {item.quantity ? `×${item.quantity}` : ''} {item.unit || ''}</span>
-                      <span className="font-medium">{fmtTZSFull(item.price)}</span>
+                      <span className="font-medium">{fmtInCurrency(item.price, latest.currency)}</span>
                     </div>
                   ))}
                   {(!latest.items || latest.items.length === 0) && (
@@ -1144,7 +1270,16 @@ const PersonalSpendingPage = () => {
           busy={scanning}
         />
 
-        <EntryDetailModal entry={selected} onClose={() => setSelected(null)} />
+        <EntryDetailModal
+          entry={selected}
+          onClose={() => setSelected(null)}
+          onDeleteReceipt={async (id) => {
+            await deleteReceipt(id);
+            toast.success('Receipt deleted');
+            setSelected(null);
+            await refreshReceipts();
+          }}
+        />
 
         <ScanOverlay job={scanJob} onRetry={retryScan} onClose={() => setScanJob(null)} />
       </div>
@@ -1247,13 +1382,17 @@ const SpendTrend = ({ series, th }) => {
   return <ChartJS type="line" data={data} options={options} height={170} ariaLabel="Daily spending trend" />;
 };
 
-const EntryDetailModal = ({ entry, onClose }) => {
+const EntryDetailModal = ({ entry, onClose, onDeleteReceipt }) => {
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  useEffect(() => { setConfirmDel(false); }, [entry?.id]);
   if (!entry) return null;
   const isReceipt = entry.source === 'receipt';
   const items = isReceipt && Array.isArray(entry.receipt?.items) ? entry.receipt.items : [];
   const amount = Number(entry.amount) || 0;
   const subtotal = Number(entry.receipt?.subtotal) || 0;
   const tax = Number(entry.receipt?.tax) || 0;
+  const currency = (entry.currency || entry.receipt?.currency || 'TZS').toUpperCase();
   return (
     <Modal
       open={!!entry}
@@ -1276,7 +1415,7 @@ const EntryDetailModal = ({ entry, onClose }) => {
           )}
           <div className="flex items-center justify-between pt-2 border-t border-bdr/30 mt-2">
             <span className="text-sm text-txt-3">Amount</span>
-            <span className="text-base font-bold text-exp tabular">−{fmtTZSFull(amount)}</span>
+            <span className="text-base font-bold text-exp tabular">−{fmtAmount(entry, { full: true })}</span>
           </div>
         </div>
 
@@ -1284,11 +1423,11 @@ const EntryDetailModal = ({ entry, onClose }) => {
           <div className="grid grid-cols-2 gap-3 text-sm">
             <div className="bg-surface-4/30 rounded-lg p-3">
               <div className="text-[11px] font-mono uppercase tracking-ticker text-txt-3 mb-1">Subtotal</div>
-              <div className="font-semibold tabular">{fmtTZSFull(subtotal)}</div>
+              <div className="font-semibold tabular">{fmtInCurrency(subtotal, currency)}</div>
             </div>
             <div className="bg-surface-4/30 rounded-lg p-3">
               <div className="text-[11px] font-mono uppercase tracking-ticker text-txt-3 mb-1">Tax</div>
-              <div className="font-semibold tabular">{fmtTZSFull(tax)}</div>
+              <div className="font-semibold tabular">{fmtInCurrency(tax, currency)}</div>
             </div>
           </div>
         )}
@@ -1316,11 +1455,48 @@ const EntryDetailModal = ({ entry, onClose }) => {
                         </div>
                       </div>
                       {price > 0 && (
-                        <span className="text-xs font-mono tabular shrink-0">{fmtTZSFull(price)}</span>
+                        <span className="text-xs font-mono tabular shrink-0">{fmtInCurrency(price, currency)}</span>
                       )}
                     </div>
                   );
                 })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Receipts had no delete path at all until now, so a bad scan was
+            permanent. Two-step rather than type-to-confirm: one receipt is
+            low-stakes and trivially re-scanned. */}
+        {isReceipt && entry.receipt?.id && (
+          <div className="pt-1 border-t border-bdr/30">
+            {!confirmDel ? (
+              <button
+                type="button"
+                onClick={() => setConfirmDel(true)}
+                className="press focus-ring mt-4 w-full text-sm font-medium px-4 py-2.5 rounded-lg bg-surface-3 text-dng border border-dng/25 hover:bg-dng/10 transition-colors"
+              >
+                Delete this receipt
+              </button>
+            ) : (
+              <div className="mt-4 flex items-center gap-2">
+                <button
+                  type="button" disabled={deleting}
+                  onClick={async () => {
+                    setDeleting(true);
+                    try { await onDeleteReceipt(entry.receipt.id); } finally { setDeleting(false); }
+                  }}
+                  className="press focus-ring flex-1 text-sm font-semibold px-4 py-2.5 rounded-lg bg-dng text-white hover:bg-dng/90 transition-colors disabled:opacity-50"
+                >
+                  {deleting ? 'Deleting…' : 'Delete forever'}
+                </button>
+                <button
+                  type="button" disabled={deleting}
+                  onClick={() => setConfirmDel(false)}
+                  className="press focus-ring text-sm font-medium px-4 py-2.5 rounded-lg bg-surface-3 text-txt-2 border border-bdr hover:bg-surface-4 transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
               </div>
             )}
           </div>

@@ -202,7 +202,27 @@ const SignUpPage = () => {
                   onChange={(event) => setValue('terms', event.target.checked)}
                   className="rounded border-bdr bg-surface-3 text-accent mt-0.5"
                 />
-                <span>{t('auth.terms')}</span>
+                {/* Both documents are reachable from here — asking someone to
+                    agree to terms they cannot open is not meaningful consent.
+                    Links open in a new tab so a half-filled form survives. */}
+                <span>
+                  {t('auth.termsPrefix')}{' '}
+                  <a
+                    href="/terms" target="_blank" rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-accent hover:underline"
+                  >
+                    {t('auth.termsLink')}
+                  </a>
+                  {' '}{t('common.and')}{' '}
+                  <a
+                    href="/privacy" target="_blank" rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-accent hover:underline"
+                  >
+                    {t('auth.privacyLink')}
+                  </a>
+                </span>
               </label>
               {error ? (
                 <div role="alert" className="text-sm text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2">

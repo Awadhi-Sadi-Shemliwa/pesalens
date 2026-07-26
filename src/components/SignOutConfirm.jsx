@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Icon } from './Icon';
 import { Modal, toast } from './common';
 import { navigate, setSignOutConfirmer } from './Router';
-import { signOut } from '../data/api';
+import { signOutWithFeedback } from './FeedbackGate';
 
 /* Modal that asks "Sign out of PesaLens?" when the user presses browser
    Back from /dashboard. Mounted by DashboardPage; the Router's popstate
@@ -25,12 +25,16 @@ const SignOutConfirm = () => {
 
   const handleConfirm = async () => {
     setBusy(true);
+    // Dismiss THIS dialog before awaiting: on a first sign-out the call below
+    // opens the feedback modal, and two stacked dialogs at the same z-index is
+    // a confusing thing to hand someone whose only decision left is answering
+    // the form. The decision this dialog asked about has already been made.
+    setOpen(false);
     try {
-      await signOut();
+      await signOutWithFeedback();
       toast.success('Signed out');
     } finally {
       setBusy(false);
-      setOpen(false);
       // Replace history so Back from /landing exits the tab instead of
       // bouncing back into a now-deauthenticated /dashboard render.
       navigate('/', { replace: true });

@@ -4,7 +4,8 @@ import { Icon } from './Icon';
 import { Mark, ThemeToggle, LanguageToggle } from './common';
 import { useUserType } from '../data/userStore';
 import { useAuth } from '../data/authStore';
-import { fetchMe, signOut } from '../data/api';
+import { fetchMe } from '../data/api';
+import { signOutWithFeedback } from './FeedbackGate';
 import { useT } from '../data/i18n';
 import { MotionProvider, PageBackground } from '../motion';
 
@@ -334,7 +335,9 @@ const AppTopBar = ({ onMenuToggle }) => {
 
   const handleSignOut = async () => {
     setProfileOpen(false);
-    await signOut();
+    // Pauses for the one-time feedback form on a first sign-out, then signs
+    // out. Resolves either way — see components/FeedbackGate.jsx.
+    await signOutWithFeedback();
     navigate('/signin');
   };
 

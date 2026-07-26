@@ -85,10 +85,22 @@ const AnalysisPage = () => {
 
   const openCategory = (category) => { setActiveCat(category); setCatOpen(true); };
 
+  const quality = data?.quality || null;
+  const reviewCount = useMemo(
+    () => transactions.filter((t) => t.needs_review).length,
+    [transactions],
+  );
+
+  const openTxn = (transaction) => {
+    setSelected(transaction);
+    setDrawerOpen(true);
+  };
+
   const filtered = useMemo(() => {
     let txns = [...transactions];
     if (filter === 'income') txns = txns.filter((t) => t.credit);
     if (filter === 'expense') txns = txns.filter((t) => t.debit);
+    if (filter === 'review') txns = txns.filter((t) => t.needs_review);
 
     const q = search.trim().toLowerCase();
     if (q) {
@@ -109,6 +121,14 @@ const AnalysisPage = () => {
     }
     return txns;
   }, [transactions, filter, sort, search]);
+
+  // Clearing the last flagged row removes the Review segment; leaving `filter`
+  // pointing at it would show an empty table under a tab that no longer
+  // exists. Fall back to All, and reset pagination as the set shrinks.
+  useEffect(() => {
+    setPage(0);
+    if (reviewCount === 0) setFilter((f) => (f === 'review' ? 'all' : f));
+  }, [reviewCount]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const currentPage = Math.min(page, totalPages - 1);
@@ -306,6 +326,39 @@ const AnalysisPage = () => {
           </div>
         )}
 
+        {/* Reading confidence — the pipeline's own self-check, surfaced.
+            Read-only: it reports how well the SYSTEM read the statement (our
+            job, not the user's) and points at the two things the user can
+            actually do — upload a cleaner copy, or delete and start over. It
+            must never imply they should correct the numbers themselves. */}
+        {quality && (reviewCount > 0 || quality.balances === false) && (
+          <div className="bento p-4 sm:p-5 border-exp/30">
+            <div className="flex items-start gap-3 flex-wrap">
+              <span className="w-8 h-8 rounded-lg border flex items-center justify-center flex-shrink-0 bg-exp/12 text-exp border-exp/25">
+                <Icon name="alert" size={15} />
+              </span>
+              <div className="flex-1 min-w-[200px]">
+                <Eyebrow>{t('an.rev.eyebrow')}</Eyebrow>
+                <p className="text-sm text-txt-2 mt-1.5 leading-relaxed">
+                  {reviewCount > 0 && `${t('an.rev.flagged').replace('{n}', reviewCount)} `}
+                  {quality.balances === false && quality.net_vs_span_diff != null &&
+                    `${t('an.rev.gap').replace('{amt}', fmtTZSFull(Math.abs(quality.net_vs_span_diff)))} `}
+                  {t('an.rev.remedy')}
+                </p>
+              </div>
+              {reviewCount > 0 && filter !== 'review' && (
+                <button
+                  type="button"
+                  onClick={() => { setFilter('review'); setPage(0); }}
+                  className="press focus-ring text-xs font-medium px-3.5 py-2 rounded-lg bg-accent/12 text-accent border border-accent/25 hover:bg-accent/20 transition-colors"
+                >
+                  {t('an.rev.open')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-3">
           <Segmented
@@ -313,6 +366,11 @@ const AnalysisPage = () => {
               { key: 'all',     label: t('common.all') },
               { key: 'income',  label: t('common.income') },
               { key: 'expense', label: t('common.expense') },
+              // Only offered when the extraction actually flagged something —
+              // an always-present empty queue would read as a broken filter.
+              ...(reviewCount > 0
+                ? [{ key: 'review', label: `${t('an.rev.tab')} · ${reviewCount}` }]
+                : []),
             ]}
             value={filter}
             onChange={(v) => { setFilter(v); setPage(0); }}
@@ -353,7 +411,7 @@ const AnalysisPage = () => {
                 <button
                   key={transaction.row_index}
                   type="button"
-                  onClick={() => { setSelected(transaction); setDrawerOpen(true); }}
+                  onClick={() => openTxn(transaction)}
                   className="w-full text-left px-4 py-3.5 hover:bg-surface-4/40 transition-colors active:bg-surface-4/60"
                 >
                   <div className="flex items-start justify-between gap-3 mb-1.5">
@@ -366,7 +424,10 @@ const AnalysisPage = () => {
                     </div>
                   </div>
                   <div className="flex items-center justify-between gap-2">
-                    <Badge color={isCredit ? 'income' : 'muted'}>{transaction.category || t('an.uncategorized')}</Badge>
+                    <span className="flex items-center gap-1.5 flex-wrap min-w-0">
+                      <Badge color={isCredit ? 'income' : 'muted'}>{transaction.category || t('an.uncategorized')}</Badge>
+                      {transaction.needs_review && <Badge color="danger">{t('an.rev.badge')}</Badge>}
+                    </span>
                     {transaction.balance != null && (
                       <span className="text-[10px] font-mono text-txt-3 tabular">bal · {fmtTZSFull(transaction.balance)}</span>
                     )}
@@ -393,7 +454,7 @@ const AnalysisPage = () => {
                 {pageTxns.map((transaction) => (
                   <tr
                     key={transaction.row_index}
-                    onClick={() => { setSelected(transaction); setDrawerOpen(true); }}
+                    onClick={() => openTxn(transaction)}
                     className="border-b border-bdr/30 hover:bg-surface-4/40 cursor-pointer transition-colors group"
                   >
                     <td className="px-4 lg:px-5 py-3.5 text-txt-3 whitespace-nowrap font-mono text-xs tabular">{transaction.txn_date || '—'}</td>
@@ -401,7 +462,10 @@ const AnalysisPage = () => {
                       {transaction.description || '—'}
                     </td>
                     <td className="px-4 lg:px-5 py-3.5">
-                      <Badge color={transaction.credit ? 'income' : 'muted'}>{transaction.category || t('an.uncategorized')}</Badge>
+                      <span className="flex items-center gap-1.5 flex-wrap">
+                        <Badge color={transaction.credit ? 'income' : 'muted'}>{transaction.category || t('an.uncategorized')}</Badge>
+                        {transaction.needs_review && <Badge color="danger">{t('an.rev.badge')}</Badge>}
+                      </span>
                     </td>
                     <td className="px-4 lg:px-5 py-3.5 text-right text-exp tabular font-medium">{transaction.debit ? fmtTZSFull(transaction.debit) : <span className="text-txt-4">—</span>}</td>
                     <td className="px-4 lg:px-5 py-3.5 text-right text-inc tabular font-medium">{transaction.credit ? fmtTZSFull(transaction.credit) : <span className="text-txt-4">—</span>}</td>
@@ -432,8 +496,22 @@ const AnalysisPage = () => {
               <div className="p-4 bg-surface-3 rounded-xl border border-bdr">
                 <div className="text-xs text-txt-3 mb-1 font-mono tabular">{selected.txn_date || '—'}</div>
                 <div className="text-lg font-bold mb-2 text-txt-1 break-words">{selected.description || '—'}</div>
-                <Badge color={selected.credit ? 'income' : 'muted'}>{selected.category || t('an.uncategorized')}</Badge>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Badge color={selected.credit ? 'income' : 'muted'}>{selected.category || t('an.uncategorized')}</Badge>
+                  {selected.needs_review && <Badge color="danger">{t('an.rev.badge')}</Badge>}
+                </div>
               </div>
+
+              {/* Why the extractor was unsure about this row. Shown, not
+                  actionable: the user's remedy is a cleaner upload, not
+                  retyping the bank's figures. */}
+              {selected.needs_review && selected.review_reason && (
+                <div className="p-3.5 rounded-xl border border-exp/25 bg-exp/8">
+                  <Eyebrow>{t('an.rev.why')}</Eyebrow>
+                  <p className="text-sm text-txt-2 mt-1.5 leading-relaxed">{selected.review_reason}</p>
+                </div>
+              )}
+
               <div className="space-y-3 text-sm">
                 <div className="flex justify-between py-2 border-b border-bdr/50">
                   <span className="text-txt-2">{t('common.debit')}</span>
@@ -486,7 +564,7 @@ const AnalysisPage = () => {
                     <button
                       key={transaction.row_index}
                       type="button"
-                      onClick={() => { setCatOpen(false); setSelected(transaction); setDrawerOpen(true); }}
+                      onClick={() => { setCatOpen(false); openTxn(transaction); }}
                       className="w-full text-left px-1 py-3 hover:bg-surface-4/40 transition-colors"
                     >
                       <div className="flex items-start justify-between gap-3 mb-1">
