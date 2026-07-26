@@ -19,7 +19,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db import AuditLog, User, get_db
+from app.db import AuditLog, ErrorLog, User, get_db
 from app.deps import get_current_user
 from app.rate_limit import limiter
 from app.schemas.response import APIResponse
@@ -703,23 +703,80 @@ _ACTIVITY_TITLES = {
     "upload_failed": "Statement extraction failed",
     "manual_payment_confirm_requested": "Payment confirmation requested",
     "manual_payment_confirmed": "Subscription activated",
+    # Destructive acts. These are the ones a user most needs to be able to
+    # look up later — "where did that receipt go" has an answer now, and it
+    # carries the vendor and amount in `details` so the answer is specific.
+    "receipt_deleted": "Receipt deleted",
+    "personal_entry_deleted": "Spending entry deleted",
+    "business_entry_deleted": "Ledger entry deleted",
+    "statement_delete": "Statement deleted",
+    "data_start_over": "All statement data cleared",
+    "account_deleted": "Account deleted",
+    # Things that went wrong. Shown to the user deliberately: a scan that
+    # failed silently is the single most confusing thing this product does.
+    "receipt_scanned": "Receipt scanned",
+    "receipt_scan_failed": "Receipt scan failed",
+    "client_error": "App reported a problem",
+    "feedback_submitted": "Feedback sent",
+}
+
+# Events whose row should read as a FAILURE in the user's own feed, so the
+# timeline distinguishes "this happened" from "this went wrong" without the
+# client having to keep its own copy of the list.
+_ACTIVITY_FAILURES = {
+    "upload_failed", "receipt_scan_failed", "signin_failure",
+    "client_error", "refresh_reuse_detected",
+}
+
+# User-facing titles for error codes. Deliberately plain: the operator's
+# console gets the technical message (model ids, quota codes, exception
+# types), the user gets what happened in their own terms. An unmapped code
+# falls back to "Something went wrong" rather than leaking the raw code.
+_ERROR_TITLES = {
+    "server_error": "The app hit an unexpected error",
+    "receipt_scan_failed": "A receipt could not be read",
+    "receipt_delete_failed": "A receipt could not be fully deleted",
+    "receipt_file_orphaned": "A deleted receipt left a file behind",
+    "extraction_empty": "No transactions could be read from a statement",
+    "pdf_unlock_failed": "A locked PDF could not be opened",
+    "pdf_unlock_unsupported": "That PDF's protection is not supported",
+    "client_error": "The app reported a problem",
 }
 
 
 @router.get("/me/activity", response_model=APIResponse)
 def my_activity(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Per-user activity history — a transparent, timestamped log of what this
-    account did (sign-ins, password changes, uploads, payments). Reads the
-    append-only AuditLog, newest first."""
-    rows = (
+    """Per-user timeline — what this account did, AND what went wrong for it.
+
+    One merged, newest-first list over two append-only tables: AuditLog (what
+    the account did — sign-ins, uploads, deletions) and this user's own
+    ErrorLog rows (what failed for them — a scan the vision models could not
+    read, an extraction that died at 60%).
+
+    Merging them is the point. Kept apart, a user sees "receipt scan" in their
+    history with no hint that it failed, and the failure lives only in a
+    console they cannot open. Together the timeline answers the question people
+    actually ask support: *what happened to my thing, and when*. Every error
+    row carries a `ref` the operator can search for in the owner console, so a
+    user quoting it lands on the exact row.
+    """
+    audit_rows = (
         db.query(AuditLog)
         .filter(AuditLog.user_id == user.id)
         .order_by(AuditLog.created_at.desc())
         .limit(100)
         .all()
     )
+    error_rows = (
+        db.query(ErrorLog)
+        .filter(ErrorLog.user_id == user.id)
+        .order_by(ErrorLog.created_at.desc())
+        .limit(50)
+        .all()
+    )
+
     items = []
-    for r in rows:
+    for r in audit_rows:
         details = None
         if r.details:
             try:
@@ -728,13 +785,33 @@ def my_activity(user: User = Depends(get_current_user), db: Session = Depends(ge
             except Exception:  # noqa: BLE001
                 details = None
         items.append({
-            "id": r.id,
+            "id": f"a{r.id}",
+            "kind": "activity",
             "event": r.event,
             "title": _ACTIVITY_TITLES.get(r.event, r.event.replace("_", " ").capitalize()),
+            "failed": r.event in _ACTIVITY_FAILURES,
             "details": details,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         })
-    return APIResponse(success=True, message="ok", data={"activity": items})
+    for e in error_rows:
+        items.append({
+            "id": f"e{e.id}",
+            "kind": "issue",
+            "event": e.error_code,
+            "title": _ERROR_TITLES.get(e.error_code, "Something went wrong"),
+            "failed": True,
+            # The operator-facing message can name models, quotas and stack
+            # types. Users get the stage they can act on plus a reference —
+            # enough to be told the truth, not enough to leak our internals.
+            "stage": e.stage,
+            "progress": e.progress,
+            "ref": f"ERR-{e.id}",
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        })
+    # One ordering over both sources. Sorted on the ISO strings, which are
+    # fixed-width UTC and therefore sort identically to the timestamps.
+    items.sort(key=lambda i: i.get("created_at") or "", reverse=True)
+    return APIResponse(success=True, message="ok", data={"activity": items[:120]})
 
 
 @router.delete("/me", response_model=APIResponse)

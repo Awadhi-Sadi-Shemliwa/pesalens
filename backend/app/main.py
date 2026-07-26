@@ -21,7 +21,7 @@ from app.middleware import (
     SecurityHeadersMiddleware,
 )
 from app.rate_limit import limiter
-from app.routers import admin, assistant, auth, banks, billing, business, dashboard, markets, personal, receipts, reconcile, upload
+from app.routers import admin, assistant, auth, banks, billing, business, dashboard, feedback, markets, personal, receipts, reconcile, upload
 from app.services.market_scheduler import shutdown_scheduler, start_scheduler
 from app.utils.logger import get_logger
 from app.utils.storage import ensure_dirs
@@ -67,6 +67,16 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         # Market scheduler is optional — backend still serves the rest of the API.
         log.warning("Market scheduler did not start: %s", exc)
+    # Warm the FX spot cache off the event loop. Fire-and-forget: every receipt
+    # aggregate values foreign receipts from cache only, so an empty cache is a
+    # silent zero rather than a missing nicety — but it must never delay boot.
+    try:
+        import asyncio
+        from fastapi.concurrency import run_in_threadpool
+        from app.services.fx import warm_spot_cache
+        asyncio.create_task(run_in_threadpool(warm_spot_cache))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("FX spot warm-up skipped: %s", exc)
     log.info(
         "PesaLens backend started (env=%s origins=%s)",
         settings.environment, settings.cors_origins,
@@ -137,6 +147,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
                 method=request.method,
                 error_code="server_error",
                 message=f"{type(exc).__name__}: {exc}"[:2000],
+                source="server",
             ))
     except Exception:  # noqa: BLE001 - logging must never mask the original error
         log.debug("Failed to persist ErrorLog", exc_info=True)
@@ -157,6 +168,7 @@ app.include_router(markets.router, prefix="/api")
 app.include_router(billing.router, prefix="/api")
 app.include_router(reconcile.router, prefix="/api")
 app.include_router(banks.router, prefix="/api")
+app.include_router(feedback.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 
