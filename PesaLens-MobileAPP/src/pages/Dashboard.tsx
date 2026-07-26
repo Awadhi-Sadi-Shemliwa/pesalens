@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import {
   AlertCircle,
   AlertTriangle,
@@ -12,14 +13,15 @@ import {
   Plus,
   RefreshCw,
   Sparkles,
+  Trash2,
   Upload as UploadIcon,
 } from "lucide-react";
-import { Badge, Bento, CardSoft, EmptyState, ErrorState, Eyebrow, InfoHint, Section, Skeleton } from "@/components/pl/primitives";
+import { Badge, Bento, CardSoft, EmptyState, ErrorState, Eyebrow, InfoHint, Section, Sheet, Skeleton } from "@/components/pl/primitives";
 import { KpiTile, Sparkline } from "@/components/pl/KpiTile";
 import { IncomeExpenseChart } from "@/components/pl/IncomeExpenseChart";
 import { SpendingBreakdown } from "@/components/pl/SpendingBreakdown";
 // @ts-ignore — JS modules
-import { fetchDashboardSummary, fetchStatementIndex, fetchBankIntel, fmtTZS } from "@/data/api";
+import { fetchDashboardSummary, fetchStatementIndex, fetchBankIntel, fetchDeleteImpact, deleteStatement, fmtTZS } from "@/data/api";
 // @ts-ignore — JS module
 import { setActiveStatement } from "@/data/activeStatementStore";
 import { bankLabel as sharedBankLabel } from "@/data/bankLabels";
@@ -165,7 +167,124 @@ const MoneyMap = ({ intel, focus, onFocus }: { intel: any; focus: string; onFocu
 
 /* StatementTimeline — upload history grouped Recent vs Past (Slice 3, Part K).
    Tapping focuses the statement and opens Analysis. */
-const StatementTimeline = ({ statements, onOpen }: { statements: any[]; onOpen: (jobId: string) => void }) => {
+/* Type-to-confirm delete. Deleting a statement also removes the receipts filed
+   against it and the entries scoped to it, so the sheet states those COUNTS
+   (fetched, not guessed) first. Typing DELETE is deliberate friction: this is
+   irreversible and a stray tap on a phone must not trigger it. */
+const CONFIRM_WORD = "DELETE";
+
+const DeleteStatementSheet = ({ statement, onClose, onDeleted }: {
+  statement: any | null;
+  onClose: () => void;
+  onDeleted: (jobId: string) => void;
+}) => {
+  const [impact, setImpact] = useState<any>(null);
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!statement) return;
+    setImpact(null); setTyped(""); setError(null);
+    let cancelled = false;
+    fetchDeleteImpact(statement.job_id)
+      .then((d: any) => { if (!cancelled) setImpact(d); })
+      // Counts are a courtesy, not a gate — if the lookup fails the user can
+      // still delete, they just don't get the breakdown.
+      .catch(() => { if (!cancelled) setImpact({}); });
+    return () => { cancelled = true; };
+  }, [statement?.job_id]);
+
+  if (!statement) return null;
+  const armed = typed.trim().toUpperCase() === CONFIRM_WORD && !busy;
+
+  const confirm = async () => {
+    if (!armed) return;
+    setBusy(true); setError(null);
+    try {
+      await deleteStatement(statement.job_id);
+      toast.success("Statement deleted");
+      onDeleted(statement.job_id);
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || "Could not delete this statement.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const label = statement.period_start
+    ? `${statement.period_start} → ${statement.period_end || "—"}`
+    : (statement.filename || "this statement");
+
+  return (
+    <Sheet open={!!statement} onClose={busy ? () => {} : onClose} eyebrow="Delete" title="Delete this statement?">
+      <div className="space-y-4">
+        <div className="bg-surface-3/50 rounded-2xl p-4">
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <Badge tone="muted">{bankLabel(statement.bank)}</Badge>
+            <span className="text-[13px] font-medium truncate">{label}</span>
+          </div>
+          <p className="text-[11px] text-txt-3 font-mono-tab truncate">{statement.filename || statement.job_id}</p>
+        </div>
+
+        <div className="rounded-2xl border border-dng/25 bg-dng/8 p-4">
+          <p className="text-[13px] text-txt-2 leading-relaxed">
+            This permanently deletes the statement
+            {impact?.transactions ? ` and its ${impact.transactions} transactions` : ""}
+            {impact?.receipts ? `, ${impact.receipts} receipt scan${impact.receipts === 1 ? "" : "s"}` : ""}
+            {impact?.personal_entries ? ` and ${impact.personal_entries} personal ${impact.personal_entries === 1 ? "entry" : "entries"}` : ""}
+            . <span className="text-dng font-semibold">This cannot be undone.</span>
+          </p>
+          {!impact && <p className="text-[11px] text-txt-3 mt-2">Checking what’s attached…</p>}
+        </div>
+
+        <label className="block">
+          <span className="text-[11px] font-mono-tab uppercase tracking-wider text-txt-3">
+            Type {CONFIRM_WORD} to confirm
+          </span>
+          <input
+            type="text"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            autoComplete="off"
+            autoCapitalize="characters"
+            spellCheck={false}
+            placeholder={CONFIRM_WORD}
+            className="mt-1 w-full bg-surface-3 border border-border rounded-xl px-3 py-2.5 text-[14px] tracking-[0.2em] font-mono-tab"
+          />
+        </label>
+
+        {error && <p className="text-[13px] text-dng">{error}</p>}
+
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={confirm}
+            disabled={!armed}
+            className="flex-1 ios-press rounded-xl bg-dng/15 text-dng border border-dng/30 py-2.5 text-[13px] font-semibold disabled:opacity-40"
+          >
+            {busy ? "Deleting…" : "Delete permanently"}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy}
+            className="ios-press rounded-xl bg-surface-3 text-txt-2 border border-border px-4 py-2.5 text-[13px] font-semibold disabled:opacity-50"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Sheet>
+  );
+};
+
+const StatementTimeline = ({ statements, onOpen, onDelete }: {
+  statements: any[];
+  onOpen: (jobId: string) => void;
+  onDelete: (statement: any) => void;
+}) => {
   if (!statements || statements.length === 0) return null;
   const groups = [
     { key: "recent", label: "Recent", rows: statements.filter((s) => s.recency === "recent") },
@@ -187,21 +306,36 @@ const StatementTimeline = ({ statements, onOpen }: { statements: any[]; onOpen: 
             <div className="text-[10px] text-txt-3 font-mono-tab uppercase tracking-wider mb-1.5">{g.label}</div>
             <div className="space-y-2">
               {g.rows.map((s) => (
-                <button
+                /* Row is a button; delete sits BESIDE it, not inside — nesting
+                   buttons is invalid HTML and would fire the destructive
+                   action on an ordinary row tap. */
+                <div
                   key={s.job_id}
-                  type="button"
-                  onClick={() => onOpen(s.job_id)}
-                  className="press w-full text-left flex items-center gap-3 bg-surface-2 rounded-2xl p-3"
+                  className="flex items-center gap-1 bg-surface-2 rounded-2xl pr-2"
                 >
-                  <Badge tone={g.key === "recent" ? "accent" : "muted"}>{bankLabel(s.bank)}</Badge>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-medium truncate">
-                      {s.period_start ? `${s.period_start} → ${s.period_end || "—"}` : (s.filename || "Statement")}
+                  <button
+                    type="button"
+                    onClick={() => onOpen(s.job_id)}
+                    className="press flex-1 min-w-0 text-left flex items-center gap-3 p-3"
+                  >
+                    <Badge tone={g.key === "recent" ? "accent" : "muted"}>{bankLabel(s.bank)}</Badge>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-medium truncate">
+                        {s.period_start ? `${s.period_start} → ${s.period_end || "—"}` : (s.filename || "Statement")}
+                      </div>
+                      <div className="text-[10px] text-txt-3 font-mono-tab">{s.txn_count || 0} txns · {fmtDay(s.created_at)}</div>
                     </div>
-                    <div className="text-[10px] text-txt-3 font-mono-tab">{s.txn_count || 0} txns · {fmtDay(s.created_at)}</div>
-                  </div>
-                  <ArrowUpRight className="w-4 h-4 text-txt-4 shrink-0" />
-                </button>
+                    <ArrowUpRight className="w-4 h-4 text-txt-4 shrink-0" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDelete(s)}
+                    aria-label={`Delete statement ${s.filename || s.job_id}`}
+                    className="press shrink-0 w-9 h-9 rounded-xl flex items-center justify-center text-txt-4 active:bg-dng/10 active:text-dng"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               ))}
             </div>
           </div>
@@ -216,6 +350,9 @@ const Dashboard = () => {
   // Statement selector: null selection = latest upload (default).
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [selectorOpen, setSelectorOpen] = useState(false);
+  // The statement queued for deletion (null = sheet closed).
+  const [pendingDelete, setPendingDelete] = useState<any | null>(null);
+  const queryClient = useQueryClient();
   const selectStatement = (jobId: string) => {
     setSelectedJobId(jobId);
     setActiveStatement(jobId || null);
@@ -539,6 +676,27 @@ const Dashboard = () => {
       <StatementTimeline
         statements={statements}
         onOpen={(jobId: string) => { setActiveStatement(jobId); navigate(`/analysis?job_id=${encodeURIComponent(jobId)}`); }}
+        onDelete={(s: any) => setPendingDelete(s)}
+      />
+
+      <DeleteStatementSheet
+        statement={pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onDeleted={(jobId: string) => {
+          // The dashboard may be scoped to the statement that just vanished —
+          // drop back to "latest" rather than re-requesting a dead job_id.
+          if (selectedJobId === jobId) {
+            setSelectedJobId(null);
+            setActiveStatement(null);
+          }
+          // Receipts and entries went with it, so every derived view is stale.
+          queryClient.invalidateQueries({ queryKey: ["statements-index"] });
+          queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
+          queryClient.invalidateQueries({ queryKey: ["receipts"] });
+          queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
+          queryClient.invalidateQueries({ queryKey: ["personal-entries"] });
+          queryClient.invalidateQueries({ queryKey: ["uploads", "done"] });
+        }}
       />
 
       {/* Action Plan — Chase-style gradient card */}

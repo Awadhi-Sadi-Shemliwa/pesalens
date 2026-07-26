@@ -31,6 +31,7 @@ import NotFound from "@/pages/NotFound";
 import { useBackButton } from "@/hooks/use-back-button";
 import { useBackgroundSignout } from "@/hooks/use-background-signout";
 import { ErrorBoundary } from "@/components/pl/ErrorBoundary";
+import FeedbackGate from "@/components/pl/FeedbackGate";
 // @ts-ignore — pure JS module shared with the web client
 import { useAuth, bootSession } from "@/data/authStore";
 // @ts-ignore — pure JS module shared with the web client
@@ -174,6 +175,12 @@ const App = () => {
 
           <Route path="*" element={<NotFound />} />
         </Routes>
+        {/* Feedback prompt, shared by every trigger — sign-out, a finished
+            extraction, the Upgrade card, the Profile button. Inside the router
+            (it needs no routing itself) but OUTSIDE <Routes>, so the sheet
+            survives the navigation that Upload fires on success instead of
+            being unmounted mid-animation. */}
+        <FeedbackGate />
       </BrowserRouter>
       </GlobalAutoTranslate>
     </TooltipProvider>

@@ -1,11 +1,13 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpRight, BookOpen, Camera, Receipt as ReceiptIcon, RefreshCw } from "lucide-react";
+import { ArrowUpRight, BookOpen, Camera, Receipt as ReceiptIcon, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge, CardSoft, EmptyState, Eyebrow, Section, Sheet, Skeleton } from "@/components/pl/primitives";
 // @ts-ignore — JS modules
-import { fetchReceiptPatterns, fetchReceipts, scanReceipt, fmtTZSFull } from "@/data/api";
+import { fetchReceiptPatterns, fetchReceipts, scanReceipt, fetchReceiptByScan, deleteReceipt, fmtTZSFull, fmtAmount, fmtInCurrency } from "@/data/api";
+// @ts-ignore — JS module
+import { getActiveStatement } from "@/data/activeStatementStore";
 
 const formatReceiptDate = (raw: any) => {
   if (!raw) return "—";
@@ -26,10 +28,21 @@ const formatReceiptDate = (raw: any) => {
 const ReceiptDetailDrawer = ({
   receipt,
   onClose,
+  onDelete,
 }: {
   receipt: any | null;
   onClose: () => void;
+  onDelete: (receiptId: string) => Promise<void>;
 }) => {
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  /* Disarm the two-step delete whenever the sheet changes subject. The lastRef
+     retain below means this component NEVER unmounts once it has shown a
+     receipt, so useState is never reinitialised: without this, arming "Delete
+     forever" on receipt A and then opening receipt B renders B's sheet already
+     armed — one tap from destroying the wrong record. Keyed off the `receipt`
+     PROP, not lastRef.current, so it also fires on close. */
+  useEffect(() => { setConfirmDel(false); }, [receipt?.id]);
   /* Retain the last receipt so the sheet still has content to render while it
      animates out — clearing it on close would make the panel blank mid-exit. */
   const lastRef = useRef<any>(receipt);
@@ -37,7 +50,6 @@ const ReceiptDetailDrawer = ({
   const r = lastRef.current;
 
   const items: any[] = Array.isArray(r?.items) ? r.items : [];
-  const total = Number(r?.total) || Number(r?.amount) || 0;
   const subtotal = Number(r?.subtotal) || 0;
   const tax = Number(r?.tax) || 0;
 
@@ -61,8 +73,11 @@ const ReceiptDetailDrawer = ({
             <div className="px-5 py-3 ios-group-item">
               <div className="flex items-center justify-between">
                 <span className="text-[14px] text-txt-3">Total</span>
+                {/* fmtAmount, not fmtTZSFull: `total` is in the currency
+                    PRINTED on the receipt, so a 140-USD fee would otherwise
+                    render as "TZS 140". This shows both sides of the rate. */}
                 <span className="font-mono-tab font-bold tabular text-[16px] text-exp">
-                  − {fmtTZSFull(total)}
+                  − {fmtAmount(r, { full: true })}
                 </span>
               </div>
             </div>
@@ -70,7 +85,8 @@ const ReceiptDetailDrawer = ({
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-center justify-between">
                   <span className="text-[14px] text-txt-3">Subtotal</span>
-                  <span className="font-mono-tab tabular text-[14px]">{fmtTZSFull(subtotal)}</span>
+                  {/* Sub-amounts stay in the printed currency — see fmtInCurrency. */}
+                  <span className="font-mono-tab tabular text-[14px]">{fmtInCurrency(subtotal, r.currency)}</span>
                 </div>
               </div>
             )}
@@ -78,7 +94,7 @@ const ReceiptDetailDrawer = ({
               <div className="px-5 py-3 ios-group-item">
                 <div className="flex items-center justify-between">
                   <span className="text-[14px] text-txt-3">Tax</span>
-                  <span className="font-mono-tab tabular text-[14px]">{fmtTZSFull(tax)}</span>
+                  <span className="font-mono-tab tabular text-[14px]">{fmtInCurrency(tax, r.currency)}</span>
                 </div>
               </div>
             )}
@@ -126,13 +142,48 @@ const ReceiptDetailDrawer = ({
                         </div>
                         {price > 0 && (
                           <span className="font-mono-tab tabular text-[13px] shrink-0">
-                            {fmtTZSFull(price)}
+                            {fmtInCurrency(price, r.currency)}
                           </span>
                         )}
                       </div>
                     </div>
                   );
                 })}
+              </div>
+            )}
+          </div>
+
+          {/* Until now a receipt could be created but never removed, so a bad
+              scan was permanent. Two-step (not type-to-confirm): one receipt
+              is low-stakes and easy to re-scan. */}
+          <div className="pt-1">
+            {!confirmDel ? (
+              <button
+                type="button"
+                onClick={() => setConfirmDel(true)}
+                className="w-full ios-press flex items-center justify-center gap-2 text-[13px] text-dng border border-dng/30 rounded-xl py-2.5"
+              >
+                <Trash2 className="w-4 h-4" /> Delete this receipt
+              </button>
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  type="button" disabled={deleting}
+                  onClick={async () => {
+                    setDeleting(true);
+                    try { await onDelete(r.id); } finally { setDeleting(false); }
+                  }}
+                  className="flex-1 bg-dng text-white py-2.5 rounded-xl text-[13px] font-semibold disabled:opacity-50"
+                >
+                  {deleting ? "Deleting…" : "Delete forever"}
+                </button>
+                <button
+                  type="button" disabled={deleting}
+                  onClick={() => setConfirmDel(false)}
+                  className="flex-1 bg-surface-3 border border-border text-txt-2 py-2.5 rounded-xl text-[13px]"
+                >
+                  Cancel
+                </button>
               </div>
             )}
           </div>
@@ -144,7 +195,13 @@ const ReceiptDetailDrawer = ({
 const Bookkeeping = () => {
   const queryClient = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
-  const [scanning, setScanning] = useState(false);
+  // 'idle' | 'scanning' | 'reconciling'. `reconciling` means the request died
+  // but the server may still have saved — see handleScan.
+  const [scanPhase, setScanPhase] = useState<"idle" | "scanning" | "reconciling">("idle");
+  const scanning = scanPhase !== "idle";
+  // The last attempt, so a retry reuses its scan_id and the backend returns
+  // the already-saved receipt instead of scanning (and charging) twice.
+  const lastScanRef = useRef<{ file: File; scanId: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [latest, setLatest] = useState<any>(null);
   const [selected, setSelected] = useState<any | null>(null);
@@ -152,28 +209,81 @@ const Bookkeeping = () => {
   const patternsQuery = useQuery({ queryKey: ["receipt-patterns"], queryFn: fetchReceiptPatterns });
   const receiptsQuery = useQuery({ queryKey: ["receipts"], queryFn: fetchReceipts });
 
-  const handleScan = async (file: File | null) => {
+  const finishScanSuccess = (data: any) => {
+    setLatest(data);
+    setError(null);
+    lastScanRef.current = null;
+    queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
+    queryClient.invalidateQueries({ queryKey: ["receipts"] });
+    toast.success("Receipt captured", { description: data?.vendor || undefined });
+  };
+
+  // A timed-out/aborted request does NOT mean the scan failed: the server may
+  // have saved the receipt after the app gave up. Declaring failure here is
+  // what produced the old "failed… then the receipt appears anyway" whiplash —
+  // and on a phone network it is the common case, not the edge case.
+  const reconcileScan = async (scanId: string, originalErr: any) => {
+    setScanPhase("reconciling");
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const res = await fetchReceiptByScan(scanId);
+        if (res?.found && res.receipt) {
+          finishScanSuccess(res.receipt);
+          return;
+        }
+      } catch {
+        // The lookup itself failing (still offline) — keep trying until the
+        // window closes rather than turning it into a scan failure.
+      }
+    }
+    setError(originalErr?.message || "Receipt scan failed.");
+    toast.error("Receipt scan failed", { description: originalErr?.message });
+  };
+
+  const handleScan = async (file: File | null, existingScanId: string | null = null) => {
     if (!file) return;
-    setScanning(true);
+    // Idempotency key for this attempt; a retry reuses it.
+    const scanId = existingScanId
+      || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID()
+          : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`);
+    lastScanRef.current = { file, scanId };
+    setScanPhase("scanning");
     setError(null);
     try {
-      const data = await scanReceipt(file);
+      // Scope the receipt to the statement the user is focused on. Without
+      // this, every Bookkeeping scan was saved unattached — it still SHOWED
+      // under the newest statement, but deleting that statement left it
+      // behind. A null focus stays null: the backend does NOT substitute the
+      // newest statement (see _resolve_statement_job), because that would make
+      // a receipt scanned outside any statement a child of whatever was
+      // uploaded last, and deleting that statement would take its image with
+      // it. Unattached is the honest answer when the user has picked nothing.
+      const data = await scanReceipt(file, { statementJobId: getActiveStatement(), scanId });
       if (data?.is_receipt === false) {
         const message = data.message || "That image is not a receipt.";
         setError(message);
         toast.warning("Not a receipt", { description: message });
         return;
       }
-      setLatest(data);
-      queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
-      queryClient.invalidateQueries({ queryKey: ["receipts"] });
-      toast.success("Receipt captured", { description: data?.vendor || undefined });
+      finishScanSuccess(data);
     } catch (err: any) {
+      // Timeout / network drop: the server may have finished after we gave up.
+      // Clean HTTP error responses (4xx/5xx) are decisive and fail at once.
+      if (err?.code === "scan_timeout" || err?.transient) {
+        await reconcileScan(scanId, err);
+        return;
+      }
       setError(err?.message || "Receipt scan failed.");
       toast.error("Receipt scan failed", { description: err?.message });
     } finally {
-      setScanning(false);
+      setScanPhase("idle");
     }
+  };
+
+  const retryScan = () => {
+    const last = lastScanRef.current;
+    if (last?.file) handleScan(last.file, last.scanId);
   };
 
   const patterns = (patternsQuery.data as any) || { insights: [], by_category: {}, receipt_count: 0 };
@@ -202,7 +312,9 @@ const Bookkeeping = () => {
           <span className="w-11 h-11 rounded-2xl bg-accent/15 text-accent flex items-center justify-center">
             <Camera className="w-5 h-5" />
           </span>
-          <span className="text-[13px] font-semibold">{scanning ? "Scanning…" : "Scan receipt"}</span>
+          <span className="text-[13px] font-semibold">
+            {scanPhase === "reconciling" ? "Checking…" : scanPhase === "scanning" ? "Scanning…" : "Scan receipt"}
+          </span>
           <span className="text-[10px] text-txt-3 font-mono-tab">JPEG / PNG · ≤ 8 MB</span>
         </button>
         <div className="rounded-2xl border border-net/25 bg-gradient-to-br from-net/20 via-net/10 to-transparent p-4 text-center flex flex-col justify-center">
@@ -235,9 +347,32 @@ const Bookkeeping = () => {
         </CardSoft>
       </Link>
 
-      {error && (
-        <div className="text-[12px] text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2">
-          {error}
+      {/* The request died but the server may still be finishing — say that
+          rather than "failed", which is what caused the old "failed… then the
+          receipt appears" whiplash. */}
+      {scanPhase === "reconciling" && (
+        <div className="text-[12px] text-txt-2 bg-exp/10 border border-exp/30 rounded-lg px-3 py-2 flex items-start gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-exp animate-pulse-dot mt-1.5 shrink-0" />
+          <span>
+            <span className="font-semibold">Still processing.</span> The connection dropped
+            before we got an answer — checking whether your receipt was saved anyway.
+            Don’t re-scan yet.
+          </span>
+        </div>
+      )}
+
+      {error && !scanning && (
+        <div className="text-[12px] text-dng bg-dng/10 border border-dng/30 rounded-lg px-3 py-2 flex items-center justify-between gap-3">
+          <span className="min-w-0">{error}</span>
+          {lastScanRef.current?.file && (
+            <button
+              type="button"
+              onClick={retryScan}
+              className="shrink-0 ios-press rounded-lg bg-dng/15 border border-dng/30 px-3 py-1.5 text-[12px] font-semibold"
+            >
+              Try again
+            </button>
+          )}
         </div>
       )}
 
@@ -250,7 +385,7 @@ const Bookkeeping = () => {
             <div className="text-txt-3">Category</div>
             <div className="font-medium text-right truncate">{latest.category || "—"}</div>
             <div className="text-txt-3">Amount</div>
-            <div className="font-mono-tab font-bold text-right">{fmtTZSFull(Number(latest.total) || 0)}</div>
+            <div className="font-mono-tab font-bold text-right">{fmtAmount(latest, { full: true })}</div>
             <div className="text-txt-3">Date</div>
             <div className="font-medium text-right">{latest.date || "—"}</div>
           </div>
@@ -288,7 +423,18 @@ const Bookkeeping = () => {
         </Section>
       )}
 
-      <ReceiptDetailDrawer receipt={selected} onClose={() => setSelected(null)} />
+      <ReceiptDetailDrawer
+        receipt={selected}
+        onClose={() => setSelected(null)}
+        onDelete={async (id: string) => {
+          await deleteReceipt(id);
+          toast.success("Receipt deleted");
+          setSelected(null);
+          if (latest?.id === id) setLatest(null);
+          queryClient.invalidateQueries({ queryKey: ["receipts"] });
+          queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
+        }}
+      />
 
       {/* Always render the section. Hiding it when empty is the "void reads as
           breakage" failure (empty-states.md #1) — the user can't tell the feature
@@ -343,7 +489,7 @@ const Bookkeeping = () => {
                   </div>
                 </div>
                 <div className="font-mono-tab text-[14px] font-bold tabular shrink-0">
-                  {fmtTZSFull(Number(r.amount) || 0)}
+                  {fmtAmount(r, { full: true })}
                 </div>
               </button>
             ))}

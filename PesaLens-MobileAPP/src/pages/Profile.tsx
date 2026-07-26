@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Globe, LogOut, Mail, Moon, Sun, ShieldCheck, ShieldAlert,
-  Lock, Download, Trash2, User as UserIcon, KeyRound,
+  Lock, Download, Trash2, User as UserIcon, KeyRound, AlertTriangle, MessageSquare,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Badge, Button, CardSoft, Eyebrow, PasswordField, Section } from "@/components/pl/primitives";
+import { Badge, Button, CardSoft, Eyebrow, PasswordField, Section, Skeleton } from "@/components/pl/primitives";
+import { signOutWithFeedback, openFeedback } from "@/components/pl/FeedbackGate";
 import { passwordRulesMet } from "@/data/password";
 // @ts-ignore — JS modules
 import { useAuth } from "@/data/authStore";
@@ -13,6 +14,7 @@ import { useAuth } from "@/data/authStore";
 import {
   signOut, sendVerifyEmail, confirmVerifyEmail,
   changePassword, exportMyData, deleteMyAccount, fetchMe,
+  fetchStartOverEligibility, startOver, fetchActivity,
 } from "@/data/api";
 // @ts-ignore — JS modules
 import { useUserType } from "@/data/userStore";
@@ -20,6 +22,32 @@ import { useUserType } from "@/data/userStore";
 import { useTheme } from "@/data/theme";
 // @ts-ignore — JS modules
 import { useT, setLang as setI18nLang } from "@/data/i18n";
+
+/* A one-line "what was this about" for a timeline row.
+   Reads the `details` snapshot the server records alongside each event, so a
+   deletion says WHICH entry went and a failed extraction says how far it got.
+   Returns null when there is nothing to add — an empty sub-line reads as
+   missing information rather than absent information. */
+const activityContext = (a: any): string | null => {
+  if (a.kind === "issue") {
+    const bits: string[] = [];
+    if (a.stage) bits.push(`Stopped at: ${a.stage}`);
+    if (a.progress != null) bits.push(`${a.progress}% complete`);
+    return bits.join(" · ") || null;
+  }
+  const d = a.details;
+  if (!d) return null;
+  const bits: string[] = [];
+  if (d.vendor) bits.push(d.vendor);
+  if (typeof d.amount === "number") bits.push(`TZS ${d.amount.toLocaleString()}`);
+  else if (typeof d.total === "number") bits.push(`${d.currency || "TZS"} ${Number(d.total).toLocaleString()}`);
+  if (d.entry_date || d.date) bits.push(d.entry_date || d.date);
+  if (d.filename) bits.push(d.filename);
+  if (typeof d.receipts === "number" || typeof d.personal_entries === "number") {
+    bits.push(`${d.receipts || 0} receipts, ${d.personal_entries || 0} entries removed`);
+  }
+  return bits.join(" · ") || null;
+};
 
 const Profile = () => {
   const navigate = useNavigate();
@@ -32,8 +60,23 @@ const Profile = () => {
 
   const setLanguage = (next: string) => setI18nLang(next);
 
+  // ---- activity + issues (the user's own transparency surface) ----
+  const [activity, setActivity] = useState<any[] | null>(null); // null = loading
+  const [issuesOnly, setIssuesOnly] = useState(false);
+  useEffect(() => {
+    fetchActivity()
+      .then((d: any) => setActivity(d?.activity || []))
+      .catch(() => setActivity([]));
+  }, []);
+  const issueCount = (activity || []).filter((a: any) => a.failed).length;
+  const visibleActivity = issuesOnly
+    ? (activity || []).filter((a: any) => a.failed)
+    : (activity || []);
+
   const handleSignOut = async () => {
-    await signOut();
+    // Pauses for the feedback form when this account may still be asked, then
+    // signs out. Resolves either way — see components/pl/FeedbackGate.tsx.
+    await signOutWithFeedback();
     toast.success("Signed out");
     navigate("/signin", { replace: true });
   };
@@ -128,6 +171,41 @@ const Profile = () => {
   const [delBusy, setDelBusy] = useState(false);
   const [delErr, setDelErr] = useState("");
   const [delOpen, setDelOpen] = useState(false);
+
+  // ---------- Start over (bulk clear of unlinked receipts + entries) ----------
+  const [soState, setSoState] = useState<any>(null);
+  const [soOpen, setSoOpen] = useState(false);
+  const [soConfirm, setSoConfirm] = useState("");
+  const [soBusy, setSoBusy] = useState(false);
+  const [soErr, setSoErr] = useState("");
+
+  const loadStartOver = () =>
+    fetchStartOverEligibility()
+      .then(setSoState)
+      // Non-critical: if this fails the section simply doesn't render.
+      .catch(() => setSoState(null));
+
+  useEffect(() => { loadStartOver(); }, []);
+
+  const runStartOver = async () => {
+    setSoErr("");
+    if (soConfirm !== "DELETE") return setSoErr("Type DELETE in capital letters to confirm.");
+    setSoBusy(true);
+    try {
+      const res = await startOver();
+      toast.success("Start over complete", {
+        description: `Cleared ${res.receipts} receipt(s) and ${res.personal_entries} entry(ies).`,
+      });
+      setSoConfirm(""); setSoOpen(false);
+      await loadStartOver();   // reflects the new 30-day cooldown
+    } catch (err: any) {
+      // 409/429 carry the server's explanation — the reason is the useful part.
+      setSoErr(err?.message || "Could not clear your data.");
+    } finally {
+      setSoBusy(false);
+    }
+  };
+
   const deleteAccount = async () => {
     setDelErr("");
     if (delConfirm !== "DELETE") return setDelErr("Type DELETE in capital letters to confirm.");
@@ -340,6 +418,27 @@ const Profile = () => {
         </CardSoft>
       </Section>
 
+      {/* The permanent door to the feedback form. Whatever the prompt state
+          says — snoozed, three times declined, already answered — this always
+          opens it. That is the promise that makes declining safe: the
+          auto-prompt can stop asking precisely because saying no never takes
+          the option away. */}
+      <Section eyebrow="Feedback" title="Tell us what you think">
+        <CardSoft>
+          <button
+            onClick={() => openFeedback({ force: true })}
+            className="w-full flex items-center gap-2 text-[13px] text-txt-1"
+          >
+            <MessageSquare className="w-4 h-4 text-txt-2" />
+            Send us feedback
+          </button>
+          <p className="text-[11px] text-txt-3 mt-1.5">
+            How PesaLens is working, what to improve, and who else could use it. Open any
+            time, as often as you like.
+          </p>
+        </CardSoft>
+      </Section>
+
       <Section eyebrow="Privacy" title="Your data">
         <CardSoft>
           <button
@@ -352,6 +451,136 @@ const Profile = () => {
           </button>
         </CardSoft>
       </Section>
+
+      {/* Everything this account did, and everything that went wrong for it.
+          Failures are shown on purpose: a receipt scan that quietly did
+          nothing is the most confusing thing this app can do, so it gets a
+          line here saying so, with a reference the user can quote to us. */}
+      <Section eyebrow="Transparency" title="Activity and issues">
+        {activity === null ? (
+          <div className="space-y-2">
+            {[0, 1, 2].map((i) => <Skeleton key={i} className="h-12 rounded-2xl" />)}
+          </div>
+        ) : activity.length === 0 ? (
+          <CardSoft>
+            <p className="text-[13px] text-txt-3">
+              Nothing yet. Sign-ins, uploads, deletions and any problems will be listed here
+              with a timestamp.
+            </p>
+          </CardSoft>
+        ) : (
+          <>
+            {issueCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setIssuesOnly((v) => !v)}
+                aria-pressed={issuesOnly}
+                className={`mb-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[12px] font-medium border press ${
+                  issuesOnly ? "bg-exp/15 text-exp border-exp/30" : "bg-surface-3 text-txt-2 border-border"
+                }`}
+              >
+                <AlertTriangle className="w-3 h-3" />
+                {issuesOnly ? "Showing problems only" : `${issueCount} problem${issueCount === 1 ? "" : "s"}`}
+              </button>
+            )}
+            <CardSoft className="!p-0 divide-y divide-border/40">
+              {visibleActivity.slice(0, 20).map((a: any) => (
+                <div key={a.id} className="px-3.5 py-2.5 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className={`text-[13px] ${a.failed ? "text-exp" : "text-txt-1"}`}>{a.title}</div>
+                    {activityContext(a) && (
+                      <div className="text-[11px] text-txt-3 mt-0.5 break-words">{activityContext(a)}</div>
+                    )}
+                    {a.ref && (
+                      <div className="font-mono-tab text-[10px] text-txt-3 mt-0.5">
+                        Reference {a.ref} — quote this if you contact us
+                      </div>
+                    )}
+                  </div>
+                  <span className="font-mono-tab text-[10px] text-txt-3 whitespace-nowrap shrink-0">
+                    {a.created_at ? new Date(a.created_at).toLocaleString() : ""}
+                  </span>
+                </div>
+              ))}
+            </CardSoft>
+          </>
+        )}
+      </Section>
+
+      {/* Start over — the escape hatch for data captured before statements
+          could be linked to it. Those receipts/entries are excluded from the
+          statement delete cascade (it must never take hand-typed entries), so
+          without this they can only be removed one at a time. Always shown,
+          with the reason it's unavailable, so it never looks broken. */}
+      {soState && (
+        <Section eyebrow="Reset" title="Start over">
+          <CardSoft className="border border-exp/30">
+            <p className="text-[12px] text-txt-3 leading-relaxed">
+              Clears every receipt and manual entry when none of them belong to a
+              statement. Your statements and business ledger are kept. Available
+              once every 30 days.
+            </p>
+            <p className="text-[12px] text-txt-2 mt-2 leading-relaxed">
+              {soState.eligible ? (
+                <>
+                  This will remove{" "}
+                  <span className="font-semibold text-txt-1">
+                    {soState.receipts} receipt{soState.receipts === 1 ? "" : "s"}
+                  </span>{" "}and{" "}
+                  <span className="font-semibold text-txt-1">
+                    {soState.personal_entries} manual{" "}
+                    {soState.personal_entries === 1 ? "entry" : "entries"}
+                  </span>. This cannot be undone.
+                </>
+              ) : soState.reason === "attached" ? (
+                <>Some of your receipts or entries belong to a statement. Delete that
+                statement instead — it takes its own data with it.</>
+              ) : soState.reason === "cooldown" ? (
+                <>Already used. Available again after{" "}
+                <span className="font-semibold text-txt-1">
+                  {String(soState.next_available_at || "").slice(0, 10)}
+                </span>.</>
+              ) : (
+                <>There is nothing to clear.</>
+              )}
+            </p>
+
+            {soState.eligible && (
+              <div className="mt-3">
+                {!soOpen ? (
+                  <button
+                    onClick={() => setSoOpen(true)}
+                    className="w-full flex items-center justify-center gap-2 text-[13px] text-exp ios-press border border-exp/30 rounded-lg py-2.5"
+                  >
+                    <Trash2 className="w-4 h-4" /> Clear receipts and entries
+                  </button>
+                ) : (
+                  <div className="space-y-3">
+                    <input
+                      value={soConfirm}
+                      onChange={(e) => setSoConfirm(e.target.value)}
+                      autoCapitalize="characters" autoComplete="off" spellCheck={false}
+                      placeholder='Type "DELETE" to confirm'
+                      className="w-full bg-surface-3 border border-exp/30 rounded-lg px-3 py-2.5 text-[14px] font-mono-tab tracking-widest"
+                    />
+                    {soErr && <p className="text-[11px] text-dng">{soErr}</p>}
+                    <div className="flex gap-2">
+                      <button onClick={runStartOver} disabled={soBusy || soConfirm !== "DELETE"}
+                              className="flex-1 bg-exp text-white py-2.5 rounded-lg text-[13px] font-semibold disabled:opacity-50">
+                        {soBusy ? "Clearing…" : "Clear forever"}
+                      </button>
+                      <button onClick={() => { setSoOpen(false); setSoConfirm(""); setSoErr(""); }}
+                              className="flex-1 bg-surface-3 border border-border text-txt-2 py-2.5 rounded-lg text-[13px]">
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </CardSoft>
+        </Section>
+      )}
 
       <Section eyebrow="Danger zone" title="Delete account">
         <CardSoft className="border border-dng/30">
@@ -399,6 +628,7 @@ const Profile = () => {
       <p className="text-[10px] text-txt-4 text-center font-mono-tab pt-2">
         PesaLens · v1.0.0 · {user?.id ? `User #${user.id}` : ""}
       </p>
+
     </div>
   );
 };

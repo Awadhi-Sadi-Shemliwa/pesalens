@@ -14,8 +14,11 @@ import { SpendingBreakdown } from "@/components/pl/SpendingBreakdown";
 // @ts-ignore — JS modules
 import { fetchAnalysis, fetchUploads, fmtTZS, fmtTZSFull } from "@/data/api";
 
-type Filter = "All" | "Income" | "Expense" | "Review";
-const filters: Filter[] = ["All", "Income", "Expense", "Review"];
+// "Low confidence" = rows the extractor could not read with certainty. It is a
+// view filter only; these rows are never editable (see the read-only note in
+// data/api.js).
+type Filter = "All" | "Income" | "Expense" | "Low confidence";
+const filters: Filter[] = ["All", "Income", "Expense", "Low confidence"];
 
 type Sort = "date_desc" | "date_asc" | "amt_desc" | "amt_asc";
 const sortLabel: Record<Sort, string> = {
@@ -76,6 +79,7 @@ const TxnDetailDrawer = ({
   const debit = Number(d.debit) || 0;
   const isInc = credit > 0;
   const amount = isInc ? credit : debit;
+
   return (
     <Sheet open={!!txn} onClose={onClose} eyebrow="Transaction detail">
         <div className="space-y-5">
@@ -92,9 +96,19 @@ const TxnDetailDrawer = ({
                 {isInc ? "Income" : "Expense"}
               </Badge>
               {d.category && <Badge tone="muted">{d.category}</Badge>}
-              {d.needs_review && <Badge tone="dng">Needs review</Badge>}
+              {d.needs_review && <Badge tone="dng">Low confidence</Badge>}
             </div>
           </div>
+
+          {/* What the extractor could not read on this row. Shown, not
+              actionable: the user's remedy is a cleaner upload or deleting the
+              statement, never retyping the bank's figures. */}
+          {d.needs_review && d.review_reason && (
+            <div className="rounded-2xl border border-dng/25 bg-dng/8 p-4">
+              <Eyebrow>What we could not read</Eyebrow>
+              <p className="text-[13px] text-txt-2 mt-1.5 leading-relaxed">{d.review_reason}</p>
+            </div>
+          )}
 
           <div className="ios-group">
             <div className="px-5 py-3 ios-group-item">
@@ -269,6 +283,8 @@ const Analysis = () => {
 
   const transactions: any[] = (analysis as any)?.transactions || [];
   const categories: any[] = (analysis as any)?.categories || [];
+  const quality: any = (analysis as any)?.quality || null;
+  const reviewCount = transactions.filter((t: any) => t.needs_review).length;
 
   const incomeTotal = transactions.reduce((s: number, t: any) => s + (Number(t.credit) || 0), 0);
   const expenseTotal = transactions.reduce((s: number, t: any) => s + (Number(t.debit) || 0), 0);
@@ -294,7 +310,7 @@ const Analysis = () => {
         const amt = Number(t.credit) || -Number(t.debit) || Number(t.amount) || 0;
         if (filter === "Income" && amt <= 0) return false;
         if (filter === "Expense" && amt >= 0) return false;
-        if (filter === "Review" && !t.needs_review) return false;
+        if (filter === "Low confidence" && !t.needs_review) return false;
         if (debounced) {
           const hay = `${t.description || ""} ${t.reference || ""} ${amt}`.toLowerCase();
           if (!hay.includes(debounced)) return false;
@@ -330,7 +346,7 @@ const Analysis = () => {
       All: searched.length,
       Income: searched.filter((t: any) => amtOf(t) > 0).length,
       Expense: searched.filter((t: any) => amtOf(t) < 0).length,
-      Review: searched.filter((t: any) => t.needs_review).length,
+      "Low confidence": searched.filter((t: any) => t.needs_review).length,
     } as Record<Filter, number>;
   }, [transactions, q]);
 
@@ -450,6 +466,31 @@ const Analysis = () => {
           {sortLabel[sort]}
         </button>
       </div>
+
+      {/* Reading confidence — the pipeline's own self-check, surfaced.
+          Read-only: it reports how well the SYSTEM read the statement (our
+          job, not the user's) and points at the two remedies the user
+          actually has — a cleaner upload, or delete and start over. */}
+      {quality && (reviewCount > 0 || quality.balances === false) && (
+        <CardSoft className="!p-4 border-exp/30">
+          <Eyebrow>Reading confidence</Eyebrow>
+          <p className="text-[13px] text-txt-2 mt-1.5 leading-relaxed">
+            {reviewCount > 0 && `This statement is a scan, and we could not read ${reviewCount} row${reviewCount === 1 ? "" : "s"} with full confidence. `}
+            {quality.balances === false && quality.net_vs_span_diff != null &&
+              `The totals below may be off by about ${fmtTZSFull(Math.abs(Number(quality.net_vs_span_diff)))}. `}
+            For an exact read, upload a digital PDF from your bank's app, or delete this statement and try again.
+          </p>
+          {reviewCount > 0 && filter !== "Low confidence" && (
+            <button
+              type="button"
+              onClick={() => { setFilter("Low confidence"); setPage(1); }}
+              className="mt-3 ios-press rounded-xl bg-accent/15 text-accent border border-accent/30 px-4 py-2 text-[13px] font-semibold"
+            >
+              Show these rows
+            </button>
+          )}
+        </CardSoft>
+      )}
 
       <ChipRow
         className="-mx-1 px-1"

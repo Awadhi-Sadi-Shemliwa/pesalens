@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CheckCircle2, Crown, Sparkles, Upload as UploadIcon, ShieldCheck, Bot, TrendingUp, Receipt } from "lucide-react";
+import { CheckCircle2, Crown, Sparkles, Upload as UploadIcon, ShieldCheck, Bot, TrendingUp, Receipt, MessageSquare } from "lucide-react";
 import { toast } from "sonner";
 import { Badge, CardSoft, Eyebrow, Section, Skeleton } from "@/components/pl/primitives";
+import { openFeedback } from "@/components/pl/FeedbackGate";
 // @ts-ignore — JS modules
 import { cancelSubscription, fetchBillingStatus, fetchMe, requestPaymentConfirmation, startCheckout } from "@/data/api";
 
@@ -283,6 +284,30 @@ const Upgrade = () => {
             );
           })}
         </div>
+      </Section>
+
+      {/* An INLINE card, never a sheet. A dialog thrown in front of someone
+          comparing prices interrupts the one decision this page exists for, and
+          would cost conversions to buy feedback. This waits to be noticed.
+
+          It also reaches a group the other triggers miss: someone weighing Pro
+          has formed a real opinion about whether this is worth money — the most
+          useful thing anyone can tell us — and they may never upgrade, so
+          waiting until after payment would lose it entirely. */}
+      <Section eyebrow="Feedback" title="Not sure yet? Tell us why.">
+        <CardSoft>
+          <p className="text-[13px] text-txt-2 leading-relaxed">
+            What is missing, what would make this worth paying for, and who else you think
+            needs it. It shapes what we build next — and you do not have to upgrade to say so.
+          </p>
+          <button
+            type="button"
+            onClick={() => openFeedback({ force: true })}
+            className="mt-3 w-full inline-flex items-center justify-center gap-2 rounded-xl border border-accent/40 text-accent text-[13px] font-semibold py-2.5 press"
+          >
+            <MessageSquare className="w-4 h-4" /> Share feedback
+          </button>
+        </CardSoft>
       </Section>
 
       <p className="text-[10px] text-txt-4 text-center font-mono-tab pt-2">

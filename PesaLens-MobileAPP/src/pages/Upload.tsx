@@ -4,15 +4,35 @@ import { useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { toast } from "sonner";
 import { CardSoft, Eyebrow, ProgressBar, ErrorState } from "@/components/pl/primitives";
+import { openFeedback } from "@/components/pl/FeedbackGate";
 import { FileText, KeyRound, ScanLine, Upload as UploadIcon, CheckCircle2 } from "lucide-react";
 // @ts-ignore — JS modules
 import { uploadStatement, fetchUploadStatus } from "@/data/api";
 
 const SUPPORTED = ["CRDB", "NMB", "NBC", "KCB", "Absa", "Amana", "M-Pesa", "Airtel Money", "Tigo Pesa", "HaloPesa", "Selcom", "Yas / Mixx"];
 const MAX_BYTES = 50 * 1024 * 1024;
-// Cap on how long we poll a job before calling it a (retryable) timeout, so a
-// stranded backend job can't spin the progress card forever.
-const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+// When to call a job a (retryable) timeout, so a stranded backend job can't
+// spin the progress card forever. Deliberately measured on STALL, not on
+// elapsed time: ocr_max_pages is 150 and a scanned page costs ~40s, so a flat
+// wall clock declared big-but-healthy extractions "failed" minutes before the
+// backend finished them — and the retry it offered re-ran the whole job. The
+// backend emits per-page progress pings, so a live job advances its
+// stage/progress at least every couple of minutes, and its own orphan recovery
+// converts genuinely dead jobs to status 'failed' within 10 minutes.
+// Mirrors src/pages/DashboardPage.jsx on web.
+const POLL_STALL_MS = 4 * 60 * 1000;      // no stage/progress change for 4 min
+const POLL_ERROR_MS = 2 * 60 * 1000;      // status endpoint unreachable for 2 min
+const POLL_CEILING_MS = 45 * 60 * 1000;   // absolute safety ceiling
+
+// The post-extraction feedback trigger, held OUTSIDE the component.
+//
+// It has to outlive this page: the success path navigates to /analysis 700ms
+// in, which unmounts Upload, and anything in the component's own timer set is
+// cancelled by that unmount. The sheet itself already survives (the gate is
+// mounted above <Routes>), so the timer is the only piece that needed moving.
+// Safe to let it fire after teardown — openFeedback() self-gates on
+// /feedback/pending and no-ops entirely when no gate is mounted.
+let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
 
 type Phase = "idle" | "uploading" | "processing" | "done" | "failed";
 type Failure = { message: string; code?: string; stage?: string | null; progress?: number | null; timestamp?: string | number | null };
@@ -27,11 +47,19 @@ const Upload = () => {
   const [picked, setPicked] = useState<File | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   // Poll lifecycle guard: bumping the generation cancels any in-flight poll —
-  // on unmount, and whenever a new upload supersedes an older one.
-  const pollRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; gen: number }>({ timer: null, gen: 0 });
+  // on unmount, and whenever a new upload supersedes an older one. Every armed
+  // timer is tracked as a set rather than a single slot, so a chained poll
+  // whose successor is already queued cannot leave an orphan behind. The
+  // feedback trigger is deliberately NOT in here (see `feedbackTimer` above):
+  // it must survive the navigation this component performs on success.
+  const pollRef = useRef<{ timers: Set<ReturnType<typeof setTimeout>>; gen: number }>({ timers: new Set(), gen: 0 });
+  const clearTimers = () => {
+    pollRef.current.timers.forEach((id) => clearTimeout(id));
+    pollRef.current.timers.clear();
+  };
   useEffect(() => () => {
     pollRef.current.gen += 1;
-    if (pollRef.current.timer) clearTimeout(pollRef.current.timer);
+    clearTimers();
   }, []);
 
   const busy = !!job && (job.phase === "uploading" || job.phase === "processing");
@@ -78,13 +106,37 @@ const Upload = () => {
     if (!jobId) { setJob(null); navigate("/analysis"); return; }
 
     // Poll the extraction job. The generation token invalidates this loop if the
-    // component unmounts or a newer upload starts; the deadline turns a job that
-    // never resolves into an honest, retryable failure instead of an endless card.
+    // component unmounts or a newer upload starts; the stall/ceiling deadlines
+    // turn a job that never resolves into an honest, retryable failure instead
+    // of an endless card.
     const gen = ++pollRef.current.gen;
-    if (pollRef.current.timer) clearTimeout(pollRef.current.timer);
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    const schedule = (fn: () => void, ms: number) => { pollRef.current.timer = setTimeout(fn, ms); };
+    clearTimers();
+    const startedAt = Date.now();
+    // Timers drop themselves once they fire, so the chained poll loop does not
+    // accumulate dead handles over a long extraction.
+    const schedule = (fn: () => void, ms: number) => {
+      const id = setTimeout(() => { pollRef.current.timers.delete(id); fn(); }, ms);
+      pollRef.current.timers.add(id);
+    };
     const alive = () => pollRef.current.gen === gen;
+    // Stall-detection state: the job is alive as long as its stage/progress
+    // keeps changing (per-page OCR pings advance every page).
+    let lastAdvanceAt = Date.now();
+    let lastKey = "";
+    let errorSince: number | null = null;
+    // Shared so BOTH the in-progress path and the transient-error path honour a
+    // deadline — otherwise a status endpoint that keeps failing polls forever.
+    const failTimeout = (status: any) => {
+      const failure: Failure = {
+        message: "This is taking longer than expected. The extraction may still be running — check back shortly, or try again.",
+        code: "timeout",
+        stage: status?.stage,
+        progress: status?.progress,
+        timestamp: Date.now(),
+      };
+      setJob({ phase: "failed", pct: status?.progress || 0, failure });
+      toast.error("Extraction timed out", { description: failure.message });
+    };
 
     setJob({ phase: "processing", pct: 0, stage: "Queued" });
     const poll = async () => {
@@ -93,10 +145,16 @@ const Upload = () => {
       try {
         status = await fetchUploadStatus(jobId);
       } catch {
-        if (alive()) schedule(poll, 1500); // transient — keep polling
+        if (!alive()) return;
+        // A persistently unreachable status endpoint must still time out, or
+        // the card spins forever on a dead network.
+        errorSince = errorSince ?? Date.now();
+        if (Date.now() - errorSince > POLL_ERROR_MS) { failTimeout(null); return; }
+        schedule(poll, 1500); // transient — keep polling
         return;
       }
       if (!alive()) return;
+      errorSince = null;
       if (status?.status === "done") {
         setJob({ phase: "done", pct: 100 });
         queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
@@ -104,6 +162,18 @@ const Upload = () => {
         queryClient.invalidateQueries({ queryKey: ["analysis", jobId] });
         toast.success("Statement extracted");
         schedule(() => navigate(`/analysis?job_id=${encodeURIComponent(jobId!)}`), 700);
+        // The best moment to ask: they have just watched the product read their
+        // own statement, so they have both goodwill and something concrete to
+        // say. It also reaches the majority who never tap Sign out — the app
+        // revokes the session after 30s in the background with no UI, so the
+        // sign-out prompt alone would never find them. Fired after the
+        // navigation lands, on the module-level handle rather than through
+        // `schedule` — the navigation above unmounts this component at 700ms
+        // and the unmount cleanup would cancel a tracked timer before it ever
+        // ran. Self-gating on /feedback/pending, so it does nothing if this
+        // account is snoozed, capped, or has already answered.
+        if (feedbackTimer) clearTimeout(feedbackTimer);
+        feedbackTimer = setTimeout(() => { feedbackTimer = null; openFeedback(); }, 2200);
         return;
       }
       if (status?.status === "failed") {
@@ -118,18 +188,14 @@ const Upload = () => {
         toast.error("Extraction failed", { description: failure.message });
         return;
       }
-      if (Date.now() > deadline) {
-        const failure: Failure = {
-          message: "This is taking longer than expected. The extraction may still be running — check back shortly, or try again.",
-          code: "timeout",
-          stage: status?.stage,
-          progress: status?.progress,
-          timestamp: Date.now(),
-        };
-        setJob({ phase: "failed", pct: status?.progress || 0, failure });
-        toast.error("Extraction timed out", { description: failure.message });
-        return;
-      }
+      // Still processing: fail only when the job stops advancing (stall) or hits
+      // the absolute ceiling — never on healthy long-running OCR.
+      const key = `${status?.stage || ""}|${status?.progress ?? ""}`;
+      if (key !== lastKey) { lastKey = key; lastAdvanceAt = Date.now(); }
+      if (
+        Date.now() - lastAdvanceAt > POLL_STALL_MS
+        || Date.now() - startedAt > POLL_CEILING_MS
+      ) { failTimeout(status); return; }
       setJob((j) => (j ? { ...j, phase: "processing", pct: status?.progress ?? j.pct, stage: status?.stage || j.stage } : j));
       schedule(poll, 1000);
     };

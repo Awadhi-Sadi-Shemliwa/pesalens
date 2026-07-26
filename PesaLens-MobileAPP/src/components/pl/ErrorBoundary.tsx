@@ -1,5 +1,7 @@
 import { Component, type ReactNode } from "react";
 import { AlertOctagon, Home, RefreshCw } from "lucide-react";
+// @ts-ignore — JS module
+import { reportClientError } from "@/data/api";
 
 /* Mobile ErrorBoundary — parity with src/components/ErrorBoundary.jsx
    on the web. Catches any uncaught render error in the WebView and
@@ -26,6 +28,18 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
     if (typeof console !== "undefined") {
       console.error("UI crashed:", error, info);
     }
+    // Report it to the server so the owner console sees it. A render crash
+    // never reaches the backend's exception handler, and on a phone we cannot
+    // ask the user to open a console — so without this a bug that whites out
+    // the whole app is invisible to us however often it fires. The component
+    // stack names which component threw; trimmed, because the error ledger
+    // stores a message rather than a full trace.
+    const err = error as Error | undefined;
+    const stack = String((info as any)?.componentStack || "").trim().split("\n").slice(0, 6).join(" ");
+    reportClientError(
+      `${err?.name || "Error"}: ${err?.message || "unknown"}${stack ? ` | ${stack}` : ""}`,
+      { code: "render_crash" },
+    );
   }
 
   handleReload = () => {

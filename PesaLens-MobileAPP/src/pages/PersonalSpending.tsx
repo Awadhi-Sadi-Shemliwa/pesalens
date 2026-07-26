@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
@@ -15,9 +15,14 @@ import {
   deletePersonalEntry,
   fetchPersonalEntries,
   fetchReceipts,
+  fetchReceiptByScan,
+  deleteReceipt,
   fetchStatementIndex,
+  fmtAmount,
+  fmtInCurrency,
   fmtTZS,
   fmtTZSFull,
+  receiptAmountTZS,
   scanReceipt,
 } from "@/data/api";
 // @ts-ignore — JS module
@@ -100,7 +105,19 @@ type Direction = "income" | "expense";
 
 type ScanFailure = { message: string; code?: string; timestamp?: number };
 type ScanJob =
-  | { phase: "scanning" | "done" | "failed"; file?: File | null; vendor?: string; total?: number; failure?: ScanFailure }
+  | {
+      // `reconciling` = the request died but the server may still have saved;
+      // we poll by scan_id before admitting failure.
+      phase: "scanning" | "reconciling" | "done" | "failed";
+      file?: File | null;
+      // Idempotency key for this attempt — a retry reuses it so the backend
+      // returns the already-saved receipt instead of scanning twice.
+      scanId?: string;
+      vendor?: string;
+      total?: number;
+      receipt?: any;
+      failure?: ScanFailure;
+    }
   | null;
 
 // Bottom-sheet detail drawer for a personal-spending row. Mirrors the
@@ -110,14 +127,25 @@ type ScanJob =
 const EntryDetailDrawer = ({
   entry,
   onClose,
+  onDeleteReceipt,
 }: {
   entry: any | null;
   onClose: () => void;
+  onDeleteReceipt: (receiptId: string) => Promise<void>;
 }) => {
   /* Retain the last entry so the sheet still has content while it animates out. */
   const lastRef = useRef<any>(entry);
   if (entry) lastRef.current = entry;
   const en = lastRef.current;
+  const [deleting, setDeleting] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  /* Disarm the two-step delete whenever the sheet changes subject. The lastRef
+     retain above means this component NEVER unmounts once it has shown an
+     entry, so useState is never reinitialised: without this, arming "Delete
+     forever" on entry A and then opening entry B renders B's sheet already
+     armed — one tap from destroying the wrong record. Keyed off the `entry`
+     PROP, not lastRef.current, so it also fires on close. */
+  useEffect(() => { setConfirmDel(false); }, [entry?.id]);
 
   if (!en) return null;
   const isInc = en.direction === "income";
@@ -150,8 +178,11 @@ const EntryDetailDrawer = ({
             <div className="px-5 py-3 ios-group-item">
               <div className="flex items-center justify-between">
                 <span className="text-[14px] text-txt-3">Amount</span>
+                {/* fmtAmount: `en.amount` is always TZS, but a foreign entry
+                    also carries currency + original_amount, and showing only
+                    the converted figure hides what the user actually paid. */}
                 <span className={`font-mono-tab font-bold tabular text-[16px] ${isInc ? "text-inc" : "text-exp"}`}>
-                  {isInc ? "+" : "−"} {fmtTZSFull(amount)}
+                  {isInc ? "+" : "−"} {fmtAmount(en, { full: true })}
                 </span>
               </div>
             </div>
@@ -185,13 +216,51 @@ const EntryDetailDrawer = ({
                           </div>
                           {price > 0 && (
                             <span className="font-mono-tab tabular text-[13px] shrink-0">
-                              {fmtTZSFull(price)}
+                              {/* Line items stay in the printed currency. */}
+                              {fmtInCurrency(price, en.currency ?? en.receipt?.currency)}
                             </span>
                           )}
                         </div>
                       </div>
                     );
                   })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Receipts had no delete path at all until now, so a bad scan was
+              permanent. Manual entries already delete from the list row, so
+              this is offered only for receipts. */}
+          {isReceipt && en.receipt?.id && (
+            <div className="pt-1">
+              {!confirmDel ? (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDel(true)}
+                  className="w-full ios-press flex items-center justify-center gap-2 text-[13px] text-dng border border-dng/30 rounded-xl py-2.5"
+                >
+                  <Trash2 className="w-4 h-4" /> Delete this receipt
+                </button>
+              ) : (
+                <div className="flex gap-2">
+                  <button
+                    type="button" disabled={deleting}
+                    onClick={async () => {
+                      setDeleting(true);
+                      try { await onDeleteReceipt(en.receipt.id); } finally { setDeleting(false); }
+                    }}
+                    className="flex-1 bg-dng text-white py-2.5 rounded-xl text-[13px] font-semibold disabled:opacity-50"
+                  >
+                    {deleting ? "Deleting…" : "Delete forever"}
+                  </button>
+                  <button
+                    type="button" disabled={deleting}
+                    onClick={() => setConfirmDel(false)}
+                    className="flex-1 bg-surface-3 border border-border text-txt-2 py-2.5 rounded-xl text-[13px]"
+                  >
+                    Cancel
+                  </button>
                 </div>
               )}
             </div>
@@ -314,6 +383,13 @@ const PersonalSpending = () => {
       ? activeJobId
       : (statements[0]?.job_id || null);
   const activeStatement = statements.find((s) => s.job_id === effectiveJobId) || null;
+  // The statement a NEWLY created entry/receipt belongs to. This follows what
+  // the user is looking at, not merely which statement is newest: in the
+  // 'general' view they are working outside any statement, so the row stays
+  // unscoped. Stamping it anyway would make deleting that statement destroy
+  // hand-typed entries and receipt images — the cascade matches this id exactly.
+  const scopedJobId: string | null =
+    (showScope && viewMode === "statement") ? effectiveJobId : null;
   const scopeOpts = useMemo(() => {
     if (!showScope) return {};
     if (viewMode === "general") return { scope: "general", start: genStart, end: genEnd };
@@ -354,14 +430,66 @@ const PersonalSpending = () => {
     onError: (err: any) => toast.error(err?.message || "Could not delete entry."),
   });
 
-  const handleScan = async (file: File | null) => {
+  const finishScanSuccess = (data: any, file: File, scanId: string) => {
+    // /receipts/scan already persists the receipt server-side. We used to
+    // also create a shadow personal entry here, but since the per-category
+    // view now merges receipts in directly that would render the scan
+    // twice. Just refresh the receipts query and let it flow through.
+    queryClient.invalidateQueries({ queryKey: ["receipts"] });
+    queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
+    setScanJob({
+      phase: "done", file, scanId,
+      vendor: data.vendor, total: Number(data.total) || 0, receipt: data,
+    });
+    toast.success("Receipt captured");
+    setTimeout(() => setScanJob((j: any) => (j?.phase === "done" ? null : j)), 1400);
+  };
+
+  // A timed-out/aborted request does NOT mean the scan failed: the server may
+  // have saved the receipt after the app gave up (that race produced the old
+  // "failed… then the receipt appears anyway" behavior — and on a phone it is
+  // the common case, not the edge case). Before declaring failure, poll the
+  // by-scan lookup for the receipt this attempt would have saved.
+  const reconcileScan = async (file: File, scanId: string, originalErr: any) => {
+    setScanJob({ phase: "reconciling", file, scanId });
+    for (let attempt = 0; attempt < 7; attempt++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try {
+        const res = await fetchReceiptByScan(scanId);
+        if (res?.found && res.receipt) {
+          finishScanSuccess(res.receipt, file, scanId);
+          return;
+        }
+      } catch {
+        // The lookup itself failing (still offline) — keep trying until the
+        // window closes rather than converting it into a scan failure.
+      }
+    }
+    setScanJob({
+      phase: "failed", file, scanId,
+      failure: {
+        message: originalErr?.message || "Receipt scan failed.",
+        code: originalErr?.code || "scan_error",
+        timestamp: Date.now(),
+      },
+    });
+    toast.error(originalErr?.message || "Receipt scan failed.");
+  };
+
+  const handleScan = async (file: File | null, existingScanId: string | null = null) => {
     if (!file) return;
     setError(null);
     setNotice(null);
-    setScanJob({ phase: "scanning", file });
+    // Idempotency key for this scan attempt. A retry reuses the same id so the
+    // backend can short-circuit to the already-saved receipt instead of
+    // scanning (and saving, and charging for) it twice.
+    const scanId = existingScanId
+      || (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID()
+          : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`);
+    setScanJob({ phase: "scanning", file, scanId });
     try {
       // Associate the receipt with the statement in focus (or newest in General).
-      const data = await scanReceipt(file, { statementJobId: effectiveJobId });
+      const data = await scanReceipt(file, { statementJobId: scopedJobId, scanId });
       if (data?.is_receipt === false) {
         // The backend returns 200 + is_receipt:false for TWO reasons: the model
         // saw a non-receipt image (carries image_description), or every vision
@@ -369,7 +497,7 @@ const PersonalSpending = () => {
         // the right next step — retrying a non-receipt is pointless.
         const notReceipt = !!data.image_description;
         setScanJob({
-          phase: "failed", file,
+          phase: "failed", file, scanId,
           failure: {
             message: data.message || "That image is not a receipt.",
             code: notReceipt ? "not_receipt" : "vision_unavailable",
@@ -379,19 +507,17 @@ const PersonalSpending = () => {
         toast.warning(data.message || "That image is not a receipt.");
         return;
       }
-      const amount = Number(data.total) || 0;
-      // /receipts/scan already persists the receipt server-side. We used to
-      // also create a shadow personal entry here, but since the per-category
-      // view now merges receipts in directly that would render the scan
-      // twice. Just refresh the receipts query and let it flow through.
-      queryClient.invalidateQueries({ queryKey: ["receipts"] });
-      queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
-      setScanJob({ phase: "done", file, vendor: data.vendor, total: amount });
-      toast.success("Receipt captured");
-      setTimeout(() => setScanJob((j) => (j?.phase === "done" ? null : j)), 1400);
+      finishScanSuccess(data, file, scanId);
     } catch (err: any) {
+      // Timeout / network drop: the server may have finished after we gave up.
+      // Reconcile before showing a failure. Clean HTTP error responses
+      // (4xx/5xx) are decisive and fail immediately as before.
+      if (err?.code === "scan_timeout" || err?.transient) {
+        await reconcileScan(file, scanId, err);
+        return;
+      }
       setScanJob({
-        phase: "failed", file,
+        phase: "failed", file, scanId,
         failure: {
           message: err?.message || "Receipt scan failed.",
           code: err?.code || "scan_error",
@@ -405,6 +531,9 @@ const PersonalSpending = () => {
   // Retry from the failure overlay: re-scan the same image for transient
   // failures; for a "not a receipt" verdict, re-open the picker so the user can
   // choose a different image (re-scanning the same one would just fail again).
+  // The retry reuses the failed attempt's scan_id — if the first attempt DID
+  // save server-side, the backend returns that receipt instantly instead of
+  // scanning (and saving) a duplicate.
   const retryScan = () => {
     const job = scanJob;
     if (!job?.file) { setScanJob(null); return; }
@@ -413,8 +542,20 @@ const PersonalSpending = () => {
       fileRef.current?.click();
       return;
     }
-    handleScan(job.file);
+    handleScan(job.file, job.scanId || null);
   };
+
+  // Late-arrival dismissal: if the overlay is showing "failed" but a refresh
+  // brings in the receipt this very scan saved (it arrived after the polling
+  // window closed), clear the failure — the scan did succeed.
+  useEffect(() => {
+    if (scanJob?.phase !== "failed" || !scanJob.scanId) return;
+    const match = (receipts || []).find((r: any) => r.client_scan_id === scanJob.scanId);
+    if (match) {
+      setScanJob(null);
+      toast.success("That receipt was saved after all — it's in your ledger.");
+    }
+  }, [receipts, scanJob]);
 
   // Project scanned receipts into the same shape personal entries use so
   // the existing list + filter UI doesn't need a parallel code path. The
@@ -431,7 +572,20 @@ const PersonalSpending = () => {
           .map((it: any) => it.name)
           .filter(Boolean)
           .join(", ") || null,
-        amount: Number(r.total) || Number(r.amount) || 0,
+        // The ONE definition of a receipt's TZS value — shared with the web
+        // client and mirroring the backend's fx.receipt_amount_tzs. Falling
+        // back to `r.total` here (the figure PRINTED on the paper, possibly
+        // USD/EUR) is exactly the bug the helper exists to prevent: the backend
+        // deliberately values an unconvertible foreign receipt at 0 rather than
+        // counting it as TZS, and a `|| r.total` fallback fires on precisely
+        // that case, booking a 140-USD slip as TZS 140.
+        amount: receiptAmountTZS(r),
+        currency: r.currency,
+        original_amount: r.original_amount ?? (r.currency && r.currency !== "TZS" ? r.total : undefined),
+        // fmtAmount reads this to render '140 USD' (no ≈ equivalent) while the
+        // rate is still unresolved. Without it the flag is always false here
+        // and the display silently relies on its legacy `tzs <= 0` fallback.
+        fxPending: r.fx_pending,
         direction: "expense" as const,
         source: "receipt" as const,
         receipt: r,
@@ -747,7 +901,7 @@ const PersonalSpending = () => {
                   description: form.description || null,
                   amount,
                   direction: form.direction,
-                  statement_job_id: effectiveJobId || undefined,
+                  statement_job_id: scopedJobId || undefined,
                 });
               }}
             >
@@ -852,7 +1006,7 @@ const PersonalSpending = () => {
                         </div>
                       </button>
                       <div className={`text-[14px] font-bold font-mono-tab tabular shrink-0 ${isInc ? "text-inc" : "text-txt-1"}`}>
-                        {isInc ? "+" : "−"}{fmtTZS(Number(e.amount) || 0)}
+                        {isInc ? "+" : "−"}{fmtAmount(e)}
                       </div>
                       {!isReceipt && (
                         <button onClick={() => remove.mutate(e.id)} disabled={remove.isPending}
@@ -869,7 +1023,17 @@ const PersonalSpending = () => {
         )}
       </Section>
 
-      <EntryDetailDrawer entry={selected} onClose={() => setSelected(null)} />
+      <EntryDetailDrawer
+        entry={selected}
+        onClose={() => setSelected(null)}
+        onDeleteReceipt={async (id: string) => {
+          await deleteReceipt(id);
+          toast.success("Receipt deleted");
+          setSelected(null);
+          queryClient.invalidateQueries({ queryKey: ["receipts"] });
+          queryClient.invalidateQueries({ queryKey: ["receipt-patterns"] });
+        }}
+      />
 
       {/* Receipt-scan overlay — HONEST feedback: blocks the surface so a second
           scan can't fire, shows indeterminate progress, then a decisive result
@@ -912,9 +1076,34 @@ const PersonalSpending = () => {
                   </div>
                   <div className="text-[15px] font-semibold text-txt-1">Receipt captured</div>
                   <div className="text-[12px] text-txt-3 mt-1">
-                    {scanJob.vendor || "Saved"}{scanJob.total ? ` · ${fmtTZSFull(scanJob.total)}` : ""}
+                    {scanJob.vendor || "Saved"}
+                    {scanJob.receipt ? ` · ${fmtAmount(scanJob.receipt, { full: true })}`
+                      : scanJob.total ? ` · ${fmtTZSFull(scanJob.total)}` : ""}
                   </div>
                 </div>
+              ) : scanJob.phase === "reconciling" ? (
+                /* The request died but the server may have finished anyway.
+                   Saying "failed" here is what produced the old "failed… then
+                   the receipt appears" whiplash — so we say what is true. */
+                <>
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="w-2 h-2 rounded-full bg-exp animate-pulse-dot" />
+                    <span className="font-mono-tab text-[10px] uppercase tracking-ticker text-txt-3">
+                      Still processing
+                    </span>
+                  </div>
+                  <h3 className="text-[15px] font-semibold tracking-tight mb-1">Taking longer than usual</h3>
+                  <p className="text-[12px] text-txt-2 mb-5">
+                    The connection dropped before we got an answer — checking whether your
+                    receipt was saved anyway…
+                  </p>
+                  <ProgressBar
+                    indeterminate
+                    tone="accent"
+                    label="Checking for your receipt"
+                    sublabel="This takes a few seconds. Don’t re-scan yet — we’ll tell you either way."
+                  />
+                </>
               ) : (
                 <>
                   <div className="relative mx-auto mb-5 h-32 w-24 rounded-xl border border-accent/30 bg-surface-2/60 overflow-hidden">
