@@ -93,6 +93,31 @@ class User(Base):
     pwd_change_revoke_until = Column(DateTime, nullable=True)
     pwd_change_at = Column(DateTime, nullable=True)
 
+    # Last "start over" (bulk clear of unattached receipts + manual entries).
+    # Gates that action to once per 30 days. Kept HERE rather than derived from
+    # audit_log because audit_log is documented as detect-only and safe to
+    # prune — pruning it would silently reset the cooldown.
+    last_orphan_reset_at = Column(DateTime, nullable=True)
+
+    # Feedback PROMPT state. Deliberately separate from the `feedback` table,
+    # which is the response log: "have we asked this person yet, and may we ask
+    # again" is a fact about the ACCOUNT, while a response is a document. The
+    # first version conflated them — one row in `feedback` meant "asked", so a
+    # single skip closed the door permanently and a second submission was
+    # impossible. Splitting them is what makes snoozing and repeat responses
+    # expressible at all.
+    #
+    #   declines      — explicit "Skip" presses. At FEEDBACK_MAX_DECLINES the
+    #                   auto-prompt stops for good; the form stays reachable
+    #                   from Settings/Profile forever.
+    #   snooze_until  — do not prompt before this instant. Set by a skip (long)
+    #                   and by an incidental dismissal (short).
+    #   submitted_at  — first submission. Stops the auto-prompt permanently;
+    #                   does NOT stop someone volunteering more later.
+    feedback_declines = Column(Integer, nullable=False, default=0)
+    feedback_snooze_until = Column(DateTime, nullable=True)
+    feedback_submitted_at = Column(DateTime, nullable=True)
+
     uploads = relationship("Upload", back_populates="user", cascade="all, delete-orphan")
     entries = relationship("PersonalEntry", back_populates="user", cascade="all, delete-orphan")
     business_entries = relationship("BusinessEntry", back_populates="user", cascade="all, delete-orphan")
@@ -185,6 +210,12 @@ class PersonalEntry(Base):
     description = Column(Text, nullable=True)
     amount = Column(Float, nullable=False)
     direction = Column(String(10), nullable=False, default="expense")  # income|expense
+    # Multi-currency support: `amount` is ALWAYS the TZS value used by every
+    # aggregate. Foreign-currency entries additionally keep the printed
+    # amount + conversion rate so the UI can show "140 USD (≈ TZS 373,000)".
+    currency = Column(String(8), nullable=True, default="TZS")
+    original_amount = Column(Float, nullable=True)
+    fx_rate = Column(Float, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
     # Statement this entry belongs to (Epic-2 per-statement scoping). Nullable:
@@ -193,6 +224,23 @@ class PersonalEntry(Base):
     statement_job_id = Column(String(40), nullable=True, index=True)
 
     user = relationship("User", back_populates="entries")
+
+
+class CategoryCache(Base):
+    """LLM-assigned category per normalized transaction description.
+
+    Written by llm_categorizer at extraction time; read before every LLM
+    call so a description is only ever paid for once (re-extractions and
+    repeat vendors are free). Append-only; safe to truncate at any time —
+    the worst case is re-asking the LLM.
+    """
+    __tablename__ = "category_cache"
+
+    id = Column(Integer, primary_key=True)
+    desc_key = Column(String(200), unique=True, nullable=False, index=True)
+    category = Column(String(40), nullable=False)
+    source = Column(String(16), nullable=False, default="llm")  # llm|manual
+    created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
 class RevokedToken(Base):
@@ -265,11 +313,16 @@ class ErrorLog(Base):
     """System-wide error ledger — the single source of truth for the owner
     dashboard's "what crashed, where, why, and when" view.
 
-    Written from two places: the extraction pipeline's failure path (carries
-    the stage + percentage where it died) and the global unhandled-exception
-    handler in main.py (carries the request method + path). Every row is
-    timestamped. This is deliberately append-only and never used for
-    application logic, so it is safe to write from a best-effort try/except.
+    Written from four places: the extraction pipeline's failure path (carries
+    the stage + percentage where it died), the global unhandled-exception
+    handler in main.py (carries the request method + path), the HANDLED failure
+    paths that return a friendly message to the user instead of raising (a
+    receipt the vision model could not read is a failure the operator needs to
+    see even though nothing crashed), and the clients, which report their own
+    crashes so a bug that never reaches the server is still visible. `source`
+    tells them apart. Every row is timestamped. This is deliberately
+    append-only and never used for application logic, so it is safe to write
+    from a best-effort try/except.
     """
     __tablename__ = "error_log"
 
@@ -281,6 +334,44 @@ class ErrorLog(Base):
     message = Column(Text, nullable=True)              # human message
     stage = Column(String(40), nullable=True)          # pipeline stage, when applicable
     progress = Column(Integer, nullable=True)          # percentage reached, when applicable
+    # 'server' (unhandled), 'pipeline', 'handled' (returned to the user as a
+    # message), 'web', 'mobile'. Legacy rows are NULL and read as 'server'.
+    source = Column(String(16), nullable=True, index=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
+
+
+class Feedback(Base):
+    """First-session feedback — what a real tester thought, in their words.
+
+    Asked ONCE per account, when they first try to sign out, and always
+    skippable. A row exists for every account that has been asked, including
+    the ones that declined (`skipped=True`) — that is deliberate: "was this
+    person asked yet?" must be answerable from this table alone, so the prompt
+    can never resurface and pester someone who already said no. It also makes
+    the response RATE measurable (rows where skipped is true vs false), which a
+    table holding only submissions cannot show.
+
+    Every text field is optional. A tester who answers one question and leaves
+    the rest blank has still told us something, and refusing that submission
+    would trade real signal for tidy data.
+    """
+    __tablename__ = "feedback"
+
+    id = Column(Integer, primary_key=True)
+    # SET NULL, not CASCADE: if the account is later deleted the feedback stays.
+    # It was given about the product, not about the account, and losing the
+    # cohort's opinion because they churned is exactly backwards.
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    # Denormalised so a deleted account's response keeps its context.
+    user_email = Column(String(255), nullable=True)
+    skipped = Column(Integer, nullable=False, default=0, index=True)  # 0/1 — see class docstring
+    rating = Column(Integer, nullable=True)          # 1-5, "how is the system"
+    experience = Column(Text, nullable=True)         # how they found it
+    improvements = Column(Text, nullable=True)       # what they want changed
+    problem_solved = Column(Text, nullable=True)     # which real-world problem it solves best
+    audience = Column(Text, nullable=True)           # who / which organisations need this
+    referrals = Column(Text, nullable=True)          # who they would recommend us to
+    client = Column(String(16), nullable=True)       # 'web' | 'mobile'
     created_at = Column(DateTime, default=utcnow, nullable=False, index=True)
 
 
@@ -302,6 +393,10 @@ class BusinessEntry(Base):
     description = Column(Text, nullable=True)
     amount = Column(Float, nullable=False)
     account_class = Column(String(16), nullable=False, default="expense")
+    # Multi-currency: same semantics as PersonalEntry — `amount` stays TZS.
+    currency = Column(String(8), nullable=True, default="TZS")
+    original_amount = Column(Float, nullable=True)
+    fx_rate = Column(Float, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
     user = relationship("User", back_populates="business_entries")
@@ -371,6 +466,13 @@ def init_db() -> None:
                 "pwd_change_revoke_token":  "VARCHAR(64)",
                 "pwd_change_revoke_until":  "DATETIME",
                 "pwd_change_at":            "DATETIME",
+                # 30-day cooldown for the "start over" bulk clear — see User.
+                "last_orphan_reset_at":     "DATETIME",
+                # Feedback prompt state — see User. Previously derived from the
+                # existence of a `feedback` row, which made a skip permanent.
+                "feedback_declines":        "INTEGER NOT NULL DEFAULT 0",
+                "feedback_snooze_until":    "DATETIME",
+                "feedback_submitted_at":    "DATETIME",
             }
             _add_missing_columns(conn, inspector, "users", user_cols, is_postgres)
             # Backfill trial_started_at for any pre-existing users so they
@@ -417,8 +519,74 @@ def init_db() -> None:
                 # Epic-2 per-statement scoping — see PersonalEntry model. Older
                 # rows stay NULL and resolve to the newest statement at read time.
                 "statement_job_id": "VARCHAR(40)",
+                # Multi-currency — see PersonalEntry model. NULL currency reads
+                # as TZS; `amount` is already TZS for every legacy row.
+                "currency":        "VARCHAR(8) DEFAULT 'TZS'",
+                "original_amount": "FLOAT",
+                "fx_rate":         "FLOAT",
             }
             _add_missing_columns(conn, inspector, "personal_entries", entry_cols, is_postgres)
+
+        if "business_entries" in tables:
+            business_cols: dict[str, str] = {
+                # Multi-currency — see BusinessEntry model.
+                "currency":        "VARCHAR(8) DEFAULT 'TZS'",
+                "original_amount": "FLOAT",
+                "fx_rate":         "FLOAT",
+            }
+            _add_missing_columns(conn, inspector, "business_entries", business_cols, is_postgres)
+
+        if "error_log" in tables:
+            error_cols: dict[str, str] = {
+                # Where the row came from — see ErrorLog. Legacy rows stay NULL
+                # and the admin API reads NULL as 'server', which is what every
+                # row written before this column existed actually was.
+                "source": "VARCHAR(16)",
+            }
+            _add_missing_columns(conn, inspector, "error_log", error_cols, is_postgres)
+
+        if "feedback" in tables:
+            # create_all makes the table on a fresh deploy; this heals a
+            # deployment that already has an older shape of it.
+            feedback_cols: dict[str, str] = {
+                "user_email":     "VARCHAR(255)",
+                "skipped":        "INTEGER NOT NULL DEFAULT 0",
+                "rating":         "INTEGER",
+                "experience":     "TEXT",
+                "improvements":   "TEXT",
+                "problem_solved": "TEXT",
+                "audience":       "TEXT",
+                "referrals":      "TEXT",
+                "client":         "VARCHAR(16)",
+            }
+            _add_missing_columns(conn, inspector, "feedback", feedback_cols, is_postgres)
+
+        # Carry the OLD skip markers onto the new prompt state. The first
+        # version recorded a skip as a `feedback` row with skipped=1, and
+        # treated the existence of ANY row as "already asked" — so those
+        # accounts were locked out of the form permanently. Reading the count
+        # across gives them their declines back while leaving
+        # `feedback_snooze_until` NULL, which means every one of them becomes
+        # promptable again on its next trigger. That is the point: the people
+        # who dismissed the broken prompt are exactly the people we still need
+        # to hear from.
+        #
+        # A SET (not an increment) guarded on `= 0`, so re-running this on
+        # every boot cannot double-count, and cannot clobber a user who has
+        # since declined twice under the new rules.
+        #
+        # Runs LAST, after the block above has healed `feedback` — it reads
+        # `feedback.skipped`, which an older deployment may not have yet. The
+        # whole migration shares one transaction, so referencing a missing
+        # column here would not just skip the backfill: it would roll back
+        # every ADD COLUMN of this boot and fail startup.
+        if "users" in tables and "feedback" in tables:
+            conn.execute(text(
+                "UPDATE users SET feedback_declines = 1 "
+                "WHERE feedback_declines = 0 AND id IN ("
+                "  SELECT user_id FROM feedback"
+                "  WHERE skipped = 1 AND user_id IS NOT NULL)"
+            ))
 
 
 def get_db() -> Iterator[Session]:

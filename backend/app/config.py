@@ -70,6 +70,19 @@ class Settings(BaseSettings):
     enable_llm_repair: bool = False
     delete_pdf_after_extraction: bool = True
 
+    # LLM batch categorization for transactions the keyword matcher leaves
+    # as "Other Expenses". Runs at extraction time (one call per ~40 unknown
+    # descriptions), results cached forever in CategoryCache. Degrades
+    # silently to keyword-only when no LLM key is configured.
+    enable_llm_categorization: bool = True
+
+    # Hard cap on OCR'd pages per document. At ~40s/page a 150-page scan keeps
+    # one of the two extraction workers busy for ~100 minutes — the ceiling
+    # bounds worst-case occupancy while comfortably allowing 100-page
+    # statements. Per-page heartbeats keep long jobs alive under the 600s
+    # orphan-recovery window.
+    ocr_max_pages: int = 150
+
     # Maximum wall-clock seconds the PDF-unlock brute-forcer is allowed to
     # spin per request. The 6-digit numeric keyspace covers Tanzanian bank
     # statements at ~3 600 attempts/sec/core × 11 workers ≈ full sweep in
